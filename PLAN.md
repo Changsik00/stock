@@ -188,7 +188,8 @@ frontend/
     api.js                fetch 래퍼 (기존 확장)
     App.jsx               탭 네비게이션 (시장 / 종목 / ETF / 매크로)
     pages/
-      MarketPage.jsx      코스피·코스닥·선물: 지수 라인 + 투자자별 순매수 막대(스택) + 누적 라인
+      MarketPage.jsx      코스피·코스닥·선물: 지수 **캔들 + 거래량 바**(lightweight-charts, CandleChart 재사용)
+                          + 투자자별 순매수 막대(스택) + 누적 라인
                           + 등락 종목수(장중 실시간 + 일별) + 예탁금·신용융자·대차잔고 보조 차트
       StockPage.jsx       종목 검색 → 캔들 + 수급 오버레이 + WhaleGauge + 시그널 목록
       EtfPage.jsx         ETF 테이블(수익률·NAV·괴리율) → 클릭 시 StockPage 재사용
@@ -260,6 +261,8 @@ TimescaleDB 전환점: `stock_ohlcv`·`stock_flow`가 수백만 행을 넘거나
   토큰 24시간 자동 갱신 로직
 - **차트**: 캔들·거래량·오버레이는 `lightweight-charts`(무료, TradingView제)가 recharts보다
   적합. 수급 막대/매크로 라인차트는 기존 recharts 유지
+- **색상 규칙 (한국 증시 관행, 전 차트 공통)**: 전일 대비 **상승=빨간색, 하락=파란색**.
+  캔들 양봉/음봉, 거래량 바, 등락 종목수, 순매수(+/-) 막대 등 등락을 표현하는 모든 요소에 적용
 
 ---
 
@@ -351,3 +354,4 @@ TimescaleDB 전환점: `stock_ohlcv`·`stock_flow`가 수백만 행을 넘거나
 | ka20001 등락 종목수 | REST 응답에 구 opt20001의 상승/하락 종목수 필드가 있는지 미확정 | 1.5-1 probe로 실측 확정, 없으면 pykrx 카운트(일별)/네이버 파싱(장중) 대안 |
 | 두바이유 일별 | 무료 공식 API 없음 | WTI/브렌트만 우선, 두바이는 월별 or 오피넷 파싱 |
 | 수급 데이터 시점 | 확정치는 장마감 후 | 장중에는 잠정치(`ka10063`)임을 UI에 명시 |
+| 지수 시세 소스 | KRX Open API(`idx/kospi_dd_trd` 등)가 **403 Forbidden**(서비스 이용 승인 미비, 2026-07 확인)이라 `/api/markets/{market}/series`가 라이브 500을 반환. `index_ohlcv`를 배치로 채워 라우터는 DB만 읽도록 전환(collectors/ohlcv.py) — 코스피/코스닥은 yfinance(`^KS11`/`^KQ11`) 1차 + 네이버 fchart(`fchart.stock.naver.com/siseJson.naver`, 비공식) 폴백, 코스피200선물(k200_futures)은 yfinance에 심볼이 없어 네이버 fchart(symbol=FUT)만 사용. 두 소스 모두 거래대금(원화 금액)을 제공하지 않아 `index_ohlcv.value`는 당분간 NULL(거래대금 차트는 0으로 표시) | 임시 조치 — 추후 키움 차트 TR(OHLCV+거래대금)로 교체 예정. KRX Open API 승인이 나면 되돌릴 수 있도록 `krx_client.py`/`services.get_index_series`·`get_futures_series`는 그대로 보존 |
