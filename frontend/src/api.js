@@ -94,17 +94,30 @@ export async function fetchFlowRank(investor, side = 'buy', days = 7) {
   return getJson(`/api/markets/flow-rank?investor=${investor}&side=${side}&days=${days}`)
 }
 
-// GET /api/markets/flow-path?days=N&limit=M -> { date, days, rows: [{code, name,
-// direct_net, via_etf_net, top_etfs}] } (PLAN.md §4.5/§6 3.5-3) — ETF look-through
-// 상위: 백엔드가 days 창 안의 가장 최근 flow_path.date 하나만 골라 via_etf_net
-// 내림차순으로 반환한다(flow-rank처럼 날짜별로 묶지 않음 — 화면도 항상 최신 1개
-// 날짜만 보여줌).
-export async function fetchFlowPath(days = 7, limit = 30) {
+// GET /api/markets/flow-path?days=N&limit=M&direction=in|out -> { date, days,
+// direction, rows: [{code, name, direct_net, via_etf_net, top_etfs}] } (PLAN.md
+// §4.5/§6 3.5-3, direction 확장은 §4.6 3.6-4) — ETF look-through 상위: 백엔드가 days
+// 창 안의 가장 최근 flow_path.date 하나만 골라 반환한다(flow-rank처럼 날짜별로 묶지
+// 않음 — 화면도 항상 최신 1개 날짜만 보여줌). direction="in"(기본값)은 via_etf_net
+// 내림차순 유입 상위, "out"은 via_etf_net<0인 유출 상위(오름차순, 가장 큰 유출이
+// 1등).
+export async function fetchFlowPath(days = 7, limit = 30, direction = 'in') {
   if (STATIC_DATA) {
-    const snapshot = await fetchStaticJson('data/flow-path.json')
+    const snapshot = await fetchStaticJson(direction === 'out' ? 'data/flow-path-out.json' : 'data/flow-path.json')
     return snapshot
   }
-  return getJson(`/api/markets/flow-path?days=${days}&limit=${limit}`)
+  return getJson(`/api/markets/flow-path?days=${days}&limit=${limit}&direction=${direction}`)
+}
+
+// GET /api/markets/sentiment -> { score, approx, components: { breadth, flow, etf } }
+// (PLAN.md §4.6 3.6-4) — 시장 종합 매수세/매도세 게이지(-100~+100). 요소별 score/
+// weight/date와 원재료(adv/dec/flat, buy_sum/sell_sum, net_inflow_sum/aum_sum)를
+// components에 그대로 담아 내려준다(백엔드 routers/flow_rank.py market_sentiment 참고).
+export async function fetchSentiment() {
+  if (STATIC_DATA) {
+    return fetchStaticJson('data/sentiment.json')
+  }
+  return getJson('/api/markets/sentiment')
 }
 
 // GET /api/markets/value-rank?market=all&days=N -> { market, date, days, rows: [{rank,

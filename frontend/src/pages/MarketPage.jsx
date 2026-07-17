@@ -7,6 +7,7 @@ import {
   fetchGroups,
   fetchMacroSeries,
   fetchMarketSeries,
+  fetchSentiment,
   fetchValueRank,
 } from '../api'
 import BreadthBadge from '../components/BreadthBadge'
@@ -17,6 +18,7 @@ import FlowRankTable from '../components/FlowRankTable'
 import GroupTreemap from '../components/GroupTreemap'
 import MarketFundChart from '../components/MarketFundChart'
 import PeriodPicker from '../components/PeriodPicker'
+import SentimentGauge from '../components/SentimentGauge'
 import ValueRankTable from '../components/ValueRankTable'
 import { MARKET_FUND_IDS, MARKETS } from '../constants'
 
@@ -61,6 +63,12 @@ export default function MarketPage() {
   const [flowPathRows, setFlowPathRows] = useState([])
   const [flowPathError, setFlowPathError] = useState(null)
   const [flowPathLoading, setFlowPathLoading] = useState(false)
+  const [flowPathDirection, setFlowPathDirection] = useState('in')
+  // 시장 종합 매수세/매도세 게이지(PLAN.md §4.6 3.6-4) — GET /api/markets/sentiment
+  // 응답을 그대로 담는다({ score, approx, components }).
+  const [sentiment, setSentiment] = useState(null)
+  const [sentimentError, setSentimentError] = useState(null)
+  const [sentimentLoading, setSentimentLoading] = useState(false)
   // 등락 종목수(breadth) 배지 — 시장 탭과 무관하게 코스피/코스닥을 함께 보여준다.
   // breadth = { kospi, kosdaq, live: bool, date: string|null } (camelCase 변환 완료 상태)
   const [breadth, setBreadth] = useState(null)
@@ -140,13 +148,14 @@ export default function MarketPage() {
     }
   }, [flowRankInvestor, flowRankSide])
 
-  // ETF 경유 수급 상위(flow_path)도 시장 탭과 무관하게 페이지 마운트 시 한 번만
-  // 불러온다 — 백엔드가 이미 최신 날짜 하나만 골라 상위 목록을 반환한다 (PLAN.md §4.5).
+  // ETF 경유 수급 상위(flow_path)는 시장 탭과 무관하게 유입/유출 토글에만 반응한다 —
+  // 백엔드가 이미 최신 날짜 하나만 골라 상위 목록을 반환한다 (PLAN.md §4.5, 유출
+  // 토글은 §4.6 3.6-4).
   useEffect(() => {
     let cancelled = false
     setFlowPathLoading(true)
     setFlowPathError(null)
-    fetchFlowPath(FLOW_RANK_LOOKBACK_DAYS, 30)
+    fetchFlowPath(FLOW_RANK_LOOKBACK_DAYS, 30, flowPathDirection)
       .then((body) => {
         if (!cancelled) {
           setFlowPathDate(body.date)
@@ -158,6 +167,27 @@ export default function MarketPage() {
       })
       .finally(() => {
         if (!cancelled) setFlowPathLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [flowPathDirection])
+
+  // 시장 종합 매수세/매도세 게이지 — 페이지 마운트 시 한 번만 불러온다(시장 탭과
+  // 무관, flow-path와 동일 패턴) (PLAN.md §4.6 3.6-4).
+  useEffect(() => {
+    let cancelled = false
+    setSentimentLoading(true)
+    setSentimentError(null)
+    fetchSentiment()
+      .then((body) => {
+        if (!cancelled) setSentiment(body)
+      })
+      .catch((e) => {
+        if (!cancelled) setSentimentError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setSentimentLoading(false)
       })
     return () => {
       cancelled = true
@@ -342,6 +372,16 @@ export default function MarketPage() {
         </div>
       )}
 
+      <div className="breadth-panel">
+        <SentimentGauge
+          loading={sentimentLoading}
+          error={sentimentError}
+          score={sentiment?.score ?? null}
+          approx={sentiment?.approx ?? true}
+          components={sentiment?.components ?? null}
+        />
+      </div>
+
       {loading && <div className="state">불러오는 중…</div>}
       {error && <div className="state error">{error}</div>}
       {!loading && !error && prices && prices.length === 0 && (
@@ -419,6 +459,8 @@ export default function MarketPage() {
         error={flowPathError}
         date={flowPathDate}
         rows={flowPathRows}
+        direction={flowPathDirection}
+        onDirectionChange={setFlowPathDirection}
       />
 
       <div className="section-title">시장 자금·대차</div>

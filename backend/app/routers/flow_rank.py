@@ -1,6 +1,8 @@
 """GET /api/markets/flow-rank — 투자자별 순매수/순매도 상위 종목 스냅샷 (PLAN.md §4.5/§6 3.5-2b).
-GET /api/markets/flow-path — ETF look-through 수급 경로 분해 상위 (PLAN.md §4.5/§6 3.5-3).
+GET /api/markets/flow-path — ETF look-through 수급 경로 분해 상위, direction=in(유입)/
+out(유출) 토글 (PLAN.md §4.5/§6 3.5-3, 유출 확장은 §4.6 3.6-4).
 GET /api/markets/value-rank — 거래대금 상위 종목("돈이 모이는 곳") 스냅샷 (PLAN.md §4.6 3.6-1).
+GET /api/markets/sentiment — 시장 종합 매수세/매도세 게이지(-100~+100) (PLAN.md §4.6 3.6-4).
 
 DB 전용 조회다(§5.4 "DB 캐싱 우선") — collectors/flow_rank.py·collectors/flow_path.py가
 미리 적재해 둔 테이블을 그대로 읽어 반환할 뿐, 이 라우터에서 네이버를 직접 호출하지
@@ -16,8 +18,16 @@ flow-rank는 날짜별로 묶어 반환한다(최근 날짜 먼저) — flow_ran
 flow-path는 side 파라미터가 없다 — collectors/flow_path.py가 direct_net을 계산할 때
 이미 side='buy'(순매수) 행만 쓰도록 고정했으므로(순매도까지 합치면 "직접 순매수"의
 의미가 사라짐) 이 핸들러 자체는 변경하지 않는다. days 창 안에서 가장 최근 날짜
-하나만 골라(flow_rank와 달리 날짜별 비교 UI가 아직 없음) via_etf_net 내림차순 상위
-limit개를 반환한다.
+하나만 골라(flow_rank와 달리 날짜별 비교 UI가 아직 없음) via_etf_net 정렬 상위
+limit개를 반환한다 — direction="in"(기본값, 하위호환)이면 기존 그대로 내림차순
+(유입 상위), direction="out"이면 via_etf_net < 0인 행만 오름차순(가장 큰 음수=가장
+큰 유출이 1등)으로 정렬한다(§4.6 3.6-4 "ETF 경유 유출 상위 병기").
+
+sentiment는 market_breadth(등락 비율)·flow_rank(외인+기관 순매수/순매도 상위 합)·
+etf_stats(ETF 순유입 합 ÷ AUM 합) 세 요소를 app/sentiment.py의 순수 함수로 가중평균한
+근사 게이지다(§4.6 한계: 상위 랭킹·ETF 유니버스 기반 근사치, 시장 전체 정밀값 아님).
+세 요소는 서로 다른 테이블이라 "가장 최근 가용 날짜"가 어긋날 수 있다 — 그대로 두고
+응답에 요소별 date를 그대로 노출해 투명하게 밝힌다.
 """
 
 from __future__ import annotations
@@ -29,13 +39,17 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
-from ..models import FlowPath, FlowRank, Stock, ValueRank
+from ..models import EtfStat, FlowPath, FlowRank, MarketBreadth, Stock, ValueRank
+from ..sentiment import breadth_score, compute_sentiment, etf_score, flow_score
 
 router = APIRouter(tags=["markets"])
 
 INVESTORS = {"foreign", "institution"}
 SIDES = {"buy", "sell"}
 MARKET_FILTERS = {"all", "kospi", "kosdaq"}
+FLOW_PATH_DIRECTIONS = {"in", "out"}
+# sentiment 요소별 원재료를 찾을 때 "가장 최근 가용 날짜"를 얼마나 과거까지 훑을지.
+SENTIMENT_LOOKBACK_DAYS = 30
 
 
 @router.get("/api/markets/flow-rank")
@@ -88,11 +102,19 @@ async def flow_rank_series(
 async def flow_path_top(
     days: int = Query(7, ge=1, le=90, description="이 창 안의 가장 최근 flow_path.date만 사용"),
     limit: int = Query(30, ge=1, le=100),
+    direction: str = Query(
+        "in", description="in(ETF 경유 유입 상위, 기본값·하위호환) 또는 out(유출 상위)"
+    ),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """via_etf_net(ETF 경유 유입) 상위 종목 — collectors/flow_path.py가 적재한
-    flow_path 중 days 창 안의 가장 최근 날짜 하나를 골라 via_etf_net 내림차순
-    limit개를 반환한다. 날짜가 하나도 없으면(배치 미실행) rows는 빈 배열.
+    """via_etf_net(ETF 경유 유입/유출) 상위 종목 — collectors/flow_path.py가 적재한
+    flow_path 중 days 창 안의 가장 최근 날짜 하나를 골라 반환한다. 날짜가 하나도
+    없으면(배치 미실행) rows는 빈 배열.
+
+    direction="in"(기본값)은 기존 동작 그대로다(하위호환 — 이 분기는 절대 바꾸지
+    않는다): via_etf_net 내림차순 상위 limit개. direction="out"(§4.6 3.6-4)은
+    via_etf_net < 0인 행만 오름차순(가장 큰 음수=가장 큰 유출이 1등)으로 정렬해
+    상위 limit개를 반환한다.
 
     이름 해석 순서: (1) stocks 테이블(현재는 ETF만 채워져 있음, Phase 2-2 종목마스터
     수집 전) -> (2) flow_rank(날짜 무관 가장 최근 관측치 — 개별주 이름은 여기서만
@@ -100,20 +122,31 @@ async def flow_path_top(
     없으면 code 그대로. top_etfs는 collectors/flow_path.py가 이미 상위 5개로 잘라
     저장해 두었으므로 여기서는 그대로 내려준다.
     """
+    if direction not in FLOW_PATH_DIRECTIONS:
+        raise HTTPException(400, f"direction must be one of {sorted(FLOW_PATH_DIRECTIONS)}")
+
     since = dt.date.today() - dt.timedelta(days=days)
     latest_date = (
         await session.execute(select(func.max(FlowPath.date)).where(FlowPath.date >= since))
     ).scalar()
 
     if latest_date is None:
-        return {"date": None, "days": days, "rows": []}
+        return {"date": None, "days": days, "direction": direction, "rows": []}
 
-    stmt = (
-        select(FlowPath)
-        .where(FlowPath.date == latest_date)
-        .order_by(FlowPath.via_etf_net.desc())
-        .limit(limit)
-    )
+    if direction == "in":
+        stmt = (
+            select(FlowPath)
+            .where(FlowPath.date == latest_date)
+            .order_by(FlowPath.via_etf_net.desc())
+            .limit(limit)
+        )
+    else:
+        stmt = (
+            select(FlowPath)
+            .where(FlowPath.date == latest_date, FlowPath.via_etf_net < 0)
+            .order_by(FlowPath.via_etf_net.asc())
+            .limit(limit)
+        )
     rows = (await session.execute(stmt)).scalars().all()
 
     codes = [r.code for r in rows]
@@ -141,6 +174,7 @@ async def flow_path_top(
     return {
         "date": latest_date.isoformat(),
         "days": days,
+        "direction": direction,
         "rows": [
             {
                 "code": r.code,
@@ -218,4 +252,155 @@ async def value_rank_top(
             }
             for rank, r in row_ranks
         ],
+    }
+
+
+async def _load_breadth_component(session: AsyncSession) -> dict:
+    since = dt.date.today() - dt.timedelta(days=SENTIMENT_LOOKBACK_DAYS)
+    latest_date = (
+        await session.execute(
+            select(func.max(MarketBreadth.date)).where(MarketBreadth.date >= since)
+        )
+    ).scalar()
+
+    if latest_date is None:
+        return {"score": None, "date": None, "adv": 0, "dec": 0, "flat": 0}
+
+    rows = (
+        await session.execute(select(MarketBreadth).where(MarketBreadth.date == latest_date))
+    ).scalars().all()
+    adv = sum(r.adv or 0 for r in rows)
+    dec = sum(r.dec or 0 for r in rows)
+    flat = sum(r.flat or 0 for r in rows)
+
+    return {
+        "score": breadth_score(adv, dec, flat),
+        "date": latest_date.isoformat(),
+        "adv": adv,
+        "dec": dec,
+        "flat": flat,
+    }
+
+
+async def _load_flow_component(session: AsyncSession) -> dict:
+    since = dt.date.today() - dt.timedelta(days=SENTIMENT_LOOKBACK_DAYS)
+    latest_date = (
+        await session.execute(
+            select(func.max(FlowRank.date)).where(
+                FlowRank.investor.in_(INVESTORS), FlowRank.date >= since
+            )
+        )
+    ).scalar()
+
+    if latest_date is None:
+        return {"score": None, "date": None, "buy_sum": 0, "sell_sum": 0}
+
+    # Postgres SUM(bigint) -> numeric(Decimal), not bigint — cast back to int so this
+    # mixes cleanly with app.sentiment's float arithmetic (compute_sentiment does
+    # raw_score * weight, and Decimal * float raises TypeError).
+    buy_sum = int(
+        (
+            await session.execute(
+                select(func.sum(FlowRank.net_value)).where(
+                    FlowRank.date == latest_date,
+                    FlowRank.investor.in_(INVESTORS),
+                    FlowRank.side == "buy",
+                )
+            )
+        ).scalar()
+        or 0
+    )
+    sell_sum = int(
+        (
+            await session.execute(
+                select(func.sum(FlowRank.net_value)).where(
+                    FlowRank.date == latest_date,
+                    FlowRank.investor.in_(INVESTORS),
+                    FlowRank.side == "sell",
+                )
+            )
+        ).scalar()
+        or 0
+    )
+
+    return {
+        "score": flow_score(buy_sum, sell_sum),
+        "date": latest_date.isoformat(),
+        "buy_sum": buy_sum,
+        "sell_sum": sell_sum,
+    }
+
+
+async def _load_etf_component(session: AsyncSession) -> dict:
+    since = dt.date.today() - dt.timedelta(days=SENTIMENT_LOOKBACK_DAYS)
+    latest_date = (
+        await session.execute(
+            select(func.max(EtfStat.date)).where(
+                EtfStat.net_inflow.isnot(None), EtfStat.date >= since
+            )
+        )
+    ).scalar()
+
+    if latest_date is None:
+        return {"score": None, "date": None, "net_inflow_sum": 0, "aum_sum": 0}
+
+    # (see buy_sum/sell_sum comment above — same Postgres numeric->Decimal cast issue)
+    net_inflow_sum = int(
+        (
+            await session.execute(
+                select(func.sum(EtfStat.net_inflow)).where(
+                    EtfStat.date == latest_date, EtfStat.net_inflow.isnot(None)
+                )
+            )
+        ).scalar()
+        or 0
+    )
+    aum_sum = int(
+        (
+            await session.execute(
+                select(func.sum(EtfStat.aum)).where(
+                    EtfStat.date == latest_date, EtfStat.aum.isnot(None)
+                )
+            )
+        ).scalar()
+        or 0
+    )
+
+    return {
+        "score": etf_score(net_inflow_sum, aum_sum),
+        "date": latest_date.isoformat(),
+        "net_inflow_sum": net_inflow_sum,
+        "aum_sum": aum_sum,
+    }
+
+
+@router.get("/api/markets/sentiment")
+async def market_sentiment(session: AsyncSession = Depends(get_session)) -> dict:
+    """시장 종합 매수세/매도세 게이지(-100~+100) (PLAN.md §4.6 3.6-4).
+
+    breadth(market_breadth 등락 비율)·flow(flow_rank 외인+기관 순매수/순매도 상위 합)·
+    etf(etf_stats 순유입 합 ÷ AUM 합) 세 요소를 app/sentiment.py의 순수 함수로 가중평균
+    한다. 각 요소는 서로 다른 테이블이라 "가장 최근 가용 날짜"를 독립적으로 찾으므로
+    날짜가 어긋날 수 있다 — 그대로 두고 components[*].date에 그대로 노출한다(투명성).
+    요소 하나라도 데이터가 없으면(None) 나머지 요소로 가중치를 재정규화한다
+    (compute_sentiment 참고). 셋 다 없으면 score도 None.
+
+    approx=True는 항상 고정값이다 — 이 프로젝트의 flow/etf 요소는 상위 랭킹·ETF
+    유니버스 기반 근사치이지 시장 전체 정밀값이 아니다(§4.6 한계 절, 정밀값은 향후
+    KRX/KIS market_flow 연동 후 대체 예정).
+    """
+    breadth = await _load_breadth_component(session)
+    flow = await _load_flow_component(session)
+    etf = await _load_etf_component(session)
+
+    score, weights = compute_sentiment(breadth["score"], flow["score"], etf["score"])
+
+    return {
+        "score": score,
+        "approx": True,
+        "components": {
+            "breadth": {"weight": weights["breadth"], **breadth},
+            "flow": {"weight": weights["flow"], **flow},
+            "etf": {"weight": weights["etf"], **etf},
+        },
     }
