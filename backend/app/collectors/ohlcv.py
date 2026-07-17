@@ -3,11 +3,25 @@
 KRX Open API(data-dbg.krx.co.kr)가 403(서비스 승인 미비, 2026-07 확인)이라 지수
 일봉 소스를 이 배치로 교체했다:
 
-1. **kospi/kosdaq**: yfinance(``^KS11``/``^KQ11``) 1차 — clients/commodities.py와
-   동일한 이유로 이미 의존성이 있고 무료/무인증. 실패하면(429 등)
-   clients/naver_index.py(네이버 fchart)로 폴백한다.
-2. **k200_futures**: yfinance에 코스피200 선물 심볼이 없어 clients/naver_index.py만
-   사용한다.
+1. **kospi/kosdaq/k200_futures 공통 1차 소스: clients/naver_index.py(네이버 fchart
+   siseJson)**. 2026-07 조사 결과 yfinance(``^KQ11``)의 코스닥 거래량이 최근
+   2개월을 제외한 전체 기간에서 800~1,300 수준의 쓰레기 값이었던 반면(코스피
+   ``^KS11``은 정상), 네이버는 3개 시장 모두 전 기간 일관된 거래량을 반환해 세 시장
+   모두 네이버로 통일했다(k200_futures는 애초에 yfinance에 심볼이 없어 네이버만
+   썼다).
+2. **yfinance는 폴백**: 네이버가 실패/빈 응답이면 kospi/kosdaq만 yfinance(``^KS11``/
+   ``^KQ11``)로 재시도한다(무료/무인증이라 이미 의존성 보유). k200_futures는
+   yfinance에 대응 심볼이 없어 폴백 없이 실패 처리한다. 폴백이 실제로 쓰인
+   날에는 collect_log.message에 어떤 시장이 어떤 소스로 대체됐는지 남긴다
+   (collect_ohlcv가 (rows, message) 튜플을 반환 -> collectors/base.py 참고).
+
+**volume 저장 단위**: 네이버 fchart와 yfinance(정상 구간)의 raw 정수값이 같은
+스케일임을 실측으로 확인했다(예: 2024-07 코스닥 62만~78만이 양쪽 소스에서 동일하게
+나옴) — 그래서 변환 없이 각 소스가 반환한 정수를 그대로 저장한다. 단, 과거에
+kospi/kosdaq이 yfinance 1차로 적재되며 코스닥 구간 상당수가 위 쓰레기 스케일(800~
+1,300)로 섞여 있었으므로, 이 변경과 함께 3년 전체를 네이버로 재백필해 덮어썼다
+(scripts/backfill_index_ohlcv.py, 2026-07-17) — 부분 upsert만으로는 스케일이 섞인
+과거 행이 남을 수 있어 전체 기간을 다시 채워야 했다.
 
 거래대금(value, 원화)은 두 소스 모두 제공하지 않아 NULL로 남는다 — 추후 키움 차트
 TR로 교체되면 채워질 예정(PLAN.md §7 리스크 참고).
@@ -85,23 +99,33 @@ def _fetch_yfinance(ticker: str, start: dt.date, end: dt.date) -> list[dict]:
     return out
 
 
-def fetch_market_rows(market: str, start: dt.date, end: dt.date) -> list[dict]:
+def fetch_market_rows(market: str, start: dt.date, end: dt.date) -> tuple[list[dict], str]:
     """market(kospi/kosdaq/k200_futures)의 일봉을 [start, end]로 가져온다.
+
+    네이버(clients/naver_index.py)가 1차 소스다. 실패/빈 응답이면 kospi/kosdaq만
+    yfinance로 폴백한다(k200_futures는 yfinance 심볼이 없어 폴백 불가 -> 예외 전파).
+
+    Returns ``(rows, source)`` where source is ``"naver"`` or ``"yfinance-fallback"`` —
+    호출측이 폴백 여부를 collect_log.message에 남기는 데 쓴다.
 
     Blocking(requests/yfinance) — 호출측(collect_ohlcv)이 asyncio.to_thread로 감싼다.
     """
-    ticker = YFINANCE_TICKERS.get(market)
-    if ticker is not None:
-        try:
-            rows = _fetch_yfinance(ticker, start, end)
-            if rows:
-                return rows
-            logger.warning("yfinance %s(%s) returned 0 rows — 네이버로 폴백", market, ticker)
-        except Exception as e:  # noqa: BLE001 - yfinance raises assorted errors (HTTP 429, curl_cffi, ...)
-            logger.warning("yfinance 조회 실패(%s, %s) — 네이버로 폴백합니다", market, e)
-
     time.sleep(NAVER_REQUEST_DELAY_SECONDS)
-    return naver_index.fetch_index_series(market, start, end)
+    try:
+        rows = naver_index.fetch_index_series(market, start, end)
+        if rows:
+            return rows, "naver"
+        logger.warning("네이버 %s 조회 결과 0행", market)
+    except Exception as e:  # noqa: BLE001 - naver_index raises requests errors / NaverIndexError
+        logger.warning("네이버 조회 실패(%s, %s)", market, e)
+
+    ticker = YFINANCE_TICKERS.get(market)
+    if ticker is None:
+        raise ValueError(f"네이버 조회 실패했고 {market}은 yfinance 폴백 심볼이 없습니다")
+
+    logger.warning("%s(%s) yfinance로 폴백합니다", market, ticker)
+    rows = _fetch_yfinance(ticker, start, end)
+    return rows, "yfinance-fallback"
 
 
 async def _upsert_rows(session: AsyncSession, market: str, rows: list[dict]) -> int:
@@ -133,14 +157,23 @@ async def _upsert_rows(session: AsyncSession, market: str, rows: list[dict]) -> 
     return count
 
 
-async def collect_ohlcv(session: AsyncSession, target_date: dt.date) -> int:
-    """kospi/kosdaq/k200_futures의 target_date 전후 일봉을 index_ohlcv에 upsert."""
+async def collect_ohlcv(session: AsyncSession, target_date: dt.date) -> tuple[int, str | None]:
+    """kospi/kosdaq/k200_futures의 target_date 전후 일봉을 index_ohlcv에 upsert.
+
+    Returns ``(rows, message)`` — message는 이번 실행에서 yfinance로 폴백한 시장이
+    있으면 그 목록을 담고, 전부 네이버로 성공했으면 None(collectors/base.py가
+    collect_log.message에 그대로 기록).
+    """
     start = target_date - dt.timedelta(days=LOOKBACK_DAYS)
     total = 0
+    fallbacks: list[str] = []
     for market in MARKETS:
-        rows = await asyncio.to_thread(fetch_market_rows, market, start, target_date)
+        rows, source = await asyncio.to_thread(fetch_market_rows, market, start, target_date)
         total += await _upsert_rows(session, market, rows)
-    return total
+        if source != "naver":
+            fallbacks.append(f"{market}={source}")
+    message = f"폴백 사용: {', '.join(fallbacks)}" if fallbacks else None
+    return total, message
 
 
 REGISTRY["ohlcv"] = collect_ohlcv

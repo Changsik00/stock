@@ -1,9 +1,14 @@
 """지수 일봉(코스피/코스닥/코스피200선물) 3년치 초기 적재 (PLAN.md §6, index_ohlcv).
 
-소스: collectors/ohlcv.py의 fetch_market_rows() 그대로 재사용한다 —
-kospi/kosdaq은 yfinance(^KS11/^KQ11) 1차 + 네이버(clients/naver_index.py) 폴백,
-k200_futures는 네이버만(코스피 200 선물 근월물, 심볼 FUT). KRX Open API는
-403(서비스 승인 미비, 2026-07)이라 이번 백필에서 사용하지 않는다.
+소스: collectors/ohlcv.py의 fetch_market_rows() 그대로 재사용한다 — kospi/kosdaq/
+k200_futures 모두 네이버(clients/naver_index.py) 1차, kospi/kosdaq만 실패 시
+yfinance(^KS11/^KQ11)로 폴백(k200_futures는 yfinance 심볼이 없어 폴백 없음).
+2026-07-17: 코스닥 volume이 yfinance(^KQ11)에서 최근 2개월을 제외하곤 800~1,300
+수준의 쓰레기 값이었던 게 발견되어 1차 소스를 네이버로 뒤집었다 — 이 스크립트를
+재실행하면 upsert라 기존 kospi/kosdaq 행이 네이버 값으로 전량 덮어써진다(단위가
+섞이지 않도록 부분이 아닌 전체 기간을 다시 채우는 것이 중요, ohlcv.py 모듈
+docstring 참고). KRX Open API는 403(서비스 승인 미비, 2026-07)이라 이번 백필에서
+사용하지 않는다.
 
 market당 1회 요청으로 전체 기간이 한 번에 온다(페이징 없음, 실측: kospi/kosdaq/
 k200_futures 모두 3년 요청 시 730행 내외) — market 간 0.5초 딜레이만 둔다
@@ -44,15 +49,18 @@ async def main(years: int = 3) -> None:
             if i > 0:
                 time.sleep(REQUEST_DELAY_SECONDS)
             logger.info("%s 일봉 조회: %s ~ %s", market, start, end)
-            rows = await asyncio.to_thread(fetch_market_rows, market, start, end)
+            rows, source = await asyncio.to_thread(fetch_market_rows, market, start, end)
             n = await _upsert_rows(session, market, rows)
             logger.info(
-                "%s: %d행 적재 (%s ~ %s)",
+                "%s: %d행 적재, source=%s (%s ~ %s)",
                 market,
                 n,
+                source,
                 rows[0]["date"] if rows else None,
                 rows[-1]["date"] if rows else None,
             )
+            if source != "naver":
+                logger.warning("%s: 1차 소스(네이버) 실패, %s로 폴백됨", market, source)
             total += n
 
         await session.commit()

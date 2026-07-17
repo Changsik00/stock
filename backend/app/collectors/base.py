@@ -11,6 +11,10 @@ collect_fn contract: ``async def collect_fn(session: AsyncSession, target_date: 
   — it performs its own upserts against `session` and returns the number of rows written.
   It must NOT commit/rollback the session itself; run_job owns the transaction so that a
   failed attempt can be rolled back cleanly before retrying.
+  A collect_fn may instead return ``(rows: int, message: str | None)`` when it wants to
+  leave a note in ``collect_log.message`` even on success (e.g. collectors/ohlcv.py uses
+  this to record which market fell back to its secondary source). Plain ``int`` returns
+  keep working unchanged (message stays NULL) — see run_job below.
 """
 
 from __future__ import annotations
@@ -29,7 +33,8 @@ from ..models import CollectLog
 
 logger = logging.getLogger(__name__)
 
-CollectFn = Callable[[AsyncSession, dt.date], Awaitable[int]]
+CollectResult = int | tuple[int, str | None]
+CollectFn = Callable[[AsyncSession, dt.date], Awaitable[CollectResult]]
 
 # Job registry shared by every collector module. Populated via side-effecting imports
 # (see routers/admin.py, which imports each collector module for this reason).
@@ -95,16 +100,23 @@ async def run_job(job_name: str, target_date: dt.date, collect_fn: CollectFn) ->
     """Run collect_fn with retry, upsert the outcome into collect_log, return a summary."""
     async with async_session_factory() as session:
         try:
-            rows = await _run_with_retry(collect_fn, session, target_date)
-            await _upsert_log(session, job_name, target_date, "ok", rows, None)
+            result = await _run_with_retry(collect_fn, session, target_date)
+            rows, message = result if isinstance(result, tuple) else (result, None)
+            await _upsert_log(session, job_name, target_date, "ok", rows, message)
             await session.commit()
-            logger.info("job %s ok: %d rows (%s)", job_name, rows, target_date)
-            return {
+            if message:
+                logger.info("job %s ok: %d rows (%s) — %s", job_name, rows, target_date, message)
+            else:
+                logger.info("job %s ok: %d rows (%s)", job_name, rows, target_date)
+            summary = {
                 "job": job_name,
                 "target_date": target_date.isoformat(),
                 "status": "ok",
                 "rows": rows,
             }
+            if message:
+                summary["message"] = message
+            return summary
         except Exception as e:  # noqa: BLE001 - final failure after retries exhausted
             await session.rollback()
             message = str(e)[:500]

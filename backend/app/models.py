@@ -52,6 +52,11 @@ class IndexOhlcv(Base):
     high: Mapped[float | None] = mapped_column(Numeric(18, 4))
     low: Mapped[float | None] = mapped_column(Numeric(18, 4))
     close: Mapped[float | None] = mapped_column(Numeric(18, 4))
+    # 네이버 fchart(siseJson) raw 정수값을 변환 없이 저장(collectors/ohlcv.py 참고).
+    # yfinance 폴백 값도 정상 구간에서는 같은 스케일임을 실측 확인했다 — 소스가
+    # 섞여도 단위가 어긋나지 않는다. (2026-07-17: 코스닥 volume이 yfinance
+    # 1차였을 때 대부분 기간 800~1,300 수준의 잘못된 스케일로 적재돼 있었던 문제를
+    # 네이버 1차 전환 + 전체 재백필로 해결.)
     volume: Mapped[int | None] = mapped_column(BigInteger)
     value: Mapped[int | None] = mapped_column(BigInteger)
 
