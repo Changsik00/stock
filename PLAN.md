@@ -142,6 +142,49 @@
 
 ---
 
+## 4.5 수급 경로 분석 — ETF look-through (2026-07-18 추가)
+
+**질문**: 요즘 수급이 ETF로 몰린다. (a) 오늘 순매수가 몰린 상위 종목은 무엇인가(개별주냐 ETF냐),
+(b) ETF로 들어온 돈은 결국 어떤 개별 종목을 사는 것인가, (c) 특정 종목 기준으로
+"직접 매수 + ETF 경유 매수"를 합쳐 누가(개인/외인/기관) 얼마나 사는지 — **수급의 경로**를 본다.
+
+### 방법론
+
+1. **수급 상위 랭킹**: 투자자별(외인/기관) 순매수 상위 N 종목을 일별 수집, `stocks.is_etf`로 개별주/ETF 태깅
+2. **ETF 구성 매핑**: ETF 목록 + 구성종목·비중(PDF)을 일별 적재
+3. **경로 분해(look-through)**: 종목 S의 ETF 경유 유입 ≈ Σ_E [ ETF E의 순유입 × E 내 S 비중 ]
+   - 1차 근사: ETF **유통시장 순매수 금액** × 비중 (즉시 가능, 과대추정 위험)
+   - 2차 정밀화: ETF **설정/환매(좌수 증감 × NAV)** × 비중 — 실제 실물 바스켓 유입에 근접.
+     네이버가 ETF별 누적 순유입(`cumulativeNetInflowList`)을 제공하는 것 실확인(2026-07-18) → 이걸 우선 활용
+4. **산출 화면**: 시장 탭 "수급 상위" 테이블(개별/ETF 배지) · 종목 페이지 "직접 vs ETF 경유" 스택 차트 + 기여 상위 ETF 목록 · 시장 단위 "ETF로 들어온 수급 총량 vs 직접 수급" 비교
+
+### 소스 (2026-07-18 실호출 검증)
+
+| 데이터 | 1순위 | 대안 | 검증 |
+|---|---|---|---|
+| ETF 목록·AUM·NAV | 네이버 `api/sise/etfItemList.nhn` (1,146종목, 무키) | 키움 ka40004 | ✅ 실확인 |
+| ETF 구성종목 비중 | 네이버 `m.stock.naver.com/api/stock/{code}/etfAnalysis` — **상위 10개 + 비중** | 전체 구성: KIS `ETF 구성종목시세` TR(무료 앱키) 또는 Seibro 파싱(Playwright 방식 확보) 또는 키움 ETF TR probe | ✅ top10 실확인 |
+| ETF 순유입(설정/환매 기반) | 네이버 etfAnalysis `cumulativeNetInflowList` | 좌수 증감 자체 계산(KRX/운용사) | ✅ 필드 실확인(스키마 상세 미분석) |
+| 순매수 상위 종목 | 네이버 `sise_deal_rank.naver` (외인/기관, 무키) | 키움 순위정보 TR(키 해결 후 교체 — 투자자 분류 상세) | ✅ 페이지 200 |
+| 종목별 투자자 수급(직접분) | 키움 ka10059 (Phase 2-3) | 네이버 종목 투자자별 페이지 | 키움 키 대기 |
+
+### 한계·주의
+
+- **ETF 유통시장 순매수 ≠ 구성종목 실매수**: 유통시장 손바뀜만으로는 바스켓 매수가 없고, LP가
+  선물로 헤지할 수도 있음 → 유통 순매수 기반(1차)과 순유입 기반(2차)을 **병기**하고 차이를 표시
+- 상위 10개 비중으로 시작(대형 ETF는 top10이 비중 50~60% 커버) → 전체 구성은 KIS/Seibro로 정밀화
+- 대상 ETF는 **국내주식형 거래대금 상위 ~100개**로 한정 (해외지수/채권/파생형은 look-through 제외)
+- 비중은 T-1 PDF 기준 — 리밸런싱 당일 오차 존재
+
+### 스키마 추가
+
+| 테이블 | PK | 컬럼 |
+|---|---|---|
+| `etf_holdings` | (etf_code, date, stock_code) | weight, shares — 일별 구성 스냅샷 |
+| `etf_stats` | (code, date) | nav, aum, net_inflow — 순유입 시계열 |
+| `flow_rank` | (date, investor, rank) | code, net_value, is_etf — 순매수 상위 스냅샷 |
+| `flow_path` | (code, date) | direct_net, via_etf_net, top_etfs JSONB — 배치 계산 캐시 |
+
 ## 5. 아키텍처
 
 기존 구조(FastAPI + React/recharts)를 그대로 확장한다. KRX 클라이언트는 시세용으로 유지.
@@ -328,6 +371,17 @@ DB 상시 접근이 필요한 동적 기능은 대상 밖이며 추후 실서버
 | 3-2 | whale_score | §4의 6개 시그널 가중합 → -100~+100 + 근거 JSON. 일별 배치에 편입 | 워치리스트 전 종목 일별 스코어 산출 |
 | 3-3 | 스코어 UI | WhaleGauge + 근거 배지 + 스코어 시계열 미니차트 | StockPage에 표시 |
 | 3-4 | ETF | ka40004 목록 + EtfPage (수익률/NAV/괴리율 테이블 → 상세는 StockPage 재사용) | ETF 목록→차트 동작 |
+
+### Phase 3.5 — 수급 경로 분석: ETF look-through (§4.5, 2026-07-18 추가)
+
+무키 소스(네이버)로 시작 가능해 **Phase 2(키움 키)와 독립적으로 착수 가능**. 3.5-1/3.5-2는 병렬.
+
+| # | 작업 | 내용 | 완료 기준 |
+|---|---|---|---|
+| 3.5-1 | ETF 마스터·구성 수집 | 네이버 etfItemList(목록·AUM·NAV) + etfAnalysis(top10 비중·순유입) → stocks(is_etf)/etf_holdings/etf_stats 적재 (국내주식형 거래대금 상위 ~100개, 마이그레이션 포함). etfAnalysis의 net_inflow 스키마 상세 분석 포함 | 대상 ETF 구성·순유입 일별 적재, collect_log ok |
+| 3.5-2 | 순매수 상위 수집·UI | 네이버 sise_deal_rank 파싱 → flow_rank 적재 + 시장 탭 "수급 상위" 테이블 (개별/ETF 배지, 외인/기관 탭) | 일별 상위 종목 테이블 렌더 |
+| 3.5-3 | look-through 계산·UI | flow_path 배치(직접 vs ETF 경유 분해, §4.5 방법론 1·2차 병기) + 종목 상세에 스택 차트·기여 ETF 목록 (StockPage 없는 동안은 수급 상위 테이블에서 클릭 시 모달/섹션으로) | 워치리스트+상위 종목의 경로 분해 값 산출·표시 |
+| 3.5-4 | 정밀화 | 전체 구성종목(KIS `ETF 구성종목시세` TR 또는 Seibro) + 키움 순위 TR 교체 + Phase 2 연동(ka10059 직접 수급과 결합해 투자자별 경로 분해) | top10 대비 커버리지 개선 수치 보고 |
 
 ### Phase 4 — 선물 + 실시간 (선택)
 - [ ] KIS 클라이언트 + `FHPTJ04040000`으로 market_flow 소스를 pykrx→KIS 교체 (pykrx는 검증용 강등)
