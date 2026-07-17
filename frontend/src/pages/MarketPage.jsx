@@ -93,6 +93,18 @@ export default function MarketPage() {
             <span className="stat-value">{latest.date}</span>
           </div>
           <div className="stat">
+            <span className="stat-label">시가</span>
+            <span className="stat-value">{latest.open != null ? numFmt.format(latest.open) : '–'}</span>
+          </div>
+          <div className="stat">
+            <span className="stat-label">고가</span>
+            <span className="stat-value">{latest.high != null ? numFmt.format(latest.high) : '–'}</span>
+          </div>
+          <div className="stat">
+            <span className="stat-label">저가</span>
+            <span className="stat-value">{latest.low != null ? numFmt.format(latest.low) : '–'}</span>
+          </div>
+          <div className="stat">
             <span className="stat-label">종가</span>
             <span className="stat-value">{numFmt.format(latest.close)}</span>
           </div>
