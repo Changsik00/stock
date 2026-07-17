@@ -72,22 +72,26 @@ export async function fetchMarketSeries(market, days) {
   return getJson(`/api/markets/${market}/series?days=${days}`)
 }
 
-// GET /api/markets/flow-rank?investor=foreign&days=N -> { investor, days, dates: [{date, rows}] }
-// (PLAN.md §4.5) — dates는 최근 날짜가 먼저 온다. flow_rank는 소스 제약상(백엔드
-// collectors/flow_rank.py 참고) 배치를 반복 실행한 날짜만 누적되므로, days는 "정확히
-// N개 날짜"가 아니라 "N일 이내에 존재하는 날짜만" 필터한다 — 정적 스냅샷도 동일하게
-// cutoff 필터를 적용해 라이브 API와 동작을 맞춘다.
-export async function fetchFlowRank(investor, days = 7) {
+// GET /api/markets/flow-rank?investor=foreign&side=buy&days=N ->
+// { investor, side, days, dates: [{date, rows}] } (PLAN.md §4.5/§6 3.5-2b) — dates는
+// 최근 날짜가 먼저 온다. flow_rank는 소스 제약상(백엔드 collectors/flow_rank.py 참고)
+// 배치를 반복 실행한 날짜만 누적되므로, days는 "정확히 N개 날짜"가 아니라 "N일 이내에
+// 존재하는 날짜만" 필터한다 — 정적 스냅샷도 동일하게 cutoff 필터를 적용해 라이브
+// API와 동작을 맞춘다. side=buy가 기본값(하위호환) — 정적 스냅샷 파일명은 buy일 때
+// 접미사 없이 기존 이름을 그대로 쓴다(export_static.py와 짝).
+export async function fetchFlowRank(investor, side = 'buy', days = 7) {
   if (STATIC_DATA) {
-    const snapshot = await fetchStaticJson(`data/flow-rank-${investor}.json`)
+    const suffix = side === 'buy' ? '' : `-${side}`
+    const snapshot = await fetchStaticJson(`data/flow-rank-${investor}${suffix}.json`)
     const cutoff = isoCutoffDate(days)
     return {
       investor,
+      side,
       days,
       dates: (snapshot.dates || []).filter((d) => d.date >= cutoff),
     }
   }
-  return getJson(`/api/markets/flow-rank?investor=${investor}&days=${days}`)
+  return getJson(`/api/markets/flow-rank?investor=${investor}&side=${side}&days=${days}`)
 }
 
 // GET /api/markets/flow-path?days=N&limit=M -> { date, days, rows: [{code, name,

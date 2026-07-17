@@ -1,4 +1,4 @@
-"""GET /api/markets/flow-rank — 투자자별 순매수 상위 종목 스냅샷 (PLAN.md §4.5).
+"""GET /api/markets/flow-rank — 투자자별 순매수/순매도 상위 종목 스냅샷 (PLAN.md §4.5/§6 3.5-2b).
 GET /api/markets/flow-path — ETF look-through 수급 경로 분해 상위 (PLAN.md §4.5/§6 3.5-3).
 
 DB 전용 조회다(§5.4 "DB 캐싱 우선") — collectors/flow_rank.py·collectors/flow_path.py가
@@ -7,10 +7,16 @@ DB 전용 조회다(§5.4 "DB 캐싱 우선") — collectors/flow_rank.py·colle
 
 flow-rank는 날짜별로 묶어 반환한다(최근 날짜 먼저) — flow_rank는 소스 제약상
 (naver_rank.py docstring 참고) 하루 배치당 최근 2거래일만 채워지므로, days로 조회
-가능한 날짜 수는 실제로는 배치를 며칠 반복 실행한 누적分만큼이다.
+가능한 날짜 수는 실제로는 배치를 며칠 반복 실행한 누적分만큼이다. side 파라미터
+(buy/sell, 기본 buy)로 순매수/순매도 랭킹을 고른다 — 기본값이 buy라 side를 안 주는
+기존 호출자는 그대로 동작한다(하위호환). 각 row의 net_value/quantity는 항상 양수
+(크기)이고 어느 방향인지는 side로만 구분한다(models.py FlowRank docstring 참고).
 
-flow-path는 days 창 안에서 가장 최근 날짜 하나만 골라(flow_rank와 달리 날짜별
-비교 UI가 아직 없음) via_etf_net 내림차순 상위 limit개를 반환한다.
+flow-path는 side 파라미터가 없다 — collectors/flow_path.py가 direct_net을 계산할 때
+이미 side='buy'(순매수) 행만 쓰도록 고정했으므로(순매도까지 합치면 "직접 순매수"의
+의미가 사라짐) 이 핸들러 자체는 변경하지 않는다. days 창 안에서 가장 최근 날짜
+하나만 골라(flow_rank와 달리 날짜별 비교 UI가 아직 없음) via_etf_net 내림차순 상위
+limit개를 반환한다.
 """
 
 from __future__ import annotations
@@ -27,21 +33,25 @@ from ..models import FlowPath, FlowRank, Stock
 router = APIRouter(tags=["markets"])
 
 INVESTORS = {"foreign", "institution"}
+SIDES = {"buy", "sell"}
 
 
 @router.get("/api/markets/flow-rank")
 async def flow_rank_series(
     investor: str = Query("foreign", description="foreign 또는 institution"),
+    side: str = Query("buy", description="buy(순매수) 또는 sell(순매도) — 기본 buy로 하위호환 유지"),
     days: int = Query(1, ge=1, le=30),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     if investor not in INVESTORS:
         raise HTTPException(400, f"investor must be one of {sorted(INVESTORS)}")
+    if side not in SIDES:
+        raise HTTPException(400, f"side must be one of {sorted(SIDES)}")
 
     since = dt.date.today() - dt.timedelta(days=days)
     stmt = (
         select(FlowRank)
-        .where(FlowRank.investor == investor, FlowRank.date >= since)
+        .where(FlowRank.investor == investor, FlowRank.side == side, FlowRank.date >= since)
         .order_by(FlowRank.date.desc(), FlowRank.rank.asc())
     )
     rows = (await session.execute(stmt)).scalars().all()
@@ -55,12 +65,15 @@ async def flow_rank_series(
                 "code": r.code,
                 "name": r.name,
                 "net_value": r.net_value,
+                "quantity": r.quantity,
+                "turnover": float(r.turnover) if r.turnover is not None else None,
                 "is_etf": r.is_etf,
             }
         )
 
     return {
         "investor": investor,
+        "side": side,
         "days": days,
         "dates": [{"date": iso, "rows": entries} for iso, entries in dates.items()],
     }

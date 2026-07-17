@@ -527,6 +527,12 @@ header h1 {
   font-weight: 500;
 }
 
+/* 회전율(turnover) — 정렬/판단 기준이 아닌 부가 지표(손바뀜 해석용)라 순매수/순매도
+   금액과 달리 중립색으로 둔다(PLAN.md §6 3.5-2b, FlowRankTable.jsx 참고). */
+.flow-rank-turnover {
+  color: var(--text-secondary);
+}
+
 .etf-badge {
   display: inline-block;
   font-size: 10px;

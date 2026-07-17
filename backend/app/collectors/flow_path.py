@@ -184,7 +184,10 @@ def compute_flow_path(
 
 
 async def _load_flow_rank_rows(session: AsyncSession, target_date: dt.date) -> list[dict]:
-    stmt = select(FlowRank).where(FlowRank.date == target_date)
+    # direct_net은 순매수 기준을 유지한다(PLAN.md §6 3.5-2b — flow_rank가 side(buy/sell)
+    # 로 확장된 뒤에도 look-through 계산은 그대로 매수 랭킹만 쓴다. side='sell' 행까지
+    # 합치면 "직접 순매수"가 아니라 "매수+매도 합계"가 돼 의미가 달라진다).
+    stmt = select(FlowRank).where(FlowRank.date == target_date, FlowRank.side == "buy")
     rows = (await session.execute(stmt)).scalars().all()
     return [
         {

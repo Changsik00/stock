@@ -30,6 +30,7 @@ export default function MarketPage() {
   const [fundError, setFundError] = useState(null)
   const [fundLoading, setFundLoading] = useState(false)
   const [flowRankInvestor, setFlowRankInvestor] = useState('foreign')
+  const [flowRankSide, setFlowRankSide] = useState('buy')
   const [flowRankDates, setFlowRankDates] = useState([])
   const [flowRankError, setFlowRankError] = useState(null)
   const [flowRankLoading, setFlowRankLoading] = useState(false)
@@ -81,13 +82,14 @@ export default function MarketPage() {
     }
   }, [days])
 
-  // 수급 상위(flow_rank)는 시장 탭(코스피/코스닥/선물)과 무관하게 외인/기관 토글에만
-  // 반응한다 — 백엔드가 이미 코스피+코스닥을 통합한 랭킹을 주기 때문 (PLAN.md §4.5).
+  // 수급 상위(flow_rank)는 시장 탭(코스피/코스닥/선물)과 무관하게 외인/기관 토글,
+  // 순매수/순매도 토글에만 반응한다 — 백엔드가 이미 코스피+코스닥을 통합한 랭킹을
+  // 주기 때문 (PLAN.md §4.5/§6 3.5-2b).
   useEffect(() => {
     let cancelled = false
     setFlowRankLoading(true)
     setFlowRankError(null)
-    fetchFlowRank(flowRankInvestor, FLOW_RANK_LOOKBACK_DAYS)
+    fetchFlowRank(flowRankInvestor, flowRankSide, FLOW_RANK_LOOKBACK_DAYS)
       .then((body) => {
         if (!cancelled) setFlowRankDates(body.dates || [])
       })
@@ -100,7 +102,7 @@ export default function MarketPage() {
     return () => {
       cancelled = true
     }
-  }, [flowRankInvestor])
+  }, [flowRankInvestor, flowRankSide])
 
   // ETF 경유 수급 상위(flow_path)도 시장 탭과 무관하게 페이지 마운트 시 한 번만
   // 불러온다 — 백엔드가 이미 최신 날짜 하나만 골라 상위 목록을 반환한다 (PLAN.md §4.5).
@@ -205,6 +207,8 @@ export default function MarketPage() {
       <FlowRankTable
         investor={flowRankInvestor}
         onInvestorChange={setFlowRankInvestor}
+        side={flowRankSide}
+        onSideChange={setFlowRankSide}
         loading={flowRankLoading}
         error={flowRankError}
         dates={flowRankDates}

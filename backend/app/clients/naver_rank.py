@@ -24,6 +24,15 @@
   ``[0-9A-Za-z]+``.
 - 상위 종목 개수는 페이지당 **20개 고정**(50개 아님) — PLAN.md가 "가능하면 50"을
   희망했지만 소스가 20개까지만 제공한다.
+- **type=sell 실호출 확인(2026-07-18)**: 표 헤더가 "종목명/수량/금액/당일거래량"
+  4열이고(buy도 동일한 4열 — 마지막 "당일거래량"은 그 종목의 시장 전체 거래량이라
+  투자자 순매수/매도와 무관해 이 클라이언트는 파싱하지 않는다), **수량·금액 두 열
+  모두 마이너스 부호가 붙어 온다**(예: 대덕전자 수량 -243, 금액 -33,418 — "그
+  투자자가 243천주를 순매도해서 -33,418백만원어치 팔았다"는 뜻). 이 모듈은 소스
+  값을 그대로(부호 포함) 반환한다 — buy/sell 두 값을 **양수 크기 + side 컬럼**으로
+  통일해 저장하는 정규화는 호출자(collectors/flow_rank.py)의 책임이다(PLAN.md §6
+  3.5-2b "매도 금액을 음수가 아니라 양수+side로 통일" 결정 — 부호와 방향 컬럼을
+  동시에 두면 어느 쪽이 진실인지 헷갈리는 걸 피하기 위함).
 """
 
 from __future__ import annotations
@@ -33,7 +42,18 @@ import re
 
 import requests
 
+from .naver_etf import parse_won_string_to_million
+
 IFRAME_URL = "https://finance.naver.com/sise/sise_deal_rank_iframe.naver"
+
+# 개별 종목의 당일 거래대금·시가총액 — flow_rank.turnover(회전율 = 거래대금/시가총액)
+# 계산용. ETF는 clients/naver_etf.fetch_etf_list()가 이미 이 값들을 벌크로 주므로
+# (amount_million/aum_million) 이 엔드포인트를 쓰지 않는다 — 개별주 전용.
+# 실호출 확인(2026-07-18, 005930 기준): totalInfos 배열에 accumulatedTradingValue
+# ("11조 4,016억")·marketValue("1,490조 8,010억") 키가 한글 단위 문자열로 온다.
+# ETF에도 같은 엔드포인트가 응답하지만 marketValue가 없다(펀드라 시총 대신 NAV만
+# 제공) — 그래서 ETF는 여기서 다루지 않는다.
+STOCK_INTEGRATION_URL = "https://m.stock.naver.com/api/stock/{code}/integration"
 
 # is_etf 태깅용 — stocks.is_etf에 의존하지 않고(다른 배치가 동시에 stocks를 적재
 # 중이라 PLAN.md §4.5 지시에 따라 의존 금지) 독립적으로 조회한다. EUC-KR JSON이지만
@@ -58,8 +78,8 @@ _DATE_RE = re.compile(r'<div class="sise_guide_date">(\d{2})\.(\d{2})\.(\d{2})</
 _ROW_RE = re.compile(
     r"<a href=\"/item/main\.naver\?code=(?P<code>[0-9A-Za-z]+)\"[^>]*"
     r"title='(?P<name>[^']*)'>.*?</a>\s*</p></td>\s*"
-    r'<td class="number">(?P<qty>[\d,]+)</td>\s*'
-    r'<td class="number">(?P<amount>[\d,]+)</td>',
+    r'<td class="number">(?P<qty>-?[\d,]+)</td>\s*'
+    r'<td class="number">(?P<amount>-?[\d,]+)</td>',
     re.DOTALL,
 )
 
@@ -74,9 +94,11 @@ def fetch_deal_rank(
     """market(kospi/kosdaq) x investor(foreign/institution)의 순매수 상위 20종목을
     네이버가 제공하는 최근 2거래일 분량 그대로 반환한다.
 
-    Returns ``[{"date": dt.date, "rows": [{"code": str, "name": str, "net_value": int}, ...]},
-    ...]`` — 날짜 오름차순(오래된 날짜 먼저), 각 rows는 순위 순서(1위부터) 그대로.
-    net_value 단위는 백만 원.
+    Returns ``[{"date": dt.date, "rows": [{"code": str, "name": str, "net_value": int,
+    "quantity": int}, ...]}, ...]`` — 날짜 오름차순(오래된 날짜 먼저), 각 rows는 순위
+    순서(1위부터) 그대로. net_value 단위는 백만 원, quantity 단위는 천주 — 둘 다
+    소스가 준 부호 그대로다(type="sell"이면 음수 — 모듈 docstring 참고, 양수 정규화는
+    호출자 책임).
     """
     sosok = MARKET_SOSOK.get(market)
     if sosok is None:
@@ -114,6 +136,7 @@ def fetch_deal_rank(
                 "code": rm.group("code"),
                 "name": rm.group("name"),
                 "net_value": int(rm.group("amount").replace(",", "")),
+                "quantity": int(rm.group("qty").replace(",", "")),
             }
             for rm in _ROW_RE.finditer(segment)
         ]
@@ -130,3 +153,35 @@ def fetch_etf_codes(timeout: int = 15) -> set[str]:
     data = resp.json()
     items = data.get("result", {}).get("etfItemList", [])
     return {item["itemcode"] for item in items if item.get("itemcode")}
+
+
+def fetch_stock_market_value(code: str, timeout: int = 15) -> dict:
+    """개별 종목(ETF 아님) 1개의 당일 거래대금·시가총액을 반환한다 (flow_rank.turnover
+    계산용, 모듈 docstring의 STOCK_INTEGRATION_URL 참고).
+
+    Returns ``{"accumulated_trading_value_million": int | None,
+    "market_value_million": int | None}`` — 둘 다 백만 원 단위(parse_won_string_to_million
+    변환 후). ``totalInfos``에 해당 code가 없거나(ETF처럼 marketValue가 아예 없는
+    경우 포함) 파싱 실패("-") 시 그 필드만 None — 예외를 던지지 않는다(수백 종목을
+    순회하는 배치에서 종목 하나 실패로 전체가 죽지 않도록).
+    """
+    resp = requests.get(
+        STOCK_INTEGRATION_URL.format(code=code),
+        headers={"User-Agent": USER_AGENT},
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    values: dict[str, str] = {
+        info.get("code"): info.get("value")
+        for info in data.get("totalInfos") or []
+        if info.get("code")
+    }
+
+    return {
+        "accumulated_trading_value_million": parse_won_string_to_million(
+            values.get("accumulatedTradingValue")
+        ),
+        "market_value_million": parse_won_string_to_million(values.get("marketValue")),
+    }

@@ -185,16 +185,31 @@ class EtfStat(Base):
 
 
 class FlowRank(Base):
-    """투자자별 순매수 상위 종목 일별 스냅샷 (PLAN.md §4.5). net_value 단위 백만 원."""
+    """투자자별 순매수/순매도 상위 종목 일별 스냅샷 (PLAN.md §4.5/§6 3.5-2b).
+
+    net_value 단위 백만 원, quantity 단위 천주 — **둘 다 항상 양수(크기)로
+    저장**한다. 매도 방향은 음수 부호가 아니라 ``side='sell'``로 표현한다(부호와
+    방향 컬럼을 동시에 쓰면 "어느 쪽이 진실인지" 헷갈리는 걸 막기 위한 설계
+    결정 — collectors/flow_rank.py에서 소스가 sell에 대해 반환하는 음수 값을
+    abs()로 정규화해서 넣는다).
+
+    turnover(회전율, %) = 그 종목의 당일 거래대금 ÷ 시가총액 × 100 — 랭킹에 오른
+    투자자의 순매수/순매도 크기가 아니라 **종목 전체의 손바뀜 정도**를 나타내는
+    부가 지표다(정렬/판단 기준은 여전히 net_value). 수집 시점에 계산해 저장한다
+    (과거 시점 재현 가능 — API 조회 시점 재계산은 과거 스냅샷을 못 만든다).
+    """
 
     __tablename__ = "flow_rank"
 
     date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
     investor: Mapped[str] = mapped_column(String(30), primary_key=True)
+    side: Mapped[str] = mapped_column(String(4), primary_key=True, default="buy")
     rank: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
     code: Mapped[str] = mapped_column(String(20), nullable=False)
     name: Mapped[str | None] = mapped_column(String(100))
     net_value: Mapped[int | None] = mapped_column(BigInteger)
+    quantity: Mapped[int | None] = mapped_column(BigInteger)
+    turnover: Mapped[float | None] = mapped_column(Numeric(8, 4))
     is_etf: Mapped[bool] = mapped_column(nullable=False, default=False)
 
 

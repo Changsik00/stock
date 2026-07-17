@@ -81,11 +81,59 @@ def test_fetch_deal_rank_parses_blocks_date_ascending(monkeypatch):
 
     assert [b["date"] for b in blocks] == [dt.date(2026, 7, 15), dt.date(2026, 7, 16)]
     assert blocks[0]["rows"] == [
-        {"code": "000660", "name": "SK하이닉스", "net_value": 714008},
-        {"code": "0195S0", "name": "TIGER SK하이닉스단일종목레버리지", "net_value": 85668},
+        {"code": "000660", "name": "SK하이닉스", "net_value": 714008, "quantity": 331},
+        {
+            "code": "0195S0",
+            "name": "TIGER SK하이닉스단일종목레버리지",
+            "net_value": 85668,
+            "quantity": 5194,
+        },
     ]
     assert blocks[1]["rows"] == [
-        {"code": "252670", "name": "KODEX 200선물인버스2X", "net_value": 97456},
+        {"code": "252670", "name": "KODEX 200선물인버스2X", "net_value": 97456, "quantity": 1234},
+    ]
+
+
+SELL_BODY = """
+<div style="text-align:left;">
+	<h4 class="top_tlt"><em>외국인</em>순매도&nbsp;&nbsp;<span class="top_tlt_guide">(단위:천주, 백만원)</span></h4>
+	<div class="box_type_ms" style=" margin-top:0">
+		<div class="sise_guide_date">26.07.15</div>
+		<table cellpadding="0" cellspacing="0" class="type_1">
+			<tr>
+				<td><p class="tit"><a href="/item/main.naver?code=353200" class="tltle" target="_top" title='대덕전자'>대덕전자</a></p></td>
+				<td class="number">-243</td>
+				<td class="number">-33,418</td>
+				<td class="number">1,853,524</td>
+			</tr>
+		</table>
+	</div>
+</div>
+"""
+
+
+def test_fetch_deal_rank_sell_keeps_source_negative_sign(monkeypatch):
+    """type=sell 랭킹은 수량·금액 모두 소스가 음수로 준다 — 클라이언트는 부호를
+    그대로 반환하고(모듈 docstring), 양수+side 정규화는 collectors/flow_rank.py의
+    책임이다 (PLAN.md §6 3.5-2b 결정)."""
+    captured = {}
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        captured["params"] = params
+        return _FakeResponse(SELL_BODY)
+
+    monkeypatch.setattr(naver_rank.requests, "get", fake_get)
+
+    blocks = naver_rank.fetch_deal_rank("kospi", "foreign", type_="sell")
+
+    assert captured["params"] == {"sosok": "01", "investor_gubun": "9000", "type": "sell"}
+    assert blocks == [
+        {
+            "date": dt.date(2026, 7, 15),
+            "rows": [
+                {"code": "353200", "name": "대덕전자", "net_value": -33418, "quantity": -243},
+            ],
+        }
     ]
 
 
@@ -157,3 +205,52 @@ def test_fetch_etf_codes_extracts_itemcodes(monkeypatch):
     assert captured["url"] == naver_rank.ETF_LIST_URL
     assert captured["headers"]["User-Agent"]
     assert codes == {"069500", "360750"}
+
+
+# --- fetch_stock_market_value (m.stock.naver.com/api/stock/{code}/integration) ---
+# totalInfos 픽스처는 2026-07-18 삼성전자(005930) 실호출 응답에서 발췌.
+
+
+def test_fetch_stock_market_value_parses_totalinfos(monkeypatch):
+    captured = {}
+
+    def fake_get(url, headers=None, timeout=None):
+        captured["url"] = url
+        return _FakeJsonResponse(
+            {
+                "totalInfos": [
+                    {"code": "accumulatedTradingVolume", "key": "거래량", "value": "44,316,470"},
+                    {"code": "accumulatedTradingValue", "key": "대금", "value": "11조 4,016억"},
+                    {"code": "marketValue", "key": "시총", "value": "1,490조 8,010억"},
+                ]
+            }
+        )
+
+    monkeypatch.setattr(naver_rank.requests, "get", fake_get)
+
+    result = naver_rank.fetch_stock_market_value("005930")
+
+    assert captured["url"] == naver_rank.STOCK_INTEGRATION_URL.format(code="005930")
+    # 11조 4,016억 = 11,401,600 백만원 / 1,490조 8,010억 = 1,490,801,000 백만원
+    assert result == {
+        "accumulated_trading_value_million": 11_401_600,
+        "market_value_million": 1_490_801_000,
+    }
+
+
+def test_fetch_stock_market_value_missing_fields_are_none(monkeypatch):
+    """ETF처럼 marketValue가 없거나 값이 "-"면 그 필드만 None — 예외 없음."""
+
+    def fake_get(url, headers=None, timeout=None):
+        return _FakeJsonResponse(
+            {"totalInfos": [{"code": "accumulatedTradingValue", "key": "대금", "value": "-"}]}
+        )
+
+    monkeypatch.setattr(naver_rank.requests, "get", fake_get)
+
+    result = naver_rank.fetch_stock_market_value("069500")
+
+    assert result == {
+        "accumulated_trading_value_million": None,
+        "market_value_million": None,
+    }
