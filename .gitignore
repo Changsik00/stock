@@ -14,5 +14,9 @@ node_modules/
 dist/
 build/
 
+# GitHub Pages 정적 배포용 스냅샷 (CI가 매 배포마다 backend/scripts/export_static.py로
+# 새로 생성하는 산출물 — 리포에는 커밋하지 않는다)
+frontend/public/data/
+
 .DS_Store
 .serena/

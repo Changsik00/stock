@@ -1,0 +1,120 @@
+name: Deploy to GitHub Pages
+
+# 정적 스냅샷 배포 파이프라인 (PLAN.md 참고): Pages는 정적 호스팅이라 백엔드를 못 돌리므로,
+# 이 워크플로가 매 실행마다 (1) 임시 DB에 최근 3년치 데이터를 수집하고, (2)
+# backend/scripts/export_static.py로 정적 JSON 스냅샷을 만든 뒤, (3) 프런트를
+# VITE_STATIC_DATA=1로 빌드해 그 스냅샷을 fetch하도록 만들어 Pages에 올린다.
+# 실시간/종목 검색 등 DB에 상시 접근해야 하는 기능은 이 파이프라인 대상이 아니다.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # 평일 장마감 후 KST 18:30 = UTC 09:30
+    - cron: '30 9 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: timescale/timescaledb:latest-pg16
+        env:
+          POSTGRES_DB: stock
+          POSTGRES_USER: stock
+          POSTGRES_PASSWORD: stock
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U stock -d stock"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # pydantic-settings는 실제 환경변수를 .env 파일 값보다 우선한다(backend/app/config.py,
+      # alembic/env.py 둘 다 get_settings().database_url을 사용) — 아래에서 만드는 .env에
+      # 로컬 개발용 DATABASE_URL이 들어있더라도 이 값이 항상 이긴다. CI 서비스 DB(위 db
+      # 컨테이너, 호스트에 5432로 노출)를 명시적으로 가리킨다.
+      DATABASE_URL: postgresql+asyncpg://stock:stock@localhost:5432/stock
+    steps:
+      - uses: actions/checkout@v4
+
+      # 리포 시크릿 DOT_ENV에 .env 전체 내용(외부 API 키 등)이 들어있다. echo는 stdout에
+      # 아무 것도 남기지 않고 파일로만 리다이렉트하므로 로그에 노출되지 않는다 — 이후
+      # 어떤 스텝에서도 `cat .env`/디버그 출력을 추가하지 말 것.
+      - name: Create .env
+        run: |
+          echo "${{ secrets.DOT_ENV }}" > .env
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Run DB migrations
+        working-directory: backend
+        run: alembic upgrade head
+
+      - name: Backfill index OHLCV (3y)
+        working-directory: backend
+        run: python -m scripts.backfill_index_ohlcv 3
+
+      - name: Backfill KOFIA market fund/lending data (3y)
+        working-directory: backend
+        # 비공식 파싱 소스(freesis) — 사이트 개편 등으로 실패해도 잡 전체를 죽이지 않는다.
+        run: python -m scripts.backfill_kofia 3 || echo "::warning::backfill_kofia failed, continuing without market fund/lending snapshot data"
+
+      - name: Backfill macro data (3y)
+        working-directory: backend
+        # ECOS_API_KEY가 시크릿에 없으면 환율은 sample 키로 소량만 채워지고 실패하지 않는
+        # 것이 정상이지만(clients/ecos.py), 만일을 대비해 실패해도 계속 진행한다.
+        run: python -m scripts.backfill_macro 3 || echo "::warning::backfill_macro failed, continuing without full macro snapshot data"
+
+      - name: Export static JSON snapshot
+        working-directory: backend
+        run: python -m scripts.export_static --out-dir ../frontend/public/data
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build static site
+        working-directory: frontend
+        run: VITE_STATIC_DATA=1 npm run build -- --base=/stock/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: frontend/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
