@@ -27,6 +27,27 @@ function sizeValueOf(item, sizeBy) {
 // 하는 캔버스 기반 차트와 달리 이 컴포넌트는 그럴 필요가 없다).
 const CLAMP_PERCENT = 3
 
+// 접기(fold) 규칙 (사용자 피드백: 테마 266개를 전부 그리면 강약이 안 보인다).
+//   - |등락률| < NEUTRAL_THRESHOLD_PERCENT% → "보합권" 한 박스로 합친다.
+//   - 나머지 중 상승/하락 각각 상위 TOP_N개만 개별 박스로 그리고, 그 밖은
+//     "기타 상승"/"기타 하락" 집계 박스 하나씩으로 합친다.
+// 업종(79개)·테마(266개) 모두 이 컴포넌트 하나를 공유하므로 여기서 접으면 두 화면에
+// 자동으로 적용된다(항목 수가 적은 업종은 자연히 접히는 항목이 적거나 없다).
+const NEUTRAL_THRESHOLD_PERCENT = 1
+const TOP_N = 10
+
+// 집계 박스 크기 = sqrt(묶인 개수), 최대 AGGREGATE_SIZE_CAP으로 제한한다.
+// 개별 박스는 그대로 1(균등)이므로, sqrt를 쓰면 "10개 묶임"은 개별 박스의 ~3배,
+// "100개 묶임"은 ~10배로 화면을 지배하지 않으면서도 "많이 묶였다"는 크기 차이가
+// 보인다(선형 스케일이면 항목이 많은 테마에서 집계 박스가 화면 절반을 잡아먹는다).
+// 실제 스크린샷으로 확인 후 결정한 값 — 근거는 컴포넌트 하단 주석 참고.
+const AGGREGATE_SIZE_CAP = 8
+
+// 집계 박스는 색 보간 강도를 낮춰(원래 등락률의 60%로 계산) 개별 박스보다 살짝
+// 채도를 낮춘다 — 라벨에 "기타"/count가 이미 명시되지만, 색만 봐도 "이건 평균이지
+// 실제 개별 종목 등락률이 아니다"를 구분할 수 있게 하기 위함.
+const AGGREGATE_COLOR_DAMPEN = 0.6
+
 export function changeRateMixStrength(changeRate) {
   if (typeof changeRate !== 'number' || Number.isNaN(changeRate)) return 0
   const clamped = Math.max(-CLAMP_PERCENT, Math.min(CLAMP_PERCENT, changeRate))
@@ -39,6 +60,11 @@ export function colorForChangeRate(changeRate) {
   if (pct === 0) return 'var(--surface)'
   const base = typeof changeRate === 'number' && changeRate < 0 ? '--down' : '--up'
   return `color-mix(in srgb, var(${base}) ${pct}%, var(--surface))`
+}
+
+export function colorForAggregate(changeRate) {
+  if (typeof changeRate !== 'number' || Number.isNaN(changeRate)) return 'var(--surface)'
+  return colorForChangeRate(changeRate * AGGREGATE_COLOR_DAMPEN)
 }
 
 // 보간 강도가 높을수록(진한 빨강/파랑) 흰 글자가 잘 읽히고, 낮을수록(연한 배경, 거의
@@ -68,12 +94,16 @@ const MIN_LABEL_HEIGHT = 26
 const MIN_RATE_LABEL_HEIGHT = 40
 
 function TreemapCell(props) {
-  const { x, y, width, height, name, change_rate: changeRate } = props
+  const { x, y, width, height, name, change_rate: changeRate, isAggregate, boxLabel } = props
   if (width <= 0 || height <= 0) return null
 
   const showName = width >= MIN_LABEL_WIDTH && height >= MIN_LABEL_HEIGHT
-  const showRate = showName && height >= MIN_RATE_LABEL_HEIGHT
-  const textColor = labelColorFor(changeRate)
+  const showSubLabel = showName && height >= MIN_RATE_LABEL_HEIGHT
+  // 집계 박스는 채도를 낮춘 색(colorForAggregate)을 쓰므로, 흰 글자 판단 기준도
+  // 그 낮춘 강도로 맞춰야 배경-글자 대비가 실제 렌더 색과 어긋나지 않는다.
+  const textColor = isAggregate
+    ? labelColorFor(changeRate * AGGREGATE_COLOR_DAMPEN)
+    : labelColorFor(changeRate)
 
   return (
     <g>
@@ -82,7 +112,12 @@ function TreemapCell(props) {
         y={y}
         width={width}
         height={height}
-        style={{ fill: colorForChangeRate(changeRate), stroke: 'var(--page)', strokeWidth: 1.5 }}
+        style={{
+          fill: isAggregate ? colorForAggregate(changeRate) : colorForChangeRate(changeRate),
+          stroke: 'var(--page)',
+          strokeWidth: 1.5,
+          strokeDasharray: isAggregate ? '4 2' : undefined,
+        }}
       />
       {showName && (
         <text
@@ -94,7 +129,7 @@ function TreemapCell(props) {
           {width < 90 && name.length > 8 ? `${name.slice(0, 7)}…` : name}
         </text>
       )}
-      {showRate && (
+      {showSubLabel && (
         <text
           x={x + 6}
           y={y + 32}
@@ -102,7 +137,7 @@ function TreemapCell(props) {
           fontWeight={600}
           style={{ fill: textColor, pointerEvents: 'none' }}
         >
-          {rateLabel(changeRate)}
+          {isAggregate ? boxLabel : rateLabel(changeRate)}
         </text>
       )}
     </g>
@@ -112,6 +147,26 @@ function TreemapCell(props) {
 function GroupTooltip({ active, payload }) {
   if (!active || !payload?.length) return null
   const node = payload[0].payload
+
+  if (node.isAggregate) {
+    return (
+      <div className="tooltip">
+        <div className="tooltip-date">{node.name}</div>
+        <div className="tooltip-row">
+          <span>{node.fullLabel}</span>
+        </div>
+        {node.topMembers.map((member) => (
+          <div className="tooltip-row" key={member.name}>
+            <span>{member.name}</span>
+            <strong className={member.change_rate > 0 ? 'up' : member.change_rate < 0 ? 'down' : ''}>
+              {rateLabel(member.change_rate)}
+            </strong>
+          </div>
+        ))}
+      </div>
+    )
+  }
+
   return (
     <div className="tooltip">
       <div className="tooltip-date">{node.name}</div>
@@ -162,17 +217,85 @@ function ColorScaleLegend() {
   )
 }
 
+function isFiniteRate(rate) {
+  return typeof rate === 'number' && !Number.isNaN(rate)
+}
+
+// 집계 박스 하나를 만든다: 평균 등락률(색상용), 묶인 개수(크기용), 툴팁에 보여줄
+// |등락률| 상위 5개 멤버, 박스 안/툴팁에 쓸 라벨 문자열을 계산한다.
+function buildAggregateBox({ name, members, isNeutral }) {
+  const count = members.length
+  const rates = members.map((m) => m.change_rate).filter(isFiniteRate)
+  const avgRate = rates.length > 0 ? rates.reduce((sum, r) => sum + r, 0) / rates.length : 0
+  const topMembers = [...members]
+    .sort((a, b) => Math.abs(b.change_rate ?? 0) - Math.abs(a.change_rate ?? 0))
+    .slice(0, 5)
+    .map((m) => ({ name: m.name, change_rate: m.change_rate }))
+
+  // fullLabel: 사용자 스펙 문구 그대로("±1% 미만 · N개" / "기타 상승 · N개 · 평균 +x.x%") —
+  // 툴팁 제목 줄에 쓴다. boxLabel: 박스 안 두 번째 줄용으로, 첫 줄(name)에 이미 나온
+  // "보합권"/"기타 상승" 이름을 반복하지 않도록 줄인 버전이다.
+  const fullLabel = isNeutral
+    ? `±${NEUTRAL_THRESHOLD_PERCENT}% 미만 · ${count}개`
+    : `${name} · ${count}개 · 평균 ${rateLabel(avgRate)}`
+  const boxLabel = isNeutral ? fullLabel : `${count}개 · 평균 ${rateLabel(avgRate)}`
+
+  return {
+    name,
+    change_rate: isNeutral ? 0 : avgRate,
+    sizeValue: Math.min(Math.sqrt(count), AGGREGATE_SIZE_CAP),
+    isAggregate: true,
+    boxLabel,
+    fullLabel,
+    topMembers,
+  }
+}
+
+// 접기 본체: |등락률| < NEUTRAL_THRESHOLD_PERCENT는 보합권으로, 나머지는 상승/하락
+// 상위 TOP_N개만 개별로 남기고 그 밖은 기타 상승/기타 하락 집계 박스로 합친다.
+function foldItems(data) {
+  const neutral = []
+  const nonNeutral = []
+  for (const item of data) {
+    if (!isFiniteRate(item.change_rate) || Math.abs(item.change_rate) < NEUTRAL_THRESHOLD_PERCENT) {
+      neutral.push(item)
+    } else {
+      nonNeutral.push(item)
+    }
+  }
+
+  const up = nonNeutral.filter((d) => d.change_rate > 0).sort((a, b) => b.change_rate - a.change_rate)
+  const down = nonNeutral.filter((d) => d.change_rate < 0).sort((a, b) => a.change_rate - b.change_rate)
+
+  const boxes = [...up.slice(0, TOP_N), ...down.slice(0, TOP_N)]
+
+  if (neutral.length > 0) {
+    boxes.push(buildAggregateBox({ name: '보합권', members: neutral, isNeutral: true }))
+  }
+  const upRest = up.slice(TOP_N)
+  if (upRest.length > 0) {
+    boxes.push(buildAggregateBox({ name: '기타 상승', members: upRest, isNeutral: false }))
+  }
+  const downRest = down.slice(TOP_N)
+  if (downRest.length > 0) {
+    boxes.push(buildAggregateBox({ name: '기타 하락', members: downRest, isNeutral: false }))
+  }
+  return boxes
+}
+
 export default function GroupTreemap({ items, sizeBy = 'value' }) {
-  const data = (items || []).map((item) => ({
+  const rawData = (items || []).map((item) => ({
     ...item,
     sizeValue: sizeValueOf(item, sizeBy),
   }))
 
-  const hasRealSize = data.some((d) => typeof d[sizeBy] === 'number' && d[sizeBy] > 0)
+  const hasRealSize = rawData.some((d) => typeof d[sizeBy] === 'number' && d[sizeBy] > 0)
 
-  if (data.length === 0) {
+  if (rawData.length === 0) {
     return <div className="state">표시할 데이터가 없습니다.</div>
   }
+
+  const data = foldItems(rawData)
 
   return (
     <div className="group-treemap">
