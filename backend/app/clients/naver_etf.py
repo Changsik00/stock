@@ -89,11 +89,25 @@ USER_AGENT = (
 #   5 = 원자재
 #   6 = 채권
 #   7 = 혼합자산/TDF/머니마켓
-# "국내주식 look-through 가능"의 1차 조건은 tab in (1, 2)다. 다만 tab 2에는
-# "OO단일종목레버리지"류가 섞여 있어(선물/스왑으로 구성 — 실제 주식 바스켓이
-# 아님) 이름 패턴으로 추가 제외한다.
-DOMESTIC_EQUITY_TABS = (1, 2)
-_LEVERAGED_INVERSE_RE = re.compile(r"레버리지|인버스|\d[xX]")
+#
+# 유니버스 원칙 (2026-07-18 개정 — "이름으로 배제하지 않는다. 보유 종목이 말하게 한다"):
+#
+# - tab 1/2/3/7을 전부 후보로 삼는다. 과거에는 tab (1,2) + 이름에 레버리지/인버스가
+#   없는 것만 골랐는데, 실측 결과 이 휴리스틱이 정반대로 동작했다:
+#   "KODEX SK하이닉스단일종목레버리지"(0193T0, tab2)는 이름과 달리 **실물 주식
+#   (000660)을 90.58% 보유**하는데 이름 필터로 제외돼 있었고(거래대금 전체 1위,
+#   4.2조 원인데도!), KODEX 레버리지(122630)는 tab3이라 탭 필터에서 빠졌지만
+#   실제로는 삼성전자 18.46% 등 실물 바스켓을 상당 부분 보유한다.
+# - tab 7(혼합)에는 'RISE 삼성전자SK하이닉스채권혼합50'처럼 국내 주식을 실보유하는
+#   채권혼합형이 있어 포함한다. 해외혼합/TDF는 top10에 국내 주식코드가 없어
+#   etf_holdings 적재 단계에서 자연 탈락한다(parse_top10_holdings가 코드 없는 행을
+#   버리므로 — 별도 이름 필터 불필요).
+# - tab 4(해외주식)/5(원자재)/6(채권)은 국내 주식 실보유 가능성이 사실상 없어 후보
+#   자체에서 제외(요청 수를 아끼기 위한 것일 뿐, 포함해도 자연 탈락한다).
+# - 인버스/선물형(tab3 일부)은 top10이 선물·현금뿐이라 보유 주식이 없고, look-through
+#   기여가 0이 되는 게 **정상 동작**이다(KODEX 인버스 실측: 원화현금/선물만).
+#   이들의 자금 유입 자체는 추후 '파생형 ETF 자금' 지표로 별도 표시(PLAN.md §6 3.5-4).
+DOMESTIC_EQUITY_TABS = (1, 2, 3, 7)
 
 
 class NaverEtfError(Exception):
@@ -146,19 +160,21 @@ def fetch_etf_list(timeout: int = 15) -> list[dict]:
     return out
 
 
-def select_domestic_equity_targets(items: list[dict], top_n: int = 100) -> list[dict]:
-    """국내주식형 거래대금 상위 ``top_n``개를 고른다 (PLAN.md §4.5 취지).
+def select_domestic_equity_targets(items: list[dict], top_n: int = 300) -> list[dict]:
+    """국내 주식 보유 가능성이 있는 ETF의 거래대금 상위 ``top_n``개를 고른다.
 
-    조건: etfTabCode in (1, 2) — 국내 시가총액식/업종테마식 — 이면서 이름에
-    레버리지/인버스/N배(파생) 패턴이 없는 것. 그 중 amount_million(거래대금)
-    내림차순 상위 top_n개.
+    조건: etfTabCode in (1, 2, 3, 7) — 국내 시총식/업종테마/국내파생/혼합 — 전부.
+    이름 기반 제외(레버리지/인버스 등)는 **하지 않는다**: 실제 국내 주식을 보유하는지는
+    etfAnalysis top10 파싱(parse_top10_holdings)에서 주식코드 유무로 판정되고, 보유
+    주식이 없는 인버스/선물형은 etf_holdings에 행이 안 생겨 자연 탈락한다
+    (위 DOMESTIC_EQUITY_TABS 주석의 유니버스 원칙 참고).
+
+    top_n 기본 300: 2026-07-18 실측 기준 tab 1/2/3 합계가 464개(+tab7 115개)라
+    전량 수집은 과하고, 거래대금 300위 언저리는 일 거래대금 ~6억 원 수준까지
+    내려가 look-through 기여가 무시할 만하다.
     """
     candidates = [
-        it
-        for it in items
-        if it.get("tab_code") in DOMESTIC_EQUITY_TABS
-        and it.get("name")
-        and not _LEVERAGED_INVERSE_RE.search(it["name"])
+        it for it in items if it.get("tab_code") in DOMESTIC_EQUITY_TABS and it.get("name")
     ]
     candidates.sort(key=lambda it: it.get("amount_million") or 0, reverse=True)
     return candidates[:top_n]
@@ -242,10 +258,28 @@ def fetch_etf_analysis(code: str, timeout: int = 15) -> dict:
 def parse_top10_holdings(analysis: dict) -> list[dict]:
     """``etfTop10MajorConstituentAssets`` -> ``[{"stock_code","weight","shares"}, ...]``.
 
-    해외 보유종목이 섞여 들어오면(itemCode가 빈 문자열, etfWeight가 "-") look-through
-    대상이 아니므로 건너뛴다 — 국내주식형 필터를 통과한 ETF라도 소량의 해외/파생
-    구성이 top10에 낄 가능성에 대비한 방어적 처리다(2026-07-18 실측: 순수 해외
-    ETF인 TIGER 미국S&P500에서 이 패턴을 확인).
+    **실제 상장 코드가 있고 비중이 파싱되는 행만** 남긴다. 이 규칙 하나로 자산 유형
+    필터가 전부 해결된다 (2026-07-18 실측 근거):
+
+    - 해외 주식: itemCode "" + etfWeight "-" (TIGER 미국S&P500) -> 제외
+    - 선물: itemCode "" + etfWeight "-" ("2026-08 SK하이닉스개별선물") -> 제외
+    - 원화현금/설정현금액: itemCode "" (weight는 있을 수 있음, 인버스형은 100.00%도
+      관측) -> 제외
+    - 국고채/통안채: itemCode "" (채권혼합형) -> 제외
+    - 단일종목 레버리지의 실물 주식: itemCode 정상 + weight 정상 — KODEX SK하이닉스
+      단일종목레버리지(0193T0)는 000660 90.58%, KODEX 삼성전자단일종목레버리지
+      (0193W0)는 005930 92.72%, TIGER SK하이닉스단일종목레버리지(0195S0)는 000660
+      80.16%로 잡힌다(나머지는 현금+개별선물). 100% 초과 weight는 주식 행에서는
+      관측되지 않았다("설정현금액 100.00%" 행은 코드가 없어 어차피 제외).
+
+    알려진 데이터 한계: 일부 채권혼합형(예: RISE 삼성전자SK하이닉스채권혼합50,
+    0162Z0)은 주식 행에 itemCode는 있는데 etfWeight가 "-"로 온다 — 비중을 알 수
+    없어 look-through 계산이 불가능하므로 그대로 제외된다(stockCount만으로 %를
+    복원할 수 없음). 이런 ETF는 holdings가 비어 자연 탈락한다.
+
+    주의: 파생형 ETF(KODEX 레버리지 등)는 top10에 **다른 ETF**(KODEX 200 20.86% 등)를
+    보유하기도 한다. ETF도 상장 코드라 행이 남는데, 현 단계에서는 재귀 분해 없이
+    그 ETF 코드로의 기여로 기록된다(한계 — PLAN.md §4.5).
     """
     rows = analysis.get("etfTop10MajorConstituentAssets") or []
     out = []

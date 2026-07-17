@@ -15,8 +15,8 @@ import requests
 
 from app.clients import naver_etf
 
-# --- etfItemList fixture (3 real items: 1 domestic index-tab, 2 foreign-tab, plus a
-# synthetic leveraged/domestic one appended below to exercise the name-based filter) ---
+# --- etfItemList fixture (real items across tabs: domestic index (1), domestic theme
+# w/ single-stock leveraged (2), domestic derivatives (3), mixed (7), foreign (4)) ---
 ETF_LIST_ITEMS = [
     {
         "itemcode": "069500",
@@ -61,17 +61,49 @@ ETF_LIST_ITEMS = [
         "marketSum": 115043,
     },
     {
-        "itemcode": "091180",
+        # 실측 2026-07-18: tab2인데 실물 주식(000660 90.58%)을 보유 — 이름 필터로
+        # 배제하면 안 되는 대표 사례(거래대금 전체 1위였음).
+        "itemcode": "0193T0",
         "etfTabCode": 2,
         "itemname": "KODEX SK하이닉스단일종목레버리지",
-        "nowVal": 20000,
+        "nowVal": 14585,
+        "risefall": "5",
+        "changeVal": -4215,
+        "changeRate": -22.42,
+        "nav": 14498.0,
+        "threeMonthEarnRate": None,
+        "quant": 284167180,
+        "amonut": 4208729,
+        "marketSum": 38041,
+    },
+    {
+        # tab3(국내 파생) — 실측: 삼성전자 18.46% 등 실물 바스켓 보유 -> 포함 대상.
+        "itemcode": "122630",
+        "etfTabCode": 3,
+        "itemname": "KODEX 레버리지",
+        "nowVal": 120500,
+        "risefall": "5",
+        "changeVal": -18970,
+        "changeRate": -13.6,
+        "nav": 121118.0,
+        "threeMonthEarnRate": 16.8371,
+        "quant": 14259535,
+        "amonut": 1724865,
+        "marketSum": 61094,
+    },
+    {
+        # tab7(혼합) — 채권혼합형이지만 국내 주식(삼전/하이닉스)을 실보유 -> 후보 포함.
+        "itemcode": "0162Z0",
+        "etfTabCode": 7,
+        "itemname": "RISE 삼성전자SK하이닉스채권혼합50",
+        "nowVal": 12345,
         "risefall": "5",
         "changeVal": -100,
         "changeRate": -0.5,
-        "nav": 19980.0,
-        "threeMonthEarnRate": 5.0,
+        "nav": 12340.0,
+        "threeMonthEarnRate": 3.0,
         "quant": 100,
-        "amonut": 999999,  # huge 거래대금 to make sure it's still excluded despite ranking high
+        "amonut": 144217,
         "marketSum": 4361,
     },
 ]
@@ -109,7 +141,7 @@ def test_fetch_etf_list_decodes_euckr_and_normalizes_units(monkeypatch):
 
     items = naver_etf.fetch_etf_list()
 
-    assert len(items) == 4
+    assert len(items) == 6
     kodex200 = items[0]
     assert kodex200["code"] == "069500"
     assert kodex200["name"] == "KODEX 200"
@@ -129,8 +161,8 @@ def test_fetch_etf_list_raises_on_empty_result(monkeypatch):
         naver_etf.fetch_etf_list()
 
 
-def test_select_domestic_equity_targets_excludes_foreign_and_leveraged():
-    raw_items = [
+def _raw_items():
+    return [
         {
             "code": it["itemcode"],
             "name": it["itemname"],
@@ -144,16 +176,25 @@ def test_select_domestic_equity_targets_excludes_foreign_and_leveraged():
         for it in ETF_LIST_ITEMS
     ]
 
-    targets = naver_etf.select_domestic_equity_targets(raw_items, top_n=100)
+
+def test_select_domestic_equity_targets_includes_tabs_1237_no_name_filter():
+    """유니버스 개정(2026-07-18): tab 1/2/3/7 전부, 이름 필터 폐지.
+
+    단일종목 레버리지(tab2)·KODEX 레버리지(tab3)·채권혼합(tab7)이 모두 후보에
+    남고, 해외주식(tab4)만 제외된다. 정렬은 거래대금 내림차순.
+    """
+    targets = naver_etf.select_domestic_equity_targets(_raw_items(), top_n=300)
 
     codes = [t["code"] for t in targets]
-    assert "069500" in codes  # tab 1, plain domestic index fund
     assert "360750" not in codes  # tab 4 (해외주식)
     assert "133690" not in codes  # tab 4 (해외주식)
-    assert "091180" not in codes  # tab 2 but "레버리지" in name -> excluded despite huge amonut
+    # 거래대금 내림차순: 단일종목레버리지(4.2조) > KODEX200 > KODEX레버리지 > 채권혼합
+    assert codes == ["0193T0", "069500", "122630", "0162Z0"]
 
-    # sorted by amount_million desc among survivors
-    assert codes == ["069500"]
+
+def test_select_domestic_equity_targets_respects_top_n_cut():
+    targets = naver_etf.select_domestic_equity_targets(_raw_items(), top_n=2)
+    assert [t["code"] for t in targets] == ["0193T0", "069500"]
 
 
 @pytest.mark.parametrize(
@@ -262,6 +303,59 @@ def test_parse_top10_holdings_skips_rows_without_itemcode_or_weight():
     # Foreign-holding shape: itemCode empty + etfWeight "-" for every row -> all skipped.
     holdings = naver_etf.parse_top10_holdings(ETF_ANALYSIS_FOREIGN)
     assert holdings == []
+
+
+# --- 단일종목 레버리지 (실측 2026-07-18, KODEX SK하이닉스단일종목레버리지 0193T0) ---
+# 실물 주식 + 원화현금 + 개별선물 구조. 주식 행만 살아남아야 한다.
+ETF_ANALYSIS_SINGLE_STOCK_LEVERAGED = {
+    "itemCode": "0193T0",
+    "itemName": "KODEX SK하이닉스단일종목레버리지",
+    "etfTop10MajorConstituentAssets": [
+        {"seq": 1, "itemCode": "000660", "itemName": "SK하이닉스", "stockCount": "205", "etfWeight": "90.58%"},
+        {"seq": 2, "itemCode": "", "itemName": "원화현금", "stockCount": "-", "etfWeight": "9.42%"},
+        {"seq": 3, "itemCode": "", "itemName": "2026-08 SK하이닉스개별선물", "stockCount": "25", "etfWeight": "-"},
+    ],
+}
+
+# --- 인버스형 (실측 2026-07-18, KODEX 인버스 114800) — 주식 보유 없음 -> 빈 결과가 정상 ---
+ETF_ANALYSIS_INVERSE = {
+    "itemCode": "114800",
+    "itemName": "KODEX 인버스",
+    "etfTop10MajorConstituentAssets": [
+        {"seq": 1, "itemCode": "", "itemName": "원화현금", "stockCount": "-", "etfWeight": "100.00%"},
+        {"seq": 2, "itemCode": "", "itemName": "설정현금액", "stockCount": "-", "etfWeight": "100.00%"},
+        {"seq": 3, "itemCode": "", "itemName": "2026-09 코스피200지수선물", "stockCount": "7", "etfWeight": "-"},
+    ],
+}
+
+# --- 채권혼합형 데이터 한계 (실측 2026-07-18, RISE 삼성전자SK하이닉스채권혼합50 0162Z0) ---
+# 주식 행에 itemCode는 있으나 etfWeight가 "-" -> 비중을 알 수 없어 제외(문서화된 한계).
+ETF_ANALYSIS_BOND_MIXED_NO_WEIGHT = {
+    "itemCode": "0162Z0",
+    "itemName": "RISE 삼성전자SK하이닉스채권혼합50",
+    "etfTop10MajorConstituentAssets": [
+        {"seq": 1, "itemCode": "005930", "itemName": "삼성전자", "stockCount": "1,269", "etfWeight": "-"},
+        {"seq": 2, "itemCode": "000660", "itemName": "SK하이닉스", "stockCount": "170", "etfWeight": "-"},
+        {"seq": 3, "itemCode": "", "itemName": "국고02125-2706(17-3)", "stockCount": "-", "etfWeight": "-"},
+    ],
+}
+
+
+def test_parse_top10_holdings_single_stock_leveraged_keeps_real_stock():
+    holdings = naver_etf.parse_top10_holdings(ETF_ANALYSIS_SINGLE_STOCK_LEVERAGED)
+    assert holdings == [
+        {"stock_code": "000660", "stock_name": "SK하이닉스", "weight": 90.58, "shares": 205},
+    ]
+
+
+def test_parse_top10_holdings_inverse_has_no_stock_rows():
+    # 인버스/선물형은 look-through 기여 0이 정상 동작 — 현금/선물 행은 코드가 없어 전부 제외.
+    assert naver_etf.parse_top10_holdings(ETF_ANALYSIS_INVERSE) == []
+
+
+def test_parse_top10_holdings_bond_mixed_without_weight_drops_out():
+    # 비중 없는 주식 행은 계산 불가라 제외 — holdings가 비어 유니버스에서 자연 탈락.
+    assert naver_etf.parse_top10_holdings(ETF_ANALYSIS_BOND_MIXED_NO_WEIGHT) == []
 
 
 def test_parse_net_inflow_snapshot_uses_1d_field_only():

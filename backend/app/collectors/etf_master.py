@@ -13,10 +13,12 @@
                      실제 날짜(``referenceDate``)를 행의 date로 쓴다 — target_date와
                      다를 수 있어(휴장일 등) target_date를 그대로 쓰면 어긋난다.
 
-대상 선정: etfTabCode in (1, 2)(국내 시가총액식/업종테마식) 이면서 이름에
-레버리지/인버스/N배가 없는 것 중 거래대금(amonut) 상위 top_n개
-(``naver_etf.select_domestic_equity_targets``, 기본 100개 — PLAN.md §4.5
-"국내주식형 거래대금 상위 ~100개").
+대상 선정: etfTabCode in (1, 2, 3, 7)(국내 시총식/업종테마/국내파생/혼합) 전체에서
+거래대금(amonut) 상위 top_n개(``naver_etf.select_domestic_equity_targets``, 기본
+300개 — PLAN.md §4.5). 이름 기반 제외는 하지 않는다 — 단일종목 레버리지 등도
+실물 주식을 보유하므로 포함하고, 주식을 안 갖는 인버스/선물형은 top10 파싱에서
+주식코드가 없어 etf_holdings에 행이 생기지 않는 방식으로 자연 탈락한다
+(clients/naver_etf.py의 유니버스 원칙 주석 참고).
 
 collect_fn 계약(collectors/base.py)을 따른다: 이 함수는 세션을 commit/rollback하지
 않는다(run_job이 트랜잭션을 소유). ``REGISTRY["etf_master"]``로 등록한다 —
@@ -41,7 +43,7 @@ from .base import REGISTRY
 
 logger = logging.getLogger(__name__)
 
-TOP_N = 100
+TOP_N = 300
 REQUEST_DELAY_SECONDS = 0.4
 
 
@@ -56,7 +58,7 @@ def fetch_targets_with_analysis(top_n: int = TOP_N) -> list[dict]:
         }
 
     한 종목의 etfAnalysis 호출이 실패해도 나머지 종목 수집을 막지 않는다 — 개별
-    ETF 상세 페이지가 일시적으로 비정상이어도 나머지 ~99개는 정상 적재되게 하기
+    ETF 상세 페이지가 일시적으로 비정상이어도 나머지 ~299개는 정상 적재되게 하기
     위함(collectors/macro.py의 kofia 개별 실패 흡수 패턴과 동일한 취지).
     """
     items = naver_etf.fetch_etf_list()
