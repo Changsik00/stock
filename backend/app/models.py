@@ -211,6 +211,46 @@ class FlowRank(Base):
     quantity: Mapped[int | None] = mapped_column(BigInteger)
     turnover: Mapped[float | None] = mapped_column(Numeric(8, 4))
     is_etf: Mapped[bool] = mapped_column(nullable=False, default=False)
+    # 어느 시장 랭킹 페이지에서 왔는지 (kospi/kosdaq). 2026-07-18 이전 적재분은 수집
+    # 시 시장 구분을 버리고 병합했어서 NULL (§4.6 3.6-1).
+    market: Mapped[str | None] = mapped_column(String(10))
+
+
+class ValueRank(Base):
+    """거래대금 상위 종목 일별 스냅샷 (PLAN.md §4.6 3.6-1) — 돈이 모이는 곳.
+
+    value(거래대금)는 백만 원, change_rate는 % (등락률 — 돈이 몰린 종목이
+    올랐는지/내렸는지), turnover는 회전율 %(flow_rank와 동일 정의, 선택 적재).
+    """
+
+    __tablename__ = "value_rank"
+
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    market: Mapped[str] = mapped_column(String(10), primary_key=True)  # kospi/kosdaq
+    rank: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+    code: Mapped[str] = mapped_column(String(20), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(100))
+    value: Mapped[int | None] = mapped_column(BigInteger)
+    change_rate: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    is_etf: Mapped[bool] = mapped_column(nullable=False, default=False)
+    turnover: Mapped[float | None] = mapped_column(Numeric(8, 4))
+
+
+class GroupSnapshot(Base):
+    """업종/테마별 일별 스냅샷 (PLAN.md §4.6 3.6-3 트리맵).
+
+    group_type: 'upjong'(업종) / 'theme'(테마). change_rate %, value(거래대금)·
+    market_sum(시가총액)은 백만 원 (소스가 안 주는 값은 NULL).
+    """
+
+    __tablename__ = "group_snapshot"
+
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    group_type: Mapped[str] = mapped_column(String(10), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), primary_key=True)
+    change_rate: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    value: Mapped[int | None] = mapped_column(BigInteger)
+    market_sum: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class FlowPath(Base):
