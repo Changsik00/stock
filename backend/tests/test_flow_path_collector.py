@@ -1,6 +1,6 @@
 """Unit tests for app.collectors.flow_path.compute_flow_path (순수 계산부, DB 무관).
 
-가짜 holdings/etf_stats/flow_rank 픽스처로 §4.5 방법론의 세 가지 핵심 동작을 검증한다:
+가짜 holdings/etf_stats/flow_rank 픽스처로 §4.5 방법론의 핵심 동작을 검증한다:
 
 1. inflow(etf_stats.net_inflow) 우선, 없을 때만 rank(flow_rank 자기자신 net_value)로
    폴백하는 우선순위
@@ -8,6 +8,11 @@
 3. direct_net은 flow_rank에 없으면 0이 아니라 None(미관측)이어야 하는 NULL 처리,
    그리고 via_etf_net==0 이면서 direct_net도 없는 코드는 결과에서 아예 빠지는 것
    (§4.5 지시 3번: "via_etf_net이 0이 아닌 모든 구성종목 + direct_net 있는 종목"만 적재)
+4. **ETF-in-ETF 1단계 재귀 분해**(§4.5 한계 (b) 2026-07-18 해결) — 파생형 ETF가
+   다른 ETF를 보유하면 그 ETF의 자기 구성으로 한 번 더 분해하고(weight×weight),
+   2단계 이상은 드롭(dropped_depth2), 내부 ETF의 구성이 유니버스 밖이면 드롭
+   (dropped_no_holdings), 그리고 **어떤 경우에도 ETF 코드 자신은 최종 result에
+   남지 않는다**(direct_net만 있는 ETF 자기 자신의 행도 제외).
 """
 
 from __future__ import annotations
@@ -26,6 +31,8 @@ NAMES = {
     "091160": "KODEX 반도체",
     "005930": "삼성전자",
     "000660": "SK하이닉스",
+    "122630": "KODEX 레버리지",
+    "114800": "KODEX 인버스",
 }
 
 
@@ -56,8 +63,10 @@ def test_inflow_basis_preferred_over_rank_when_etf_stats_available():
     # via_etf_net = 1000 * 30% = 300 (not 9999 * 30%)
     assert result["005930"]["via_etf_net"] == 300
     assert result["005930"]["top_etfs"][0]["basis"] == "inflow"
-    # KODEX 200 자체도 flow_rank에 있으므로 direct_net을 갖는다.
-    assert result["069500"]["direct_net"] == 9999
+    # KODEX 200 자체는 flow_rank에도 있어 direct_net(9999)을 갖지만, 코드 자신이
+    # ETF이므로 최종 result에서 제외된다(§4.5 한계 (b) 2026-07-18 해결 —
+    # flow_path는 개별 종목 표이지 ETF 자신의 기록이 아니다).
+    assert "069500" not in result
 
 
 def test_rank_basis_fallback_when_no_etf_stats():
@@ -157,3 +166,86 @@ def test_nearest_stats_date_used_when_target_date_has_no_exact_match():
 
     assert result["005930"]["via_etf_net"] == 100  # 200 * 50%
     assert result["005930"]["top_etfs"][0]["date"] == D0.isoformat()
+
+
+# ---------------------------------------------------------------------------
+# ETF-in-ETF 1단계 재귀 분해 (§4.5 한계 (b) 2026-07-18 해결)
+# ---------------------------------------------------------------------------
+
+
+def test_etf_in_etf_one_level_redistribution():
+    """KODEX 레버리지(122630)가 top10에 KODEX 200(069500)을 보유 -> 목적지로
+    취급하지 않고 KODEX 200 자신의 구성(005930)까지 한 번 더 분해한다.
+    기여액은 outer_weight × inner_weight로 곱해진다."""
+    holdings = {
+        "122630": [{"stock_code": "069500", "weight": 100.0}],
+        "069500": [{"stock_code": "005930", "weight": 30.0}],
+    }
+    stats_by_code = {"122630": [(D0, 1000)]}  # 내부 ETF(069500)는 자체 inflow 없음
+
+    result, meta = compute_flow_path(D0, holdings, D_HOLDINGS, stats_by_code, [], NAMES)
+
+    # 1000(레버리지 inflow) * 100%(069500 비중) * 30%(005930 비중) = 300
+    assert result["005930"]["via_etf_net"] == 300
+    assert "069500" not in result  # 중간 ETF는 목적지가 아니다
+    assert "122630" not in result  # 원천 ETF도 최종 결과에 남지 않는다
+
+    top = result["005930"]["top_etfs"][0]
+    assert top["code"] == "122630"  # top_etfs 명의는 원천 ETF
+    assert top["name"] == "KODEX 레버리지→KODEX 200"  # 경유 화살표 표기
+    assert top["via"] == "069500"
+    assert top["via_name"] == "KODEX 200"
+    assert top["contrib"] == 300
+
+    assert meta["dropped_depth2"] == 0
+    assert meta["dropped_no_holdings"] == 0
+
+
+def test_etf_in_etf_depth2_is_dropped_not_recursed_further():
+    """A -> B(ETF) -> C(ETF) -> 005930 처럼 2단계 이상 체인이면, 1단계(B)까지만
+    보고 그 다음(C)은 드롭한다(무한 재귀 방지 안전장치 (a))."""
+    holdings = {
+        "A": [{"stock_code": "B", "weight": 100.0}],
+        "B": [{"stock_code": "C", "weight": 100.0}],
+        "C": [{"stock_code": "005930", "weight": 50.0}],
+    }
+    stats_by_code = {"A": [(D0, 1000)]}
+    names = {**NAMES, "A": "펀드A", "B": "펀드B", "C": "펀드C"}
+
+    result, meta = compute_flow_path(D0, holdings, D_HOLDINGS, stats_by_code, [], names)
+
+    assert result == {}  # 005930까지 기여가 도달하지 않는다
+    assert meta["dropped_depth2"] == 1
+    assert meta["dropped_no_holdings"] == 0
+
+
+def test_inner_etf_outside_universe_is_dropped():
+    """외부 ETF가 보유한 내부 코드가 stocks.is_etf=True(ETF는 맞음)이지만
+    etf_holdings에 그 자신의 구성 스냅샷이 없으면(유니버스 밖 — 예: 인버스/선물형이라
+    애초에 주식 구성이 없거나 top300 밖) 그 기여를 드롭한다(안전장치 (b))."""
+    holdings = {"122630": [{"stock_code": "114800", "weight": 50.0}]}
+    stats_by_code = {"122630": [(D0, 1000)]}
+
+    result, meta = compute_flow_path(
+        D0, holdings, D_HOLDINGS, stats_by_code, [], NAMES, etf_codes={"114800"}
+    )
+
+    assert result == {}
+    assert meta["dropped_no_holdings"] == 1
+    assert meta["dropped_depth2"] == 0
+
+
+def test_etf_codes_param_excludes_pure_direct_net_etf_row():
+    """holdings에 등장하지 않는 ETF라도(자기 구성 top10을 안 보유해 origin으로
+    한 번도 안 나옴) stocks.is_etf=True로 알려져 있고 flow_rank에 자기 매매
+    기록(direct_net)만 있는 경우에도 최종 result에서 제외돼야 한다 — flow_path에
+    ETF 코드가 남지 않게 보장하는 규칙은 via_etf_net 유무와 무관하다."""
+    flow_rank_rows = [
+        {"code": "114800", "name": "KODEX 인버스", "net_value": 500, "investor": "foreign"},
+    ]
+
+    result, _meta = compute_flow_path(
+        D0, {}, D_HOLDINGS, {}, flow_rank_rows, NAMES, etf_codes={"114800"}
+    )
+
+    assert result == {}
