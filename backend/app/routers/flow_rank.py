@@ -1,5 +1,6 @@
 """GET /api/markets/flow-rank — 투자자별 순매수/순매도 상위 종목 스냅샷 (PLAN.md §4.5/§6 3.5-2b).
 GET /api/markets/flow-path — ETF look-through 수급 경로 분해 상위 (PLAN.md §4.5/§6 3.5-3).
+GET /api/markets/value-rank — 거래대금 상위 종목("돈이 모이는 곳") 스냅샷 (PLAN.md §4.6 3.6-1).
 
 DB 전용 조회다(§5.4 "DB 캐싱 우선") — collectors/flow_rank.py·collectors/flow_path.py가
 미리 적재해 둔 테이블을 그대로 읽어 반환할 뿐, 이 라우터에서 네이버를 직접 호출하지
@@ -28,12 +29,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
-from ..models import FlowPath, FlowRank, Stock
+from ..models import FlowPath, FlowRank, Stock, ValueRank
 
 router = APIRouter(tags=["markets"])
 
 INVESTORS = {"foreign", "institution"}
 SIDES = {"buy", "sell"}
+MARKET_FILTERS = {"all", "kospi", "kosdaq"}
 
 
 @router.get("/api/markets/flow-rank")
@@ -68,6 +70,9 @@ async def flow_rank_series(
                 "quantity": r.quantity,
                 "turnover": float(r.turnover) if r.turnover is not None else None,
                 "is_etf": r.is_etf,
+                # §4.6 3.6-1: 2026-07-18부터 적재되는 nullable 컬럼(collectors/flow_rank.py
+                # 참고) — 그 이전 적재분은 market이 NULL로 온다.
+                "market": r.market,
             }
         )
 
@@ -145,5 +150,72 @@ async def flow_path_top(
                 "top_etfs": r.top_etfs or [],
             }
             for r in rows
+        ],
+    }
+
+
+@router.get("/api/markets/value-rank")
+async def value_rank_top(
+    market: str = Query(
+        "all", description="kospi/kosdaq/all(코스피+코스닥을 합쳐 거래대금 내림차순으로 재정렬)"
+    ),
+    days: int = Query(7, ge=1, le=90, description="이 창 안의 가장 최근 value_rank.date만 사용"),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """거래대금 상위 종목("돈이 모이는 곳") 스냅샷 — collectors/value_rank.py가
+    적재한 value_rank 중 days 창 안의 가장 최근 날짜 하나를 골라 반환한다
+    (flow-path 핸들러와 동일 패턴: value_rank도 날짜별 비교 UI가 아직 없는
+    단일 스냅샷 표라 days는 "얼마나 과거까지 최근 날짜를 찾아볼지"에만 쓰인다).
+
+    market="all"일 때는 코스피+코스닥 저장된 상위 종목(각 시장 최대 100개,
+    collectors/value_rank.py TOP_N)을 합쳐 거래대금(value) 내림차순으로 다시
+    정렬하고 새 "표시 순위" 1..N을 매긴다 — 원본 market별 rank와 다를 수 있다
+    (collectors/flow_rank.py가 코스피+코스닥을 합칠 때와 동일한 설계 결정).
+    market="kospi"/"kosdaq"이면 저장된 시장별 rank를 그대로 쓴다.
+    """
+    if market not in MARKET_FILTERS:
+        raise HTTPException(400, f"market must be one of {sorted(MARKET_FILTERS)}")
+
+    since = dt.date.today() - dt.timedelta(days=days)
+    market_clause = [] if market == "all" else [ValueRank.market == market]
+
+    latest_date = (
+        await session.execute(
+            select(func.max(ValueRank.date)).where(ValueRank.date >= since, *market_clause)
+        )
+    ).scalar()
+
+    if latest_date is None:
+        return {"market": market, "date": None, "days": days, "rows": []}
+
+    stmt = (
+        select(ValueRank)
+        .where(ValueRank.date == latest_date, *market_clause)
+        .order_by(ValueRank.market.asc(), ValueRank.rank.asc())
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+
+    if market == "all":
+        rows = sorted(rows, key=lambda r: r.value if r.value is not None else -1, reverse=True)
+        row_ranks = enumerate(rows, start=1)
+    else:
+        row_ranks = ((r.rank, r) for r in rows)
+
+    return {
+        "market": market,
+        "date": latest_date.isoformat(),
+        "days": days,
+        "rows": [
+            {
+                "rank": rank,
+                "market": r.market,
+                "code": r.code,
+                "name": r.name,
+                "value": r.value,
+                "change_rate": float(r.change_rate) if r.change_rate is not None else None,
+                "is_etf": r.is_etf,
+                "turnover": float(r.turnover) if r.turnover is not None else None,
+            }
+            for rank, r in row_ranks
         ],
     }

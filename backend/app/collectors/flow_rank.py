@@ -11,14 +11,20 @@
    실제로 반환한 날짜(들)를 그대로 ``flow_rank.date``에 적재한다 — target_date와 다를
    수 있다(예: 주말/공휴일에 수동 트리거하면 마지막 거래일이 온다). 이 결과 이 잡은
    ``run_job``에 어떤 target_date를 넘겨도 동일하게 동작한다(idempotent).
-2. **시장(코스피/코스닥) 구분을 flow_rank 스키마가 갖고 있지 않음** — models.py의
-   FlowRank PK는 (date, investor, side, rank)뿐이라 시장 컬럼이 없다(수정 금지 대상).
-   PLAN.md §4.5 작업 지시가 "investor에 시장을 합성하지 말고(foreign_kospi 등 금지),
-   시장별로 rank 공간을 나누지도 말 것"이라고 명시했고 "상위 N 안에서 시장 섞임
-   허용"을 대안으로 제시했다 — 그래서 이 수집기는 **코스피 top20 + 코스닥 top20을
-   하나로 합쳐 |net_value| 내림차순으로 재정렬**해 investor(foreign/institution) x
-   side(buy/sell) 하나의 rank 1..N(최대 40)으로 적재한다. 즉 "외국인 순매수 상위"는
-   코스피·코스닥 통합 기준이며, 어느 시장 종목인지는 이 테이블만으로는 알 수 없다.
+2. **시장(코스피/코스닥) 구분은 rank 공간을 나누지 않고 별도 컬럼으로만 보존한다**
+   — models.py의 FlowRank PK는 여전히 (date, investor, side, rank)뿐이다(수정
+   금지 대상). PLAN.md §4.5 작업 지시가 "investor에 시장을 합성하지 말고
+   (foreign_kospi 등 금지), 시장별로 rank 공간을 나누지도 말 것"이라고 명시했고
+   "상위 N 안에서 시장 섞임 허용"을 대안으로 제시했다 — 그래서 이 수집기는
+   **코스피 top20 + 코스닥 top20을 하나로 합쳐 |net_value| 내림차순으로
+   재정렬**해 investor(foreign/institution) x side(buy/sell) 하나의 rank
+   1..N(최대 40)으로 적재한다. 즉 "외국인 순매수 상위"는 코스피·코스닥 통합
+   기준이다. 다만 PLAN.md §4.6 3.6-1(시황 대시보드, market 배지 요구)에서
+   FlowRank에 nullable ``market`` 컬럼(PK 아님)이 추가됐다 — 병합 직전에 각
+   row가 어느 시장 페이지(``MARKETS`` 루프)에서 왔는지 태깅해 두고, 병합·재정렬
+   후에도 그 값을 그대로 저장한다(_upsert_rank_rows의 ``market=row.get("market")``).
+   2026-07-18 이전 적재분은 이 태깅 없이 저장돼 market이 NULL로 남는다
+   (models.py FlowRank docstring 참고).
 3. **side/부호 정규화 (§6 3.5-2b 결정)** — naver_rank.fetch_deal_rank가 type="sell"
    에 대해 반환하는 net_value/quantity는 소스 그대로 음수다. 이 수집기는 그 값을
    ``abs()``로 정규화해 **항상 양수(크기) + side='buy'|'sell' 컬럼**으로 저장한다.
@@ -150,6 +156,9 @@ async def _upsert_rank_rows(
             quantity=None if quantity is None else abs(quantity),
             turnover=turnover_map.get(code),
             is_etf=code in etf_codes,
+            # §4.6 3.6-1: 어느 시장 랭킹 페이지에서 왔는지(kospi/kosdaq) — 병합
+            # 전에 collect_flow_rank가 row별로 태깅해 둔 값을 그대로 저장한다.
+            market=row.get("market"),
         )
         stmt = stmt.on_conflict_do_update(
             index_elements=[FlowRank.date, FlowRank.investor, FlowRank.side, FlowRank.rank],
@@ -160,6 +169,7 @@ async def _upsert_rank_rows(
                 "quantity": stmt.excluded.quantity,
                 "turnover": stmt.excluded.turnover,
                 "is_etf": stmt.excluded.is_etf,
+                "market": stmt.excluded.market,
             },
         )
         await session.execute(stmt)
@@ -195,6 +205,11 @@ async def collect_flow_rank(session: AsyncSession, target_date: dt.date) -> tupl
                     _fetch_deal_rank_blocking, market, investor, side
                 )
                 for block in blocks:
+                    # §4.6 3.6-1: 병합 전에 각 row가 어느 시장 페이지에서 왔는지
+                    # 태깅해 둔다 — 아래에서 코스피+코스닥을 하나로 합쳐 재정렬한
+                    # 뒤에도 market을 잃지 않기 위함(FlowRank.market 컬럼).
+                    for row in block["rows"]:
+                        row["market"] = market
                     by_date.setdefault(block["date"], []).extend(block["rows"])
 
             for date, rows in by_date.items():

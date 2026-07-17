@@ -134,6 +134,44 @@ async def test_collect_flow_rank_merges_markets_and_reranks_by_abs_net_value(mon
     assert DATE2.isoformat() in message
 
 
+async def test_collect_flow_rank_tags_rows_with_source_market(monkeypatch):
+    """§4.6 3.6-1: 코스피+코스닥 병합 이후에도 각 row가 어느 시장에서 왔는지
+    (FlowRank.market) row dict에 남아 있어야 한다 — _upsert_rank_rows가 이 값을
+    그대로 저장한다."""
+    upserted: list[tuple] = []
+    _patch_common(monkeypatch, upserted=upserted)
+
+    await flow_rank.collect_flow_rank(session=None, target_date=DATE2)
+
+    foreign_buy_d1 = next(u for u in upserted if u[1] == "foreign" and u[2] == "buy" and u[0] == DATE1)
+    by_code = {r["code"]: r["market"] for r in foreign_buy_d1[3]}
+    assert by_code == {"069500": "kosdaq", "000660": "kospi"}
+
+
+async def test_upsert_rank_rows_persists_market_column():
+    """실제 _upsert_rank_rows(모킹하지 않은 버전)가 row별 market을 pg_insert
+    values에 그대로 실어 보내는지 — 세션 execute를 가로채 검증한다."""
+    captured_stmts = []
+
+    class FakeSession:
+        async def execute(self, stmt):
+            captured_stmts.append(stmt)
+
+    rows = [
+        {"code": "000660", "name": "SK하이닉스", "net_value": 700, "quantity": 3, "market": "kospi"},
+        {"code": "069500", "name": "KODEX 200", "net_value": 500, "quantity": 2, "market": "kosdaq"},
+    ]
+    session = FakeSession()
+
+    count = await flow_rank._upsert_rank_rows(
+        session, DATE1, "foreign", "buy", rows, etf_codes={"069500"}, turnover_map={}
+    )
+
+    assert count == 2
+    markets = [stmt.compile().params["market"] for stmt in captured_stmts]
+    assert markets == ["kospi", "kosdaq"]
+
+
 async def test_collect_flow_rank_notes_when_target_date_not_returned(monkeypatch):
     _patch_common(monkeypatch)
 
