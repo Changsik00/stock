@@ -265,6 +265,28 @@ class FlowPath(Base):
     top_etfs: Mapped[dict | None] = mapped_column(JSONB)
 
 
+class MarketBreadth(Base):
+    """시장별 등락 종목수 일별 확정치 (PLAN.md §3.5/§4.6 3.6-2).
+
+    adv(상승)/dec(하락)/flat(보합)/limit_up(상한)/limit_down(하한) — 전부 종목수(개).
+    1차 소스는 네이버 시장 요약(finance.naver.com/sise/sise_index.naver, 실호출
+    확정 2026-07-18 — clients/naver_breadth.py 참고). 키움 ka20001 앱키 확보 후
+    정밀 소스로 교체 예정(1.5-3). 장중 값은 이 테이블에 쌓지 않는다 — 장마감 후
+    확정치만 upsert하고, 장중 조회는 /api/markets/breadth/live의 온디맨드 캐시로
+    처리한다(§3.5 원칙).
+    """
+
+    __tablename__ = "market_breadth"
+
+    market: Mapped[str] = mapped_column(String(10), primary_key=True)  # kospi/kosdaq
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    adv: Mapped[int | None] = mapped_column(SmallInteger)
+    dec: Mapped[int | None] = mapped_column(SmallInteger)
+    flat: Mapped[int | None] = mapped_column(SmallInteger)
+    limit_up: Mapped[int | None] = mapped_column(SmallInteger)
+    limit_down: Mapped[int | None] = mapped_column(SmallInteger)
+
+
 class CollectLog(Base):
     """배치 수집 로그 (모니터링·중복 방지)."""
 
