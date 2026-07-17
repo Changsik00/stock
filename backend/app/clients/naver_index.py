@@ -1,0 +1,97 @@
+"""코스피/코스닥/코스피200선물 일봉 — 네이버 증권 fchart(siseJson) API (PLAN.md §3/§5.4).
+
+KRX Open API(data-dbg.krx.co.kr)가 403(서비스 승인 미비)으로 막혀 있어(2026-07),
+지수 일봉 소스를 이 모듈로 교체했다. ``fchart.stock.naver.com/siseJson.naver``는
+Open API 발급 이전부터 흔히 스크레이핑에 쓰이던 네이버의 구(舊) 차트 API로, 인증/키
+없이 심볼 문자열 하나로 지수·선물 모두 조회된다(Playwright로 m.stock.naver.com의
+지수/선물 상세 화면을 열어 실제 XHR을 캡처해 확인 — 2026-07-17).
+
+지원 심볼(SYMBOLS): kospi/kosdaq/k200_futures. k200_futures는 코스피 200 선물
+근월물(연결선물, 코드 ``FUT``)이며, KOSPI200 **지수**가 아니라 실제 선물 종가다.
+
+응답은 JSON이 아니라 홑따옴표/겹따옴표가 섞인 JS 배열 리터럴 텍스트라서
+정규식으로 행을 추출한다(예: ``["20260716", 6960.5, 6995.93, 6730.87, 6820.6,
+424280, 0.0]`` = 날짜/시가/고가/저가/종가/거래량/외국인소진율). 거래대금(원화
+금액)은 이 API에 없어 반환 행에 포함하지 않는다 — 호출 측(collectors/ohlcv.py)이
+``value``를 채우지 못하면 NULL로 둔다.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import re
+
+import requests
+
+FCHART_URL = "https://fchart.stock.naver.com/siseJson.naver"
+
+SYMBOLS = {
+    "kospi": "KOSPI",
+    "kosdaq": "KOSDAQ",
+    "k200_futures": "FUT",
+}
+
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+_ROW_RE = re.compile(
+    r'\["(?P<date>\d{8})",\s*'
+    r"(?P<open>[\d.]+),\s*"
+    r"(?P<high>[\d.]+),\s*"
+    r"(?P<low>[\d.]+),\s*"
+    r"(?P<close>[\d.]+),\s*"
+    r"(?P<volume>\d+),"
+)
+
+
+class NaverIndexError(Exception):
+    """Raised when the fchart response is empty or unparsable."""
+
+
+def fetch_index_series(market: str, start: dt.date, end: dt.date, timeout: int = 15) -> list[dict]:
+    """market(kospi/kosdaq/k200_futures)의 [start, end] 일봉을 오름차순으로 반환.
+
+    Returns ``[{"date": dt.date, "open": float, "high": float, "low": float,
+    "close": float, "volume": int}, ...]``.
+    """
+    symbol = SYMBOLS.get(market)
+    if symbol is None:
+        raise ValueError(f"unknown market {market!r}, expected one of {sorted(SYMBOLS)}")
+
+    resp = requests.get(
+        FCHART_URL,
+        params={
+            "symbol": symbol,
+            "requestType": 1,
+            "startTime": start.strftime("%Y%m%d"),
+            "endTime": end.strftime("%Y%m%d"),
+            "timeframe": "day",
+        },
+        headers={"User-Agent": USER_AGENT},
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+
+    out: list[dict] = []
+    for m in _ROW_RE.finditer(resp.text):
+        d = m.group("date")
+        out.append(
+            {
+                "date": dt.date(int(d[:4]), int(d[4:6]), int(d[6:8])),
+                "open": float(m.group("open")),
+                "high": float(m.group("high")),
+                "low": float(m.group("low")),
+                "close": float(m.group("close")),
+                "volume": int(m.group("volume")),
+            }
+        )
+
+    if not out:
+        raise NaverIndexError(
+            f"no rows parsed for {market} ({symbol}); response head: {resp.text[:200]!r}"
+        )
+
+    out.sort(key=lambda r: r["date"])
+    return out

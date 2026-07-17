@@ -1,9 +1,22 @@
-"""Builds daily time series from the KRX Open API's single-day snapshot endpoints."""
+"""Builds daily time series.
+
+``get_index_series``/``get_futures_series`` below are the *original* KRX Open API
+implementation — kept as-is (unused by the router since 2026-07) because
+krx_client.py itself must stay per PLAN.md, and this code documents how they were
+built. The KRX Open API dataset approval is currently rejected (403), so
+``routers/markets.py`` no longer calls these; it reads ``index_ohlcv`` in the DB
+instead via ``get_market_series_from_db`` (populated by collectors/ohlcv.py —
+yfinance/네이버, see PLAN.md §5.4/§7).
+"""
 
 import logging
 from datetime import date, timedelta
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from .krx_client import KRXClient
+from .models import IndexOhlcv
 
 logger = logging.getLogger("krx")
 
@@ -92,3 +105,63 @@ def get_futures_series(client: KRXClient, days: int) -> list[dict]:
             break
     out.reverse()
     return out
+
+
+# 라우터 market 경로 파라미터(kospi/kosdaq/futures) -> index_ohlcv.market 값
+# (models.py: kospi/kosdaq/k200_futures).
+DB_MARKET = {"kospi": "kospi", "kosdaq": "kosdaq", "futures": "k200_futures"}
+
+
+async def get_market_series_from_db(
+    session: AsyncSession, market: str, days: int
+) -> list[dict]:
+    """market(kospi/kosdaq/futures)의 최근 `days` 거래일 지수 일봉을 DB에서 조회.
+
+    PLAN.md §5.4 "DB 캐싱 우선" — 외부 API를 직접 호출하지 않고 collectors/ohlcv.py가
+    미리 적재해 둔 index_ohlcv만 읽는다. 데이터가 없으면 빈 리스트(에러 아님).
+
+    응답 형태는 위 get_index_series/get_futures_series(KRX 기반, 현재는 미사용)와
+    동일하게 맞춘다 — 프런트가 그대로 동작하도록: date는 "YYYYMMDD" 문자열,
+    changeRate는 index_ohlcv에 컬럼이 없어(KRX가 주던 FLUC_RT 대신) 하루 더 가져와
+    전일 종가 대비로 계산한다. value(거래대금)는 현재 소스(yfinance/네이버)가
+    제공하지 않아 항상 0이다(§7 리스크 참고).
+
+    open/high/low는 index_ohlcv에 그대로 있어 함께 내려준다 (프런트 CandleChart용,
+    2026-07-17 추가 — 기존 필드는 그대로 두는 additive 변경).
+    """
+    db_market = DB_MARKET.get(market)
+    if db_market is None:
+        raise ValueError(f"unknown market {market!r}, expected one of {sorted(DB_MARKET)}")
+
+    # changeRate 계산용 버퍼로 하루치를 더 가져온다 — 나중에 맨 앞 한 건을 잘라낸다.
+    stmt = (
+        select(IndexOhlcv)
+        .where(IndexOhlcv.market == db_market)
+        .order_by(IndexOhlcv.date.desc())
+        .limit(days + 1)
+    )
+    rows = list(reversed((await session.execute(stmt)).scalars().all()))
+
+    out: list[dict] = []
+    prev_close: float | None = None
+    for r in rows:
+        close = float(r.close) if r.close is not None else None
+        change_rate = 0.0
+        if prev_close is not None and close is not None:
+            change_rate = (close - prev_close) / prev_close * 100
+        out.append(
+            {
+                "date": r.date.strftime("%Y%m%d"),
+                "open": float(r.open) if r.open is not None else None,
+                "high": float(r.high) if r.high is not None else None,
+                "low": float(r.low) if r.low is not None else None,
+                "close": close,
+                "changeRate": round(change_rate, 4),
+                "volume": int(r.volume) if r.volume is not None else 0,
+                "value": int(r.value) if r.value is not None else 0,
+            }
+        )
+        if close is not None:
+            prev_close = close
+
+    return out[-days:] if len(out) > days else out

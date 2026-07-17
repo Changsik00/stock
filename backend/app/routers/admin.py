@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 #   from ..collectors import market_flow as _market_flow_collector  # noqa: F401
 from ..collectors import macro as _macro_collector  # noqa: F401
 from ..collectors import market_flow as _market_flow_collector  # noqa: F401
+from ..collectors import ohlcv as _ohlcv_collector  # noqa: F401
 from ..collectors.base import REGISTRY, run_job
 from ..db import get_session
 from ..models import CollectLog

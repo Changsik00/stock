@@ -1,15 +1,17 @@
-"""GET /api/markets/{market}/series — index OHLCV series from the KRX Open API,
+"""GET /api/markets/{market}/series — index OHLCV series from the DB (index_ohlcv),
 merged with DB-cached investor flow (market_flow, PLAN.md §5.2/§5.3/§6 1-5).
 
-This is a lift-and-shift of the original single-endpoint app/main.py logic
-(PLAN.md §5.3). The legacy `/api/series?market=` path is kept as an alias so
-the existing frontend keeps working until it's migrated — it returns only the
-`series` list (no flows) for backward compatibility.
+Both series and flows are DB-only reads (PLAN.md §5.4 "DB 캐싱 우선") — the KRX
+Open API dataset approval is currently rejected (403 as of 2026-07), so this
+router no longer calls it live. index_ohlcv is populated by the daily
+collectors/ohlcv.py batch (yfinance/네이버, see services.get_market_series_from_db
+for the KRX->DB migration note). The legacy `/api/series?market=` path is kept as
+an alias so the existing frontend keeps working until it's migrated — it returns
+only the `series` list (no flows) for backward compatibility.
 """
 
 from __future__ import annotations
 
-import asyncio
 import datetime as dt
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,9 +19,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
-from ..krx_client import KRXAuthError, KRXClient
 from ..models import MarketFlow
-from ..services import get_futures_series, get_index_series
+from ..services import get_market_series_from_db
 
 router = APIRouter(tags=["markets"])
 
@@ -29,27 +30,11 @@ MARKETS = {"kospi", "kosdaq", "futures"}
 FLOW_MARKETS = {"kospi", "kosdaq"}
 
 
-def _build_prices(market: str, days: int) -> dict:
+async def _build_prices(market: str, days: int, session: AsyncSession) -> dict:
     if market not in MARKETS:
         raise HTTPException(400, f"market must be one of {sorted(MARKETS)}")
 
-    try:
-        client = KRXClient()
-    except KRXAuthError as e:
-        raise HTTPException(500, str(e)) from e
-
-    try:
-        if market == "futures":
-            data = get_futures_series(client, days)
-        else:
-            data = get_index_series(client, market, days)
-    except KRXAuthError as e:
-        raise HTTPException(
-            502,
-            "KRX Open API 인증/승인 오류입니다. openapi.krx.co.kr 마이페이지에서 "
-            f"해당 데이터셋 이용 승인 상태를 확인하세요. ({e})",
-        ) from e
-
+    data = await get_market_series_from_db(session, market, days)
     return {"market": market, "days": days, "series": data}
 
 
@@ -87,23 +72,20 @@ async def market_series(
     days: int = Query(90, ge=1, le=400),
     session: AsyncSession = Depends(get_session),
 ):
-    # _build_prices makes up to `days` sequential blocking `requests` calls to the KRX
-    # Open API. This endpoint must stay `async def` (it awaits the DB flow query below),
-    # so the blocking call is offloaded via to_thread — otherwise it would run directly
-    # on the single event loop and serialize every other in-flight request (including
-    # unrelated ones) for the full duration of the KRX fetch.
-    result = await asyncio.to_thread(_build_prices, market, days)
+    result = await _build_prices(market, days, session)
     result["prices"] = result.pop("series")
     result["flows"] = await _build_flows(market, days, session)
     return result
 
 
 @router.get("/api/series")
-def legacy_series(market: str = Query(...), days: int = Query(90, ge=1, le=400)):
+async def legacy_series(
+    market: str = Query(...),
+    days: int = Query(90, ge=1, le=400),
+    session: AsyncSession = Depends(get_session),
+):
     """Deprecated alias for /api/markets/{market}/series — kept for the current frontend.
 
-    Returns only the price series (no flows) for backward compatibility. Stays a plain
-    `def` so Starlette threadpools it automatically (same blocking-call rationale as
-    market_series above).
+    Returns only the price series (no flows) for backward compatibility.
     """
-    return _build_prices(market, days)
+    return await _build_prices(market, days, session)
