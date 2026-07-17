@@ -19,6 +19,11 @@ const eokFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 1, minimu
 const qtyFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 0 })
 const turnoverFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 1, minimumFractionDigits: 1 })
 
+// §4.6 3.6-1: flow_rank.market은 2026-07-18부터 적재되는 nullable 컬럼 — NULL(과거
+// 적재분)이면 배지를 표시하지 않는다. 배지 스타일은 ValueRankTable과 동일하게 기존
+// flow-path-etf-badge(중립색 pill)를 재사용한다.
+const MARKET_LABEL = { kospi: '코스피', kosdaq: '코스닥' }
+
 const INVESTOR_OPTIONS = [
   { key: 'foreign', label: '외국인' },
   { key: 'institution', label: '기관' },
@@ -109,6 +114,11 @@ export default function FlowRankTable({
                     <td>
                       <span className="flow-rank-name">
                         {row.name || row.code}
+                        {row.market && (
+                          <span className="flow-path-etf-badge">
+                            {MARKET_LABEL[row.market] || row.market}
+                          </span>
+                        )}
                         {row.is_etf && <span className="etf-badge">ETF</span>}
                       </span>
                     </td>

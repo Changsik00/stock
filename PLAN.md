@@ -382,7 +382,7 @@ DB 상시 접근이 필요한 동적 기능은 대상 밖이며 추후 실서버
 |---|---|---|---|
 | 1.5-1 ⚠️ | 키움 probe 실측 | `scripts/kiwoom_probe.py` 실행 — TR URL 확정, rate limit 실측, **ka20001 응답에 등락 종목수 필드 존재 확정** (§3.5). **블로킹**: 2026-07-17 실행 결과 토큰 발급이 실전/모의 양쪽 다 `8001` 인증 실패로 막힘 — TR URL·rate limit·ka20001 필드 전부 미검증. 코드는 준비됨(`ka20001` 호출·`step_d` 덤프 단계 추가 완료, 정적분석 근거 URL 반영) — **앱키 재발급 후 재실행만 하면 됨** | 실측 결과를 kiwoom.py 주석/TR_RESOURCE_URL에 반영, 문서화 — *URL/rate limit/필드 확정은 미완료, 앱키 재발급 대기* |
 | 1.5-2 ✅ | KOFIA 수집 | clients/kofia.py + macro 배치 편입 + 3년 backfill — 예탁금·신용융자·**대차잔고** | macro_series에 kofia 시리즈 3년치 적재, collect_log ok |
-| 1.5-3 | breadth 수집·API | market_breadth 테이블(마이그레이션) + collectors/breadth.py(일별) + `/breadth`·`/breadth/live` | 일별 등락 종목수 적재 + 장중 live 호출 동작 |
+| 1.5-3 ✅* | breadth 수집·API | market_breadth 테이블(마이그레이션) + collectors/breadth.py(일별) + `/breadth`·`/breadth/live` | 일별 등락 종목수 적재 + 장중 live 호출 동작 — *네이버 임시 소스로 선구현(3.6-2), 키움 ka20001은 정밀화용(1.5-1 앱키 재발급 후 교체 예정)* |
 | 1.5-4 ✅* | 화면 반영 | MarketPage에 등락 종목수(장중 배지 + 일별 시계열), 예탁금·신용융자·대차잔고 라인차트 | 시장 탭에서 "코스피 ○○○/△△△ 상승/하락" + 자금 차트 확인 — *자금·대차 차트 3종(MarketFundChart) 완료(2026-07-17), 등락 종목수 배지는 1.5-3 완료 후* |
 
 의존성: 1.5-1이 1.5-3의 선행 (ka20001 필드 확정). 1.5-2는 독립 — 병렬 위임 가능.

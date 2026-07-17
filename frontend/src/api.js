@@ -107,6 +107,69 @@ export async function fetchFlowPath(days = 7, limit = 30) {
   return getJson(`/api/markets/flow-path?days=${days}&limit=${limit}`)
 }
 
+// GET /api/markets/value-rank?market=all&days=N -> { market, date, days, rows: [{rank,
+// market, code, name, value, change_rate, is_etf, turnover}] } (PLAN.md §4.6 3.6-1) —
+// 백엔드가 days 창 안의 가장 최근 날짜 하나만 골라 반환한다. 정적 스냅샷은
+// market=all 파일 하나만 덤프하므로(export_static.py), kospi/kosdaq 필터는
+// 클라이언트에서 rows를 걸러내고 rank를 1..N으로 다시 매긴다(라이브 라우터가
+// 시장별 원본 rank를 쓰는 것과 순위 번호가 다를 수 있으나, all에서 거래대금
+// 내림차순으로 이미 정렬돼 있어 표시 순서는 동일하다).
+export async function fetchValueRank(market = 'all', days = 7) {
+  if (STATIC_DATA) {
+    const snapshot = await fetchStaticJson('data/value-rank.json')
+    if (market === 'all') return snapshot
+    const rows = (snapshot.rows || [])
+      .filter((r) => r.market === market)
+      .map((r, i) => ({ ...r, rank: i + 1 }))
+    return { ...snapshot, market, rows }
+  }
+  return getJson(`/api/markets/value-rank?market=${market}&days=${days}`)
+}
+
+// GET /api/markets/{market}/breadth?days=N -> { market, days, series: [{date, adv, dec,
+// flat, limit_up, limit_down}] } (PLAN.md §3.5/§4.6 3.6-2) — 일별 확정치 시계열.
+export async function fetchBreadth(market, days = 30) {
+  if (STATIC_DATA) {
+    const snapshot = await fetchStaticJson(`data/breadth-${market}.json`)
+    const cutoff = isoCutoffDate(days)
+    return {
+      market,
+      days,
+      series: (snapshot.series || []).filter((e) => e.date >= cutoff),
+    }
+  }
+  return getJson(`/api/markets/${market}/breadth?days=${days}`)
+}
+
+// GET /api/markets/breadth/live -> { kospi: {...}|null, kosdaq: {...}|null, cached_at }
+// — 장중 온디맨드(60초 서버 캐시). 정적 모드에서는 라이브 소스를 호출할 수 없으므로
+// 일별 스냅샷(breadth-{market}.json)의 최신 행으로 대체한다 — 호출부(MarketPage)는
+// live 응답이 아닌 것을 `live: false`로 구분해 "장중 잠정치" 라벨을 뗀다.
+export async function fetchBreadthLive() {
+  if (STATIC_DATA) {
+    const [kospi, kosdaq] = await Promise.all([
+      fetchStaticJson('data/breadth-kospi.json').catch(() => null),
+      fetchStaticJson('data/breadth-kosdaq.json').catch(() => null),
+    ])
+    const latest = (snap) => {
+      const series = snap?.series
+      return series && series.length > 0 ? series[series.length - 1] : null
+    }
+    return { kospi: latest(kospi), kosdaq: latest(kosdaq), cached_at: null, live: false }
+  }
+  const body = await getJson('/api/markets/breadth/live')
+  return { ...body, live: true }
+}
+
+// GET /api/groups?type=upjong|theme -> [{name, change_rate, value, market_sum}] —
+// 해당 group_type의 최신 날짜 스냅샷 (PLAN.md §4.6 3.6-3 트리맵).
+export async function fetchGroups(type = 'upjong') {
+  if (STATIC_DATA) {
+    return fetchStaticJson(`data/groups-${type}.json`)
+  }
+  return getJson(`/api/groups?type=${type}`)
+}
+
 // GET /api/macro/series?ids=usdkrw,wti,brent&days=N -> { days, series: { id: [...] } }
 export async function fetchMacroSeries(ids, days) {
   const idParam = Array.isArray(ids) ? ids.join(',') : ids

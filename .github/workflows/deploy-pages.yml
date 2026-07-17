@@ -93,6 +93,21 @@ jobs:
         working-directory: backend
         run: python -m scripts.backfill_flow_rank || echo "::warning::backfill_flow_rank failed, continuing without flow rank data"
 
+      - name: Collect market breadth (오늘 스냅샷)
+        working-directory: backend
+        # 비공식 네이버 소스 — 과거 소급 불가, 실행 시점 값만 적재 (§3.5/§4.6 3.6-2).
+        run: python -m scripts.backfill_breadth || echo "::warning::backfill_breadth failed, continuing without market breadth data"
+
+      - name: Collect value rank (오늘 스냅샷)
+        working-directory: backend
+        # 비공식 네이버 소스 — 과거 소급 불가 (§4.6 3.6-1). flow_rank market 컬럼 재수집 포함.
+        run: python -m scripts.backfill_value_rank || echo "::warning::backfill_value_rank failed, continuing without value rank data"
+
+      - name: Collect group snapshot (오늘 스냅샷)
+        working-directory: backend
+        # 비공식 네이버 소스 — 과거 소급 불가 (§4.6 3.6-3 업종·테마 트리맵).
+        run: python -m scripts.backfill_group || echo "::warning::backfill_group failed, continuing without group snapshot data"
+
       - name: Export static JSON snapshot
         working-directory: backend
         run: python -m scripts.export_static --out-dir ../frontend/public/data

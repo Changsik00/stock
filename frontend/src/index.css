@@ -569,3 +569,19 @@ header h1 {
   color: var(--text-muted);
   font-size: 12px;
 }
+
+/* 등락 종목수(breadth) 배지 패널 — 상단 stat-row 바로 아래, 시장 탭과 무관하게
+   코스피/코스닥을 함께 담는 카드 (PLAN.md §4.6 3.6-2, BreadthBadge.jsx). 배지 내부
+   스타일은 컴포넌트 자체 <style> 블록에 있고 여기는 배치용 컨테이너만 정의한다. */
+.breadth-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+
+.breadth-panel-hint {
+  display: block;
+  margin-bottom: 8px;
+}

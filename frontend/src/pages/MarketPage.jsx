@@ -1,11 +1,23 @@
 import { useEffect, useState } from 'react'
-import { fetchFlowPath, fetchFlowRank, fetchMacroSeries, fetchMarketSeries } from '../api'
+import {
+  fetchBreadth,
+  fetchBreadthLive,
+  fetchFlowPath,
+  fetchFlowRank,
+  fetchGroups,
+  fetchMacroSeries,
+  fetchMarketSeries,
+  fetchValueRank,
+} from '../api'
+import BreadthBadge from '../components/BreadthBadge'
 import CandleChart from '../components/CandleChart'
 import FlowChart from '../components/FlowChart'
 import FlowPathTable from '../components/FlowPathTable'
 import FlowRankTable from '../components/FlowRankTable'
+import GroupTreemap from '../components/GroupTreemap'
 import MarketFundChart from '../components/MarketFundChart'
 import PeriodPicker from '../components/PeriodPicker'
+import ValueRankTable from '../components/ValueRankTable'
 import { MARKET_FUND_IDS, MARKETS } from '../constants'
 
 // 수급 상위 테이블 조회 기간(일) — flow_rank는 배치를 반복 실행한 날짜만 누적되고
@@ -15,6 +27,17 @@ import { MARKET_FUND_IDS, MARKETS } from '../constants'
 const FLOW_RANK_LOOKBACK_DAYS = 7
 
 const numFmt = new Intl.NumberFormat('ko-KR')
+
+const GROUP_TYPE_OPTIONS = [
+  { key: 'upjong', label: '업종' },
+  { key: 'theme', label: '테마' },
+]
+
+const VALUE_RANK_MARKET_OPTIONS = [
+  { key: 'all', label: '전체' },
+  { key: 'kospi', label: '코스피' },
+  { key: 'kosdaq', label: '코스닥' },
+]
 
 // 코스피/코스닥/선물: 지수 캔들+거래량(CandleChart, lightweight-charts) 아래에 투자자별
 // 수급(FlowChart)을 이어 붙인다 (PLAN.md §5.1/§6 1-5). market_flow가 비어 있으면
@@ -38,6 +61,19 @@ export default function MarketPage() {
   const [flowPathRows, setFlowPathRows] = useState([])
   const [flowPathError, setFlowPathError] = useState(null)
   const [flowPathLoading, setFlowPathLoading] = useState(false)
+  // 등락 종목수(breadth) 배지 — 시장 탭과 무관하게 코스피/코스닥을 함께 보여준다.
+  // breadth = { kospi, kosdaq, live: bool, date: string|null } (camelCase 변환 완료 상태)
+  const [breadth, setBreadth] = useState(null)
+  const [breadthError, setBreadthError] = useState(null)
+  const [groupType, setGroupType] = useState('upjong')
+  const [groupItems, setGroupItems] = useState([])
+  const [groupError, setGroupError] = useState(null)
+  const [groupLoading, setGroupLoading] = useState(false)
+  const [valueRankMarket, setValueRankMarket] = useState('all')
+  const [valueRankDate, setValueRankDate] = useState(null)
+  const [valueRankRows, setValueRankRows] = useState([])
+  const [valueRankError, setValueRankError] = useState(null)
+  const [valueRankLoading, setValueRankLoading] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -128,6 +164,113 @@ export default function MarketPage() {
     }
   }, [])
 
+  // 등락 종목수 배지 — 장중엔 live(60초 서버 캐시) 우선, 실패 시 일별 최신 확정치로
+  // 폴백한다 (PLAN.md §3.5/§4.6 3.6-2). 백엔드 응답은 snake_case(limit_up/limit_down)
+  // 이므로 BreadthBadge가 기대하는 camelCase로 여기서 변환한다.
+  useEffect(() => {
+    let cancelled = false
+    const toCamel = (row) =>
+      row
+        ? {
+            adv: row.adv,
+            dec: row.dec,
+            flat: row.flat,
+            limitUp: row.limit_up ?? row.limitUp,
+            limitDown: row.limit_down ?? row.limitDown,
+          }
+        : null
+
+    async function load() {
+      try {
+        const body = await fetchBreadthLive()
+        if (cancelled) return
+        setBreadth({
+          kospi: toCamel(body.kospi),
+          kosdaq: toCamel(body.kosdaq),
+          live: body.live !== false,
+          // 정적 모드 폴백 행에는 date가 있다(일별 스냅샷) — live 응답에는 없음.
+          date: body.kospi?.date || body.kosdaq?.date || null,
+        })
+        return
+      } catch {
+        // live 실패(장 마감 후 소스 장애 등) — 일별 최신 확정치로 폴백.
+      }
+      try {
+        const [kospiBody, kosdaqBody] = await Promise.all([
+          fetchBreadth('kospi', 30).catch(() => null),
+          fetchBreadth('kosdaq', 30).catch(() => null),
+        ])
+        if (cancelled) return
+        const last = (body) => {
+          const series = body?.series
+          return series && series.length > 0 ? series[series.length - 1] : null
+        }
+        const kospiRow = last(kospiBody)
+        const kosdaqRow = last(kosdaqBody)
+        if (!kospiRow && !kosdaqRow) {
+          setBreadthError('등락 종목수 데이터를 불러오지 못했습니다.')
+          return
+        }
+        setBreadth({
+          kospi: toCamel(kospiRow),
+          kosdaq: toCamel(kosdaqRow),
+          live: false,
+          date: kospiRow?.date || kosdaqRow?.date || null,
+        })
+      } catch (e) {
+        if (!cancelled) setBreadthError(e.message)
+      }
+    }
+
+    load()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // 업종/테마 트리맵 — 토글(groupType)에만 반응한다 (PLAN.md §4.6 3.6-3).
+  useEffect(() => {
+    let cancelled = false
+    setGroupLoading(true)
+    setGroupError(null)
+    fetchGroups(groupType)
+      .then((items) => {
+        if (!cancelled) setGroupItems(items || [])
+      })
+      .catch((e) => {
+        if (!cancelled) setGroupError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setGroupLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [groupType])
+
+  // 거래대금 상위 — 시장 필터(all/kospi/kosdaq)에만 반응한다 (PLAN.md §4.6 3.6-1).
+  useEffect(() => {
+    let cancelled = false
+    setValueRankLoading(true)
+    setValueRankError(null)
+    fetchValueRank(valueRankMarket, FLOW_RANK_LOOKBACK_DAYS)
+      .then((body) => {
+        if (!cancelled) {
+          setValueRankDate(body.date)
+          setValueRankRows(body.rows || [])
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setValueRankError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setValueRankLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [valueRankMarket])
+
   const latest = prices?.length ? prices[prices.length - 1] : null
   const hasFlows = Object.keys(flows || {}).length > 0
   const flowCapableMarket = market !== 'futures'
@@ -181,6 +324,24 @@ export default function MarketPage() {
         </div>
       )}
 
+      {(breadth || breadthError) && (
+        <div className="breadth-panel">
+          {breadth && (
+            <>
+              <div className="toggle-hint breadth-panel-hint">
+                등락 종목수 — {breadth.live ? '장중 잠정치 (60초 캐시)' : '일별 확정치'}
+              </div>
+              <BreadthBadge
+                kospi={breadth.kospi}
+                kosdaq={breadth.kosdaq}
+                date={breadth.live ? null : breadth.date}
+              />
+            </>
+          )}
+          {breadthError && <div className="toggle-hint">{breadthError}</div>}
+        </div>
+      )}
+
       {loading && <div className="state">불러오는 중…</div>}
       {error && <div className="state error">{error}</div>}
       {!loading && !error && prices && prices.length === 0 && (
@@ -202,6 +363,44 @@ export default function MarketPage() {
           )}
         </>
       )}
+
+      <div className="section-title">업종·테마 강약</div>
+      <div className="toggle-row">
+        {GROUP_TYPE_OPTIONS.map((opt) => (
+          <button
+            key={opt.key}
+            type="button"
+            className={`toggle-chip ${groupType === opt.key ? 'active' : ''}`}
+            onClick={() => setGroupType(opt.key)}
+          >
+            {opt.label}
+          </button>
+        ))}
+        <span className="toggle-hint">일별 스냅샷 · 색 = 등락률</span>
+      </div>
+      {groupLoading && <div className="state">불러오는 중…</div>}
+      {groupError && <div className="state error">{groupError}</div>}
+      {!groupLoading && !groupError && <GroupTreemap items={groupItems} sizeBy="value" />}
+
+      <div className="section-title">거래대금 상위</div>
+      <div className="toggle-row">
+        {VALUE_RANK_MARKET_OPTIONS.map((opt) => (
+          <button
+            key={opt.key}
+            type="button"
+            className={`toggle-chip ${valueRankMarket === opt.key ? 'active' : ''}`}
+            onClick={() => setValueRankMarket(opt.key)}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+      <ValueRankTable
+        rows={valueRankRows}
+        loading={valueRankLoading}
+        error={valueRankError}
+        date={valueRankDate}
+      />
 
       <div className="section-title">수급 상위</div>
       <FlowRankTable
