@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { fetchFlowRank, fetchMacroSeries, fetchMarketSeries } from '../api'
+import { fetchFlowPath, fetchFlowRank, fetchMacroSeries, fetchMarketSeries } from '../api'
 import CandleChart from '../components/CandleChart'
 import FlowChart from '../components/FlowChart'
+import FlowPathTable from '../components/FlowPathTable'
 import FlowRankTable from '../components/FlowRankTable'
 import MarketFundChart from '../components/MarketFundChart'
 import PeriodPicker from '../components/PeriodPicker'
@@ -32,6 +33,10 @@ export default function MarketPage() {
   const [flowRankDates, setFlowRankDates] = useState([])
   const [flowRankError, setFlowRankError] = useState(null)
   const [flowRankLoading, setFlowRankLoading] = useState(false)
+  const [flowPathDate, setFlowPathDate] = useState(null)
+  const [flowPathRows, setFlowPathRows] = useState([])
+  const [flowPathError, setFlowPathError] = useState(null)
+  const [flowPathLoading, setFlowPathLoading] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -96,6 +101,30 @@ export default function MarketPage() {
       cancelled = true
     }
   }, [flowRankInvestor])
+
+  // ETF 경유 수급 상위(flow_path)도 시장 탭과 무관하게 페이지 마운트 시 한 번만
+  // 불러온다 — 백엔드가 이미 최신 날짜 하나만 골라 상위 목록을 반환한다 (PLAN.md §4.5).
+  useEffect(() => {
+    let cancelled = false
+    setFlowPathLoading(true)
+    setFlowPathError(null)
+    fetchFlowPath(FLOW_RANK_LOOKBACK_DAYS, 30)
+      .then((body) => {
+        if (!cancelled) {
+          setFlowPathDate(body.date)
+          setFlowPathRows(body.rows || [])
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setFlowPathError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setFlowPathLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const latest = prices?.length ? prices[prices.length - 1] : null
   const hasFlows = Object.keys(flows || {}).length > 0
@@ -179,6 +208,14 @@ export default function MarketPage() {
         loading={flowRankLoading}
         error={flowRankError}
         dates={flowRankDates}
+      />
+
+      <div className="section-title">ETF 경유 수급 상위</div>
+      <FlowPathTable
+        loading={flowPathLoading}
+        error={flowPathError}
+        date={flowPathDate}
+        rows={flowPathRows}
       />
 
       <div className="section-title">시장 자금·대차</div>

@@ -494,6 +494,16 @@ header h1 {
   font-variant-numeric: tabular-nums;
 }
 
+/* FlowPathTable의 ETF 경유 유입/직접 순매수 금액 — 한국 증시 관행(§5.4 색상 규칙):
+   양수(순유입/순매수)=빨강, 음수(순유출/순매도)=파랑. */
+.flow-rank-table td.num.up {
+  color: var(--up);
+}
+
+.flow-rank-table td.num.down {
+  color: var(--down);
+}
+
 .flow-rank-table td {
   padding: 7px 12px;
   border-bottom: 1px solid var(--border);
@@ -527,4 +537,29 @@ header h1 {
   background: var(--badge-etf-bg);
   color: var(--badge-etf-fg);
   flex: none;
+}
+
+/* ETF 경유 수급 상위 (PLAN.md §4.5, FlowPathTable.jsx) — 기여 ETF 배지 목록. */
+.flow-path-etf-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 260px;
+  white-space: normal;
+}
+
+.flow-path-etf-badge {
+  display: inline-block;
+  font-size: 10px;
+  color: var(--text-secondary);
+  background: var(--chip-bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  cursor: default;
+}
+
+.flow-path-etf-empty {
+  color: var(--text-muted);
+  font-size: 12px;
 }

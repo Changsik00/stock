@@ -90,6 +90,19 @@ export async function fetchFlowRank(investor, days = 7) {
   return getJson(`/api/markets/flow-rank?investor=${investor}&days=${days}`)
 }
 
+// GET /api/markets/flow-path?days=N&limit=M -> { date, days, rows: [{code, name,
+// direct_net, via_etf_net, top_etfs}] } (PLAN.md §4.5/§6 3.5-3) — ETF look-through
+// 상위: 백엔드가 days 창 안의 가장 최근 flow_path.date 하나만 골라 via_etf_net
+// 내림차순으로 반환한다(flow-rank처럼 날짜별로 묶지 않음 — 화면도 항상 최신 1개
+// 날짜만 보여줌).
+export async function fetchFlowPath(days = 7, limit = 30) {
+  if (STATIC_DATA) {
+    const snapshot = await fetchStaticJson('data/flow-path.json')
+    return snapshot
+  }
+  return getJson(`/api/markets/flow-path?days=${days}&limit=${limit}`)
+}
+
 // GET /api/macro/series?ids=usdkrw,wti,brent&days=N -> { days, series: { id: [...] } }
 export async function fetchMacroSeries(ids, days) {
   const idParam = Array.isArray(ids) ? ids.join(',') : ids
