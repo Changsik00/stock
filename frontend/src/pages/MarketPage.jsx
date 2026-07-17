@@ -1,10 +1,17 @@
 import { useEffect, useState } from 'react'
-import { fetchMacroSeries, fetchMarketSeries } from '../api'
+import { fetchFlowRank, fetchMacroSeries, fetchMarketSeries } from '../api'
 import CandleChart from '../components/CandleChart'
 import FlowChart from '../components/FlowChart'
+import FlowRankTable from '../components/FlowRankTable'
 import MarketFundChart from '../components/MarketFundChart'
 import PeriodPicker from '../components/PeriodPicker'
 import { MARKET_FUND_IDS, MARKETS } from '../constants'
+
+// 수급 상위 테이블 조회 기간(일) — flow_rank는 배치를 반복 실행한 날짜만 누적되고
+// 소스 자체도 주말/공휴일 지연이 있어(PLAN.md §4.5, backend clients/naver_rank.py
+// docstring) 1일 창으로는 "최근 거래일"을 놓칠 수 있다. 넉넉히 잡고 화면에는 항상
+// 반환된 것 중 가장 최근 날짜 하나만 보여준다(FlowRankTable 참고).
+const FLOW_RANK_LOOKBACK_DAYS = 7
 
 const numFmt = new Intl.NumberFormat('ko-KR')
 
@@ -21,6 +28,10 @@ export default function MarketPage() {
   const [fundSeries, setFundSeries] = useState({})
   const [fundError, setFundError] = useState(null)
   const [fundLoading, setFundLoading] = useState(false)
+  const [flowRankInvestor, setFlowRankInvestor] = useState('foreign')
+  const [flowRankDates, setFlowRankDates] = useState([])
+  const [flowRankError, setFlowRankError] = useState(null)
+  const [flowRankLoading, setFlowRankLoading] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -64,6 +75,27 @@ export default function MarketPage() {
       cancelled = true
     }
   }, [days])
+
+  // 수급 상위(flow_rank)는 시장 탭(코스피/코스닥/선물)과 무관하게 외인/기관 토글에만
+  // 반응한다 — 백엔드가 이미 코스피+코스닥을 통합한 랭킹을 주기 때문 (PLAN.md §4.5).
+  useEffect(() => {
+    let cancelled = false
+    setFlowRankLoading(true)
+    setFlowRankError(null)
+    fetchFlowRank(flowRankInvestor, FLOW_RANK_LOOKBACK_DAYS)
+      .then((body) => {
+        if (!cancelled) setFlowRankDates(body.dates || [])
+      })
+      .catch((e) => {
+        if (!cancelled) setFlowRankError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setFlowRankLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [flowRankInvestor])
 
   const latest = prices?.length ? prices[prices.length - 1] : null
   const hasFlows = Object.keys(flows || {}).length > 0
@@ -139,6 +171,15 @@ export default function MarketPage() {
           )}
         </>
       )}
+
+      <div className="section-title">수급 상위</div>
+      <FlowRankTable
+        investor={flowRankInvestor}
+        onInvestorChange={setFlowRankInvestor}
+        loading={flowRankLoading}
+        error={flowRankError}
+        dates={flowRankDates}
+      />
 
       <div className="section-title">시장 자금·대차</div>
       {fundLoading && <div className="state">불러오는 중…</div>}
