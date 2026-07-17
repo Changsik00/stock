@@ -1,0 +1,410 @@
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.1);
+  --series-price: #2a78d6;
+  --series-value: #1baf7a;
+  --up: #d03b3b;
+  --down: #256abf;
+  --chip-bg: #f0efec;
+
+  /* 투자자 카테고리 식별색 — 카테고리 순서 고정(개인·외국인·기관계·금융투자·보험·투신·사모·연기금),
+     dataviz 스킬 categorical 8-hue 팔레트(고정 순서) 그대로 사용. FlowChart/MarketPage/향후
+     StockPage에서 동일 투자자는 항상 동일 색(레이블 옆 identity dot)으로 표시한다. */
+  --investor-1: #2a78d6;
+  --investor-2: #1baf7a;
+  --investor-3: #eda100;
+  --investor-4: #008300;
+  --investor-5: #4a3aa7;
+  --investor-6: #e34948;
+  --investor-7: #e87ba4;
+  --investor-8: #eb6834;
+
+  --banner-bg: #f0efec;
+  --banner-border: rgba(11, 11, 11, 0.1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme='light'])) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.1);
+    --series-price: #3987e5;
+    --series-value: #199e70;
+    --up: #e66767;
+    --down: #3987e5;
+    --chip-bg: #262623;
+
+    --investor-1: #3987e5;
+    --investor-2: #199e70;
+    --investor-3: #c98500;
+    --investor-4: #008300;
+    --investor-5: #9085e9;
+    --investor-6: #e66767;
+    --investor-7: #d55181;
+    --investor-8: #d95926;
+
+    --banner-bg: #262623;
+    --banner-border: rgba(255, 255, 255, 0.1);
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255, 255, 255, 0.1);
+  --series-price: #3987e5;
+  --series-value: #199e70;
+  --up: #e66767;
+  --down: #3987e5;
+  --chip-bg: #262623;
+
+  --investor-1: #3987e5;
+  --investor-2: #199e70;
+  --investor-3: #c98500;
+  --investor-4: #008300;
+  --investor-5: #9085e9;
+  --investor-6: #e66767;
+  --investor-7: #d55181;
+  --investor-8: #d95926;
+
+  --banner-bg: #262623;
+  --banner-border: rgba(255, 255, 255, 0.1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--text-primary);
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+#root {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 32px 20px 80px;
+}
+
+header h1 {
+  font-size: 22px;
+  margin: 0 0 6px;
+}
+
+.subtitle {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0 0 24px;
+  max-width: 640px;
+}
+
+.tabs,
+.ranges {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.tab,
+.range {
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+
+.tab.active,
+.range.active {
+  background: var(--chip-bg);
+  color: var(--text-primary);
+  border-color: var(--border);
+  font-weight: 600;
+}
+
+.ranges {
+  margin-bottom: 20px;
+}
+
+.stat-row {
+  display: flex;
+  gap: 28px;
+  padding: 16px 0;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.stat-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.stat-value {
+  font-size: 18px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-value.up {
+  color: var(--up);
+}
+
+.stat-value.down {
+  color: var(--down);
+}
+
+.state {
+  padding: 40px 0;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.state.error {
+  color: var(--up);
+}
+
+.chart-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.chart-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 8px 8px;
+}
+
+.chart-title {
+  font-size: 13px;
+  color: var(--text-secondary);
+  padding: 0 12px 8px;
+}
+
+.tooltip {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+
+.tooltip-date {
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.tooltip-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.tooltip-row .up {
+  color: var(--up);
+}
+
+.tooltip-row .down {
+  color: var(--down);
+}
+
+/* 페이지 탭(시장/매크로/종목/ETF) — 기존 .tabs(시장/기간 토글)와 위계를 구분하기 위해
+   별도 클래스로 둔다. */
+.page-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+.page-tab {
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 10px 4px;
+  margin-bottom: -1px;
+  cursor: pointer;
+}
+
+.page-tab.active {
+  color: var(--text-primary);
+  font-weight: 600;
+  border-bottom-color: var(--series-price);
+}
+
+.page-tab:disabled {
+  color: var(--text-muted);
+  opacity: 0.5;
+  cursor: default;
+}
+
+.placeholder {
+  padding: 60px 0;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.banner {
+  background: var(--banner-bg);
+  border: 1px solid var(--banner-border);
+  border-radius: 10px;
+  padding: 12px 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 16px;
+  line-height: 1.5;
+}
+
+.section-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 28px 0 10px;
+}
+
+.section-title:first-of-type {
+  margin-top: 20px;
+}
+
+.toggle-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.toggle-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 10px 5px 8px;
+  cursor: pointer;
+}
+
+.toggle-chip.active {
+  background: var(--chip-bg);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.toggle-chip:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.toggle-chip .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.toggle-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  align-self: center;
+}
+
+.flow-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.flow-row {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 8px 4px;
+}
+
+.flow-row-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0 12px 6px;
+}
+
+.flow-row-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.flow-row-name .dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.flow-row-latest {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.flow-charts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.flow-chart-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 0 12px;
+}
+
+@media (max-width: 640px) {
+  .flow-charts {
+    grid-template-columns: 1fr;
+  }
+}
