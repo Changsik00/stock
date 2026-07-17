@@ -222,6 +222,10 @@ frontend/
 TimescaleDB 전환점: `stock_ohlcv`·`stock_flow`가 수백만 행을 넘거나 분봉을 쌓기 시작하면
 `create_hypertable('stock_ohlcv', 'date')` 적용 (스키마 변경 불필요).
 
+**배포**: GitHub Pages 정적 스냅샷(CI에서 일일 수집→JSON→빌드, `.github/workflows/deploy-pages.yml`,
+`backend/scripts/export_static.py`) — https://changsik00.github.io/stock/ . 실시간/종목 검색 등
+DB 상시 접근이 필요한 동적 기능은 대상 밖이며 추후 실서버가 필요하다.
+
 ### 5.3 백엔드 API 계약
 
 | 엔드포인트 | 응답 요지 |
