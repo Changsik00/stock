@@ -1,0 +1,18 @@
+.env
+.env.*
+!.env.example
+
+# 키움 REST API 접근토큰 캐시 (app/clients/kiwoom.py) — 24h 유효 토큰이 평문으로 들어있음
+backend/.kiwoom_token.json
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+node_modules/
+dist/
+build/
+
+.DS_Store
+.serena/
