@@ -1,15 +1,15 @@
 import { useEffect, useState } from 'react'
 import { fetchMacroSeries, fetchMarketSeries } from '../api'
+import CandleChart from '../components/CandleChart'
 import FlowChart from '../components/FlowChart'
 import MarketFundChart from '../components/MarketFundChart'
 import PeriodPicker from '../components/PeriodPicker'
 import { MARKET_FUND_IDS, MARKETS } from '../constants'
-import MarketChart from '../MarketChart'
 
 const numFmt = new Intl.NumberFormat('ko-KR')
 
-// 코스피/코스닥/선물: 지수 종가 라인 + 거래대금(MarketChart, 기존 대시보드 보존) 아래에
-// 투자자별 수급(FlowChart)을 이어 붙인다 (PLAN.md §5.1/§6 1-5). market_flow가 비어 있으면
+// 코스피/코스닥/선물: 지수 캔들+거래량(CandleChart, lightweight-charts) 아래에 투자자별
+// 수급(FlowChart)을 이어 붙인다 (PLAN.md §5.1/§6 1-5). market_flow가 비어 있으면
 // (KRX 로그인 미설정) 수급 영역은 안내 배너로 대체하고, 화면은 시세만으로도 성립한다.
 export default function MarketPage() {
   const [market, setMarket] = useState('kospi')
@@ -111,7 +111,7 @@ export default function MarketPage() {
       {!loading && !error && prices && prices.length === 0 && (
         <div className="state">해당 기간에 표시할 데이터가 없습니다.</div>
       )}
-      {!loading && !error && prices && prices.length > 0 && <MarketChart series={prices} />}
+      {!loading && !error && prices && prices.length > 0 && <CandleChart data={prices} />}
 
       {!loading && flowCapableMarket && (
         <>

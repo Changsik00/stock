@@ -408,3 +408,42 @@ header h1 {
     grid-template-columns: 1fr;
   }
 }
+
+.candle-chart-card {
+  padding: 16px 8px 8px;
+}
+
+.candle-chart-wrap {
+  position: relative;
+  width: 100%;
+}
+
+.candle-chart-container {
+  position: absolute;
+  inset: 0;
+}
+
+.candle-legend {
+  position: absolute;
+  z-index: 2;
+  top: 4px;
+  left: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  visibility: hidden;
+}
+
+.candle-legend .up {
+  color: var(--up);
+  font-weight: 600;
+}
+
+.candle-legend .down {
+  color: var(--down);
+  font-weight: 600;
+}
