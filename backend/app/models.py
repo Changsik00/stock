@@ -156,6 +156,60 @@ class Watchlist(Base):
     )
 
 
+class EtfHolding(Base):
+    """ETF 구성종목 일별 스냅샷 (PLAN.md §4.5).
+
+    stock_code/etf_code는 stocks 마스터가 아직 완전하지 않아(Phase 2-2 전)
+    FK를 걸지 않는다. weight는 % (예: 8.1234 = 8.12%).
+    """
+
+    __tablename__ = "etf_holdings"
+
+    etf_code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    stock_code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    weight: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    shares: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class EtfStat(Base):
+    """ETF 일별 통계 — NAV/AUM/순유입 (PLAN.md §4.5). 금액 단위 백만 원."""
+
+    __tablename__ = "etf_stats"
+
+    code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    nav: Mapped[float | None] = mapped_column(Numeric(18, 4))
+    aum: Mapped[int | None] = mapped_column(BigInteger)
+    net_inflow: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class FlowRank(Base):
+    """투자자별 순매수 상위 종목 일별 스냅샷 (PLAN.md §4.5). net_value 단위 백만 원."""
+
+    __tablename__ = "flow_rank"
+
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    investor: Mapped[str] = mapped_column(String(30), primary_key=True)
+    rank: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+    code: Mapped[str] = mapped_column(String(20), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(100))
+    net_value: Mapped[int | None] = mapped_column(BigInteger)
+    is_etf: Mapped[bool] = mapped_column(nullable=False, default=False)
+
+
+class FlowPath(Base):
+    """종목별 수급 경로 분해 캐시 — 직접 vs ETF 경유 (PLAN.md §4.5). 단위 백만 원."""
+
+    __tablename__ = "flow_path"
+
+    code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    direct_net: Mapped[int | None] = mapped_column(BigInteger)
+    via_etf_net: Mapped[int | None] = mapped_column(BigInteger)
+    top_etfs: Mapped[dict | None] = mapped_column(JSONB)
+
+
 class CollectLog(Base):
     """배치 수집 로그 (모니터링·중복 방지)."""
 
