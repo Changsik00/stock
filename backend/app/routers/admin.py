@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # is what makes that job runnable via POST /api/admin/collect/{job} and picked up by the
 # scheduler. Add new collector imports below as they land, e.g.:
 #   from ..collectors import market_flow as _market_flow_collector  # noqa: F401
+from ..collectors import etf_master as _etf_master_collector  # noqa: F401
+from ..collectors import flow_rank as _flow_rank_collector  # noqa: F401
 from ..collectors import macro as _macro_collector  # noqa: F401
 from ..collectors import market_flow as _market_flow_collector  # noqa: F401
 from ..collectors import ohlcv as _ohlcv_collector  # noqa: F401

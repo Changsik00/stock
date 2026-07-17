@@ -84,6 +84,15 @@ jobs:
         # 것이 정상이지만(clients/ecos.py), 만일을 대비해 실패해도 계속 진행한다.
         run: python -m scripts.backfill_macro 3 || echo "::warning::backfill_macro failed, continuing without full macro snapshot data"
 
+      - name: Collect ETF master/holdings (오늘 스냅샷)
+        working-directory: backend
+        # 비공식 네이버 소스 — 실패해도 잡 전체를 죽이지 않는다 (§4.5).
+        run: python -m scripts.backfill_etf || echo "::warning::backfill_etf failed, continuing without ETF holdings data"
+
+      - name: Collect flow rank (최근 2거래일)
+        working-directory: backend
+        run: python -m scripts.backfill_flow_rank || echo "::warning::backfill_flow_rank failed, continuing without flow rank data"
+
       - name: Export static JSON snapshot
         working-directory: backend
         run: python -m scripts.export_static --out-dir ../frontend/public/data
