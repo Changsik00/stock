@@ -205,6 +205,100 @@ async def test_sector_investor_net_buy_accepts_preformatted_date_string(make_cli
     assert captured["body"]["mrkt_tp"] == "1"
 
 
+def _intraday_investor_response(request: httpx.Request) -> httpx.Response:
+    assert request.headers["api-id"] == "ka10063"
+    return httpx.Response(
+        200,
+        json={
+            "return_code": 0,
+            "return_msg": "",
+            "opmr_invsr_trde": [
+                {"stk_cd": "005930_AL", "stk_nm": "삼성전자", "netprps_amt": "-1557"}
+            ],
+        },
+        headers={"cont-yn": "N", "next-key": "", "api-id": "ka10063"},
+    )
+
+
+async def test_intraday_investor_trading_request_shape(make_client):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return _token_response(request)
+        assert request.url.path == "/api/dostk/mrkcond"
+        captured["body"] = json.loads(request.content)
+        return _intraday_investor_response(request)
+
+    client = make_client(handler)
+    try:
+        data, headers = await client.intraday_investor_trading(mrkt_tp="001", invsr="6")
+    finally:
+        await client.aclose()
+
+    assert captured["body"] == {
+        "mrkt_tp": "001",
+        "amt_qty_tp": "1",
+        "invsr": "6",
+        "frgn_all": "1",
+        "smtm_netprps_tp": "1",
+        "stex_tp": "3",
+    }
+    assert headers["api-id"] == "ka10063"
+    # 실호출 확인 사항(2026-07-18 probe, kiwoom.py 모듈 docstring 참고): 응답은
+    # 시장 합계가 아니라 종목별 배열이다.
+    row = data["opmr_invsr_trde"][0]
+    assert row["stk_cd"] == "005930_AL"
+
+
+def _after_hours_investor_response(request: httpx.Request) -> httpx.Response:
+    assert request.headers["api-id"] == "ka10066"
+    return httpx.Response(
+        200,
+        json={
+            "return_code": 0,
+            "return_msg": "",
+            "opaf_invsr_trde": [
+                {
+                    "stk_cd": "000020_AL",
+                    "stk_nm": "동화약품",
+                    "ind_invsr": "1123",
+                    "frgnr_invsr": "-642",
+                    "orgn": "97",
+                }
+            ],
+        },
+        headers={"cont-yn": "N", "next-key": "", "api-id": "ka10066"},
+    )
+
+
+async def test_after_hours_investor_trading_request_shape(make_client):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return _token_response(request)
+        assert request.url.path == "/api/dostk/mrkcond"
+        captured["body"] = json.loads(request.content)
+        return _after_hours_investor_response(request)
+
+    client = make_client(handler)
+    try:
+        data, headers = await client.after_hours_investor_trading(mrkt_tp="001")
+    finally:
+        await client.aclose()
+
+    assert captured["body"] == {
+        "mrkt_tp": "001",
+        "amt_qty_tp": "1",
+        "trde_tp": "0",
+        "stex_tp": "3",
+    }
+    assert headers["api-id"] == "ka10066"
+    row = data["opaf_invsr_trde"][0]
+    assert row["ind_invsr"] == "1123"
+
+
 async def test_return_code_error_raises_kiwoom_api_error(make_client):
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/oauth2/token":

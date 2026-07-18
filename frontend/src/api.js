@@ -174,6 +174,17 @@ export async function fetchBreadthLive() {
   return { ...body, live: true }
 }
 
+// GET /api/markets/flow/live -> { kospi: {date, investors, provisional, source}|null,
+// kosdaq: {...}|null, market_closed, cached_at } (PLAN.md §6 3.7-3) — 장중 온디맨드
+// 투자자별 순매수(60초 서버 캐시). 정적 배포(VITE_STATIC_DATA)에는 로컬 전용 기능이라
+// 대상이 아니다(PLAN.md 3.7-3 "실시간은 로컬 전용 — github.io는 일별 스냅샷 유지") —
+// 호출부(DashboardPage)가 STATIC_DATA일 때 이 함수를 아예 호출하지 않는다(breadth/live
+// 처럼 스냅샷 폴백을 만들지 않음 — 애초에 "잠정치"라는 개념 자체가 정적 스냅샷에는
+// 없기 때문).
+export async function fetchFlowLive() {
+  return getJson('/api/markets/flow/live')
+}
+
 // GET /api/groups?type=upjong|theme -> [{name, change_rate, value, market_sum}] —
 // 해당 group_type의 최신 날짜 스냅샷 (PLAN.md §4.6 3.6-3 트리맵).
 export async function fetchGroups(type = 'upjong') {

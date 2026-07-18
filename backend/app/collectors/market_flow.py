@@ -134,6 +134,20 @@ async def _fetch_kiwoom_flow(
     return out
 
 
+async def fetch_live_flow(client: KiwoomClient, market: str, target_date: dt.date) -> list[dict]:
+    """`GET /api/markets/flow/live`(routers/markets.py, PLAN.md §6 3.7-3)가 "장중 잠정"
+    소스로 재사용하는 얇은 공개 래퍼 — `_fetch_kiwoom_flow`와 로직이 완전히 같다
+    (투자자 필드 매핑을 두 곳에 중복 정의하지 않기 위해 그대로 위임).
+
+    `target_date`에 오늘(KST) 날짜를 넣으면 비영업일에는 가장 최근 확정 거래일
+    값을 에러 없이 그대로 돌려준다(2026-07-18 실측, `clients/kiwoom.py` 모듈
+    docstring "ka10063/ka10066 장중 잠정 수급 probe" 절 참고 — ka10063/ka10066은
+    시장 합계 행이 없어 대신 이미 검증된 ka10051을 재사용하기로 한 결정의 근거도
+    같은 절에 있다).
+    """
+    return await _fetch_kiwoom_flow(client, market, target_date)
+
+
 async def collect(session: AsyncSession, target_date: dt.date) -> int:
     """kospi/kosdaq의 target_date 투자자별 순매수를 market_flow에 upsert.
 

@@ -14,22 +14,37 @@ Also owns the market_breadth endpoints (PLAN.md §3.5/§4.6 3.6-2):
 - GET /api/markets/breadth/live — 장중 온디맨드. clients/naver_breadth.py를
   직접(DB 경유 없이) 호출하고 60초 메모리 캐시로 감싼다 — §3.5 원칙("장중 값은
   DB에 쌓지 않는다")을 지키기 위해 market_breadth 테이블에는 절대 쓰지 않는다.
+
+Also owns GET /api/markets/flow/live (PLAN.md §6 Phase 3.7-3) — 장중 잠정 투자자별
+순매수. breadth/live와 같은 60초 메모리 캐시 패턴이지만 소스가 다르다: 원래
+PLAN.md가 가정한 ka10063(장중투자자별매매)은 실호출 검증 결과 종목별 배열이라
+시장 합계를 얻으려면 비용이 크다(clients/kiwoom.py 모듈 docstring "ka10063/
+ka10066 장중 잠정 수급 probe" 절 참고) — 대신 이미 검증된 ka10051(§6 1-4
+일별 배치 소스)을 base_dt=오늘로 재사용한다(collectors/market_flow.py의
+fetch_live_flow). 라이브 호출이 실패하면 market_flow DB의 최신 확정치로
+폴백한다(provisional=False) — breadth/live와 달리 이 엔드포인트는 그 폴백을
+위해 DB 세션이 필요하다.
 """
 
 from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import logging
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..clients import naver_breadth
+from ..clients.kiwoom import KiwoomClient
+from ..collectors.market_flow import fetch_live_flow
 from ..db import get_session
 from ..models import MarketBreadth, MarketFlow
 from ..services import get_market_series_from_db
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["markets"])
 
@@ -187,4 +202,110 @@ async def market_breadth_live():
         }
         _live_cache["data"] = payload
         _live_cache["ts"] = now
+        return payload
+
+
+# GET /api/markets/flow/live 60초 메모리 캐시 — breadth/live와 동일한 이유
+# (프로세스 재기동 시 초기화되는 단순 캐시로 충분, 동시 요청은 asyncio.Lock으로 감쌈).
+_FLOW_LIVE_CACHE_TTL_SECONDS = 60
+_flow_live_cache: dict[str, object] = {"ts": 0.0, "data": None}
+_flow_live_cache_lock = asyncio.Lock()
+
+KST = dt.timezone(dt.timedelta(hours=9))
+# 정규장 마감(15:30 KST) 이후 여부 — PLAN.md §6 3.7-3 지시대로 공휴일/주말 구분 없이
+# "단순히 KST 15:30 이후 여부"만 본다(추정 플래그, 정밀 개장일력 아님).
+_MARKET_CLOSE_TIME_KST = dt.time(15, 30)
+
+
+def _market_closed_kst(now_kst: dt.datetime) -> bool:
+    return now_kst.time() >= _MARKET_CLOSE_TIME_KST
+
+
+def _serialize_flow_investors(rows: list[dict]) -> dict[str, dict]:
+    return {r["investor"]: {"net_value": r["net_value"], "net_volume": r["net_volume"]} for r in rows}
+
+
+async def _fetch_flow_live_for_market(client: KiwoomClient, market: str, today_kst: dt.date) -> dict | None:
+    """ka10051(sector_investor_net_buy, base_dt=오늘)을 "장중 잠정" 소스로 재사용한다
+    — 이유는 clients/kiwoom.py 모듈 docstring "ka10063/ka10066 장중 잠정 수급 probe"
+    절 참고. 종합 행을 못 찾으면(휴장 등) None."""
+    flows = await fetch_live_flow(client, market, today_kst)
+    if not flows:
+        return None
+    return {
+        "date": today_kst.isoformat(),
+        "investors": _serialize_flow_investors(flows),
+        "provisional": True,
+        "source": "kiwoom_live",
+    }
+
+
+async def _fetch_flow_confirmed_for_market(session: AsyncSession, market: str) -> dict | None:
+    """market_flow DB의 해당 시장 최신 날짜 확정치 — 라이브 실패 시 폴백."""
+    latest_date = (
+        await session.execute(select(func.max(MarketFlow.date)).where(MarketFlow.market == market))
+    ).scalar_one_or_none()
+    if latest_date is None:
+        return None
+    rows = (
+        await session.execute(
+            select(MarketFlow).where(MarketFlow.market == market, MarketFlow.date == latest_date)
+        )
+    ).scalars().all()
+    investors = {r.investor: {"net_value": r.net_value, "net_volume": r.net_volume} for r in rows}
+    return {"date": latest_date.isoformat(), "investors": investors, "provisional": False, "source": "market_flow_db"}
+
+
+@router.get("/api/markets/flow/live")
+async def market_flow_live(session: AsyncSession = Depends(get_session)):
+    """장중 잠정 투자자별 순매수 — PLAN.md §6 Phase 3.7-3.
+
+    코스피/코스닥 각각 ka10051(base_dt=오늘)을 온디맨드로 호출해 60초 메모리
+    캐시로 감싼다(모듈 docstring 참고 — ka10063 대신 이 TR을 쓰는 이유). 시장별로
+    독립 처리해 한쪽이 실패해도 다른 쪽은 정상 반환하고, 라이브 호출이 실패한
+    시장은 market_flow DB의 최신 확정치로 폴백한다(``provisional: false``).
+    두 시장 다 라이브·폴백 전부 실패하면 502.
+
+    Returns ``{"kospi": {...}|None, "kosdaq": {...}|None, "market_closed": bool,
+    "cached_at": iso8601}`` — 각 시장 값은 ``{"date", "investors":
+    {투자자명: {net_value, net_volume}}, "provisional", "source"}``.
+    """
+    now = time.monotonic()
+    async with _flow_live_cache_lock:
+        cached = _flow_live_cache["data"]
+        if cached is not None and (now - _flow_live_cache["ts"]) < _FLOW_LIVE_CACHE_TTL_SECONDS:
+            return cached
+
+        now_kst = dt.datetime.now(KST)
+        today_kst = now_kst.date()
+        market_closed = _market_closed_kst(now_kst)
+
+        result: dict[str, dict | None] = {"kospi": None, "kosdaq": None}
+        errors: dict[str, str] = {}
+        try:
+            async with KiwoomClient() as client:
+                for market in ("kospi", "kosdaq"):
+                    try:
+                        result[market] = await _fetch_flow_live_for_market(client, market, today_kst)
+                    except Exception as e:  # noqa: BLE001 - 한 시장 실패가 다른 시장을 막지 않도록
+                        errors[market] = str(e)[:200]
+        except Exception as e:  # noqa: BLE001 - 클라이언트 생성/토큰 발급 자체 실패(앱키 미설정 등)
+            errors["_client"] = str(e)[:200]
+            logger.warning("market_flow_live: KiwoomClient 실패, DB 폴백으로 진행: %s", e)
+
+        for market in ("kospi", "kosdaq"):
+            if result.get(market) is None:
+                result[market] = await _fetch_flow_confirmed_for_market(session, market)
+
+        if result.get("kospi") is None and result.get("kosdaq") is None:
+            raise HTTPException(502, f"market flow live fetch failed: {errors}")
+
+        payload = {
+            "kospi": result.get("kospi"),
+            "kosdaq": result.get("kosdaq"),
+            "market_closed": market_closed,
+            "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        _flow_live_cache["data"] = payload
+        _flow_live_cache["ts"] = now
         return payload

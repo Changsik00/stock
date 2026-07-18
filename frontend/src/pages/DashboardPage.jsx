@@ -3,6 +3,7 @@ import {
   STATIC_DATA,
   fetchBreadth,
   fetchBreadthLive,
+  fetchFlowLive,
   fetchFlowPath,
   fetchFlowRank,
   fetchGroups,
@@ -59,6 +60,9 @@ const VALUE_RANK_MARKET_OPTIONS = [
   { key: 'kosdaq', label: '코스닥' },
 ]
 const FLOW_RANK_LOOKBACK_DAYS = 7
+// 장중 잠정 수급(PLAN.md §6 3.7-3) 자동 갱신 주기 — 백엔드 60초 캐시(routers/markets.py
+// GET /api/markets/flow/live)와 맞춘다. 그보다 짧게 폴링해도 캐시 히트라 낭비만 커진다.
+const FLOW_LIVE_POLL_MS = 60_000
 
 function eokLabel(million) {
   if (typeof million !== 'number') return '-'
@@ -540,6 +544,11 @@ export default function DashboardPage() {
   const [sentiment, setSentiment] = useState(null)
   const [breadth, setBreadth] = useState(null)
 
+  // 장중 잠정 수급(PLAN.md §6 3.7-3) — null이면 "라이브 없음"(폴링 전 최초 로딩 중이거나
+  // 실패)이라 아래 투자자별 수급 요약 타일은 항상 기존 확정치(flowInvestorSummary)로
+  // 폴백한다. 정적 배포(STATIC_DATA)에서는 이 state가 항상 null로 남아 기존 동작 그대로다.
+  const [flowLive, setFlowLive] = useState(null)
+
   const [fundSeries, setFundSeries] = useState({})
 
   const [groupType, setGroupType] = useState('upjong')
@@ -626,6 +635,30 @@ export default function DashboardPage() {
     load()
     return () => {
       cancelled = true
+    }
+  }, [])
+
+  // 장중 잠정 수급 폴링 (PLAN.md §6 3.7-3) — 정적 배포에서는 애초에 시도하지 않는다
+  // (로컬 전용 기능, api.js fetchFlowLive 주석 참고). 60초 간격 setInterval, 페이지를
+  // 벗어나면(언마운트) 정리한다. 실패해도 조용히 null로 두고 기존 확정치 타일로
+  // 폴백하므로 별도 에러 상태를 만들지 않는다.
+  useEffect(() => {
+    if (STATIC_DATA) return undefined
+    let cancelled = false
+    function load() {
+      fetchFlowLive()
+        .then((body) => {
+          if (!cancelled) setFlowLive(body)
+        })
+        .catch(() => {
+          if (!cancelled) setFlowLive(null)
+        })
+    }
+    load()
+    const intervalId = setInterval(load, FLOW_LIVE_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(intervalId)
     }
   }, [])
 
@@ -734,6 +767,27 @@ export default function DashboardPage() {
   const creditLoanPrev = creditLoanSum(fundPrev)
 
   const etfComponent = sentiment?.components?.etf
+
+  // 장중 잠정 수급 — 코스피+코스닥 investors를 투자자별로 합산한다(기존 확정치
+  // flowInvestorSummary와 같은 모양: {투자자명: net_value}). 장 마감(market_closed)
+  // 이후이거나 두 시장 다 provisional이 아니면(=백엔드가 이미 DB 확정치로 폴백한
+  // 경우) "장중 잠정" 타일을 켤 이유가 없으므로 flowLiveActive를 false로 둔다 —
+  // PLAN.md §6 3.7-3 지시: "장중엔 live 값 + 배지, 실패·마감 후엔 기존 확정치 + 라벨".
+  const flowLiveActive = Boolean(
+    flowLive && flowLive.market_closed === false && (flowLive.kospi?.provisional || flowLive.kosdaq?.provisional)
+  )
+  const flowLiveSummary = (() => {
+    if (!flowLiveActive) return null
+    const out = {}
+    for (const name of DEFAULT_INVESTORS) {
+      const kospiVal = flowLive.kospi?.investors?.[name]?.net_value
+      const kosdaqVal = flowLive.kosdaq?.investors?.[name]?.net_value
+      if (kospiVal === undefined && kosdaqVal === undefined) continue
+      out[name] = (kospiVal ?? 0) + (kosdaqVal ?? 0)
+    }
+    return out
+  })()
+
   const flowInvestorSummary = (() => {
     const kospi = marketData.kospi
     const kosdaq = marketData.kosdaq
@@ -937,11 +991,17 @@ export default function DashboardPage() {
         />
       </div>
 
-      {/* 5. 투자자별 수급 요약 */}
+      {/* 5. 투자자별 수급 요약 — 장중에는 라이브 잠정치(PLAN.md §6 3.7-3) + "장중 잠정"
+          배지, 그 외(장마감 후·라이브 실패·정적 배포)에는 기존 확정치 + "확정(날짜)"
+          라벨로 자동 전환된다(flowLiveActive, 위 계산부 참고). */}
       <div className="section-title">투자자별 수급 요약</div>
       <div className="kpi-grid">
         {DEFAULT_INVESTORS.map((name) => {
+          const liveValue = flowLiveSummary?.[name]
+          const isLive = liveValue !== undefined
           const row = flowInvestorSummary?.[name]
+          const value = isLive ? liveValue : row?.net_value
+          const hasValue = value !== undefined && value !== null
           return (
             <KpiTile
               key={name}
@@ -950,9 +1010,17 @@ export default function DashboardPage() {
                   <span className="dot" style={{ background: INVESTOR_COLOR_VAR[name] }} /> {name}
                 </>
               }
-              value={row ? eokLabel(row.net_value) : marketLoading ? '…' : '-'}
-              valueClass={row ? (row.net_value >= 0 ? 'up' : 'down') : ''}
-              sub={row?.date && <span className="kpi-tile-sub">{formatDate(row.date)} 기준</span>}
+              value={hasValue ? eokLabel(value) : marketLoading ? '…' : '-'}
+              valueClass={hasValue ? (value >= 0 ? 'up' : 'down') : ''}
+              sub={
+                isLive ? (
+                  <span className="kpi-tile-sub">
+                    <Badge kind="live" />
+                  </span>
+                ) : (
+                  row?.date && <span className="kpi-tile-sub">확정 · {formatDate(row.date)}</span>
+                )
+              }
               onClick={() => setModal({ type: 'flowSummary', title: '투자자별 수급 (코스피+코스닥)' })}
             />
           )
