@@ -50,6 +50,14 @@
      않는 순수 주황을 쓴다. */
   --badge-live-bg: #ffedd5;
   --badge-live-fg: #9a3412;
+  /* 외인 양손 시그널 배지(PLAN.md §4.5-5) — "함정 탐지기 아님, 중립 계기판" 원칙이라
+     경보색(순빨강)은 피한다. warn(현·선 방향 상이/만기 임박)은 badge-live와 같은
+     주황 계열(이미 "주의를 끄는 상태"라는 뜻으로 쓰고 있음), info(백워데이션)는
+     지시 문구("파랑 계열 강조")대로 --down과 겹치지 않는 옅은 파랑을 쓴다. */
+  --badge-warn-bg: #ffedd5;
+  --badge-warn-fg: #9a3412;
+  --badge-info-bg: #dbeafe;
+  --badge-info-fg: #1e3a8a;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -94,6 +102,10 @@
     --badge-futures-fg: #022c22;
     --badge-live-bg: #fb923c;
     --badge-live-fg: #431407;
+    --badge-warn-bg: #fb923c;
+    --badge-warn-fg: #431407;
+    --badge-info-bg: #60a5fa;
+    --badge-info-fg: #0c1c3d;
   }
 }
 
@@ -135,6 +147,10 @@
   --badge-futures-fg: #022c22;
   --badge-live-bg: #fb923c;
   --badge-live-fg: #431407;
+  --badge-warn-bg: #fb923c;
+  --badge-warn-fg: #431407;
+  --badge-info-bg: #60a5fa;
+  --badge-info-fg: #0c1c3d;
 }
 
 * {
@@ -626,6 +642,33 @@ header h1 {
 .badge-live {
   background: var(--badge-live-bg);
   color: var(--badge-live-fg);
+}
+
+.badge-warn {
+  background: var(--badge-warn-bg);
+  color: var(--badge-warn-fg);
+}
+
+.badge-info {
+  background: var(--badge-info-bg);
+  color: var(--badge-info-fg);
+}
+
+/* 외인 양손 시그널 배지 줄(PLAN.md §4.5-5) — 섹션 제목 아래, 타일 위에 배치되는
+   클릭 가능한 배지 목록. 배지가 없을 때는 렌더되지 않는다(호출부에서 빈 배열이면
+   행 자체를 생략). */
+.signal-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.signal-row button.badge {
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
 }
 
 /* ETF 경유 수급 상위 (PLAN.md §4.5, FlowPathTable.jsx) — 기여 ETF 배지 목록. */

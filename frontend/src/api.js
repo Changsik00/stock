@@ -218,6 +218,41 @@ export async function fetchStockSeries(code, days = 180) {
   return getJson(`/api/stocks/${code}/series?days=${days}`)
 }
 
+// GET /api/markets/basis?days=N -> { days, series: [{date, futures_close, kospi200_close,
+// basis, basis_pct}], latest: {date, backwardation, basis, basis_pct}, expiry: {date, d_day,
+// quadruple} } (PLAN.md §4.5-3/4.5-5) — K200 선물-현물 베이시스 + 다음 만기. latest/expiry는
+// "지금 상태"라 days 창과 무관하게 스냅샷 시점 그대로 반환한다(days는 series 길이만 좌우).
+export async function fetchBasis(days = 180) {
+  if (STATIC_DATA) {
+    const snapshot = await fetchStaticJson('data/basis.json')
+    const cutoff = isoCutoffDate(days)
+    return {
+      days,
+      series: (snapshot.series || []).filter((e) => e.date >= cutoff),
+      latest: snapshot.latest ?? null,
+      expiry: snapshot.expiry ?? null,
+    }
+  }
+  return getJson(`/api/markets/basis?days=${days}`)
+}
+
+// GET /api/etf/derivative-flow?days=N -> { days, universe: {total, leverage, inverse},
+// latest: {date, net_bet, lp_hedge_est, leverage_inflow, inverse_inflow, counts}|null,
+// series: [...] } (PLAN.md §4.5-1/4.5-5) — 파생형(레버리지/인버스) ETF 방향성 게이지.
+export async function fetchDerivativeFlow(days = 30) {
+  if (STATIC_DATA) {
+    const snapshot = await fetchStaticJson('data/derivative-flow.json')
+    const cutoff = isoCutoffDate(days)
+    return {
+      days,
+      universe: snapshot.universe ?? { total: 0, leverage: 0, inverse: 0 },
+      latest: snapshot.latest ?? null,
+      series: (snapshot.series || []).filter((e) => e.date >= cutoff),
+    }
+  }
+  return getJson(`/api/etf/derivative-flow?days=${days}`)
+}
+
 // GET /api/macro/series?ids=usdkrw,wti,brent&days=N -> { days, series: { id: [...] } }
 export async function fetchMacroSeries(ids, days) {
   const idParam = Array.isArray(ids) ? ids.join(',') : ids

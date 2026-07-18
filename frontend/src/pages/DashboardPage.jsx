@@ -2,8 +2,10 @@ import { useEffect, useState } from 'react'
 import {
   STATIC_DATA,
   fetchAttention,
+  fetchBasis,
   fetchBreadth,
   fetchBreadthLive,
+  fetchDerivativeFlow,
   fetchFlowLive,
   fetchFlowPath,
   fetchFlowRank,
@@ -16,6 +18,8 @@ import {
 import Badge from '../components/Badge'
 import BreadthBadge from '../components/BreadthBadge'
 import CandleChart from '../components/CandleChart'
+import EtfDirectionCard from '../components/EtfDirectionCard'
+import ForeignPositionChart from '../components/ForeignPositionChart'
 import FlowChart from '../components/FlowChart'
 import FlowPathTable from '../components/FlowPathTable'
 import FlowRankTable from '../components/FlowRankTable'
@@ -48,6 +52,8 @@ const countFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 0 })
 // 모달, 사용자 원문: "환율·유가 2~3개 차트만으로 탭 하나는 과하다").
 const fxFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 1, minimumFractionDigits: 1 })
 const oilFmt = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2, minimumFractionDigits: 2 })
+// 베이시스(K200 선물-현물, pt) 타일 포맷 — PLAN.md §4.5-3/-5.
+const basisFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 2, minimumFractionDigits: 2 })
 
 // KPI 타일 초기 캔들 모달 기본 기간 — MarketPage와 동일하게 90일(3M)에서 시작한다.
 const DEFAULT_CANDLE_DAYS = 90
@@ -62,6 +68,17 @@ const DEFAULT_MACRO_DAYS = 365
 const MACRO_TILE_DAYS = 10
 // 투자자별 수급 요약 타일 + 모달 — 시장 탭과 동일하게 3M 기본.
 const DEFAULT_FLOW_DAYS = 90
+// 외인 양손(현물·선물·베이시스) 섹션 — PLAN.md §4.5-5. 타일 최신값 계산용으로는
+// 짧은 창(10일)이면 충분하고(마지막 값 + 전일 비교), 상세 모달(ForeignPositionModal)은
+// 시장 탭과 동일하게 90일 기본으로 시작한다.
+const FOREIGN_POSITION_TILE_DAYS = 10
+const DEFAULT_FOREIGN_POSITION_DAYS = 90
+// 프로그램매매 차익 순매수(macro_series prog_arb_*, PLAN.md §4.5-4) — 코스피+코스닥
+// 합산해서 "프로그램 차익 순매수" 타일 하나로 보여준다(신용융자 타일의 creditLoanSum과
+// 동일한 관례).
+const PROGRAM_ARB_IDS = ['prog_arb_kospi', 'prog_arb_kosdaq']
+// 만기 임박 시그널 배지 기준(D-n 이내, PLAN.md §4.5-5 "만기 D-3 이내").
+const EXPIRY_SOON_D_DAY = 3
 const GROUP_TYPE_OPTIONS = [
   { key: 'upjong', label: '업종' },
   { key: 'theme', label: '테마' },
@@ -103,6 +120,12 @@ function fxLabel(value) {
 function oilLabel(value) {
   if (typeof value !== 'number') return '-'
   return `$${oilFmt.format(value)}`
+}
+
+function basisLabel(value) {
+  if (typeof value !== 'number') return '-'
+  const sign = value > 0 ? '+' : ''
+  return `${sign}${basisFmt.format(value)}pt`
 }
 
 function scoreClass(score) {
@@ -208,6 +231,20 @@ function mergeFlows(flowsA, flowsB) {
     merged[inv] = [...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : 1))
   }
   return merged
+}
+
+// flows(투자자 -> [{date, net_value, net_volume}])에서 특정 투자자의 가장 최근 행을
+// 뽑는다 — market_flow 계열 응답을 다루는 여러 곳(외인 현물/선물 타일)에서 공용으로 쓴다.
+function latestFlowRow(flows, investor) {
+  const rows = flows?.[investor]
+  return rows && rows.length > 0 ? rows[rows.length - 1] : null
+}
+
+// 차트 X축 라벨 — 'YYYY-MM-DD' -> 'MM/DD' (MacroChart.jsx/MarketFundChart.jsx의
+// dateLabel과 동일한 관례, 여기서는 formatDate로 먼저 정규화해 'YYYYMMDD' 등도 대응).
+function chartDateLabel(date) {
+  const d = formatDate(date)
+  return typeof d === 'string' && d.length === 10 ? `${d.slice(5, 7)}/${d.slice(8, 10)}` : d
 }
 
 // ---------------------------------------------------------------------------
@@ -508,6 +545,103 @@ function FlowSummaryModal() {
   )
 }
 
+// 외인 양손 상세 — 외인 현물 vs 선물 순매수 시계열 + 베이시스 오버레이(PLAN.md §4.5-5
+// 시그널 배지 클릭 시 열리는 모달). 코스피+코스닥(현물) + 선물 + 베이시스 3개 소스를
+// 날짜 기준으로 병합한다 — CreditLoanChart(MarketFundChart.jsx)와 동일한 "여러 시리즈를
+// Map으로 합친 뒤 라인 여러 개를 겹쳐 그리는" 패턴.
+function ForeignPositionModal() {
+  const [days, setDays] = useState(DEFAULT_FOREIGN_POSITION_DAYS)
+  const [rows, setRows] = useState([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    Promise.all([
+      fetchMarketSeries('kospi', days),
+      fetchMarketSeries('kosdaq', days),
+      fetchMarketSeries('futures', days),
+      fetchBasis(days),
+    ])
+      .then(([kospiBody, kosdaqBody, futuresBody, basisBody]) => {
+        if (cancelled) return
+        const spotRows = mergeFlows(kospiBody.flows, kosdaqBody.flows)['외국인'] || []
+        const futuresRows = futuresBody.flows?.['외국인'] || []
+        const basisRows = basisBody.series || []
+
+        const byDate = new Map()
+        const get = (date) => {
+          if (!byDate.has(date)) byDate.set(date, { date, label: chartDateLabel(date) })
+          return byDate.get(date)
+        }
+        for (const r of spotRows) get(r.date).spot = (r.net_value ?? 0) / 100
+        for (const r of futuresRows) get(r.date).futures = (r.net_value ?? 0) / 100
+        for (const r of basisRows) get(r.date).basis = r.basis
+
+        setRows([...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : 1)))
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [days])
+
+  return (
+    <div>
+      <div className="toggle-hint" style={{ marginBottom: 8 }}>
+        외인 현물(코스피+코스닥) · 선물(K200) 순매수 + 베이시스 — 참고 지표(중립 계기판, 함정 탐지기 아님)
+      </div>
+      <PeriodPicker value={days} onChange={setDays} />
+      {loading && <div className="state">불러오는 중…</div>}
+      {error && <div className="state error">{error}</div>}
+      {!loading && !error && <ForeignPositionChart data={rows} />}
+    </div>
+  )
+}
+
+// 개인 파생ETF 방향성 게이지 상세 — EtfDirectionCard(순수 프레젠테이션, PLAN.md §4.5-1)에
+// derivative-flow 데이터를 붙여주는 자기완결 래퍼. 컴팩트 타일에서 클릭했을 때만
+// 마운트되므로(Modal.jsx 주석 참고) 열 때마다 최신 데이터를 새로 받는다.
+function DerivativeEtfModal() {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    fetchDerivativeFlow(90)
+      .then((body) => {
+        if (!cancelled) setData(body)
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  return (
+    <EtfDirectionCard
+      loading={loading}
+      error={error}
+      universe={data?.universe}
+      latest={data?.latest}
+      series={data?.series ?? []}
+    />
+  )
+}
+
 function FlowRankFullModal({ onRowClick }) {
   const [investor, setInvestor] = useState('foreign')
   const [side, setSide] = useState('buy')
@@ -755,6 +889,14 @@ export default function DashboardPage() {
   // 자기 기간(기본 1Y)만큼 다시 불러오므로 이 state와 무관하다.
   const [macroSeries, setMacroSeries] = useState({})
 
+  // 외인 양손 · 현선물 섹션(PLAN.md §4.5-5) — 베이시스/만기(basisData), 파생ETF
+  // 방향성 게이지(derivativeFlow), 프로그램 차익 순매수(programFlow) 타일용 데이터.
+  // 외인 현물/선물 순매수 자체는 새로 fetch하지 않고 위 marketData(선물 포함)와
+  // 아래 flowInvestorSummary/flowLiveSummary(현물, 코스피+코스닥)를 그대로 재사용한다.
+  const [basisData, setBasisData] = useState(null)
+  const [derivativeFlow, setDerivativeFlow] = useState(null)
+  const [programFlow, setProgramFlow] = useState({})
+
   const [groupType, setGroupType] = useState('upjong')
   const [groupItems, setGroupItems] = useState([])
   const [groupLoading, setGroupLoading] = useState(false)
@@ -920,6 +1062,49 @@ export default function DashboardPage() {
     }
   }, [])
 
+  // 베이시스 + 다음 만기(PLAN.md §4.5-3/-5) — 짧은 창(타일용)이면 충분하지만, 최근
+  // 며칠치가 있어야 "직전 값과 비교" 없이도(베이시스는 전일비 화살표를 두지 않는다)
+  // 최소한 latest가 안정적으로 채워진다.
+  useEffect(() => {
+    let cancelled = false
+    fetchBasis(FOREIGN_POSITION_TILE_DAYS)
+      .then((body) => {
+        if (!cancelled) setBasisData(body)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // 개인 방향성(파생ETF, PLAN.md §4.5-1) 타일 최신값 — 상세는 DerivativeEtfModal이
+  // 별도로(90일) 다시 불러온다.
+  useEffect(() => {
+    let cancelled = false
+    fetchDerivativeFlow(FOREIGN_POSITION_TILE_DAYS)
+      .then((body) => {
+        if (!cancelled) setDerivativeFlow(body)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // 프로그램매매 차익 순매수(PLAN.md §4.5-4) — 코스피+코스닥 두 시리즈를 신용융자
+  // 타일(creditLoanSum)과 동일하게 합산해서 보여준다.
+  useEffect(() => {
+    let cancelled = false
+    fetchMacroSeries(PROGRAM_ARB_IDS, FOREIGN_POSITION_TILE_DAYS)
+      .then((body) => {
+        if (!cancelled) setProgramFlow(body.series || {})
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   useEffect(() => {
     let cancelled = false
     setGroupLoading(true)
@@ -1078,6 +1263,54 @@ export default function DashboardPage() {
     return out
   })()
 
+  // 외인 양손 · 현선물 섹션(PLAN.md §4.5-5) — 현물은 위에서 이미 계산한
+  // flowInvestorSummary/flowLiveSummary의 '외국인' 값을 그대로 재사용하고(중복 fetch
+  // 없음), 선물은 marketData.futures(지수 3종 fetch가 이미 flows까지 받아온다)의
+  // '외국인' 마지막 행을 쓴다.
+  const foreignSpotLiveValue = flowLiveSummary?.['외국인']
+  const foreignSpotIsLive = foreignSpotLiveValue !== undefined
+  const foreignSpotRow = flowInvestorSummary?.['외국인']
+  const foreignSpotValue = foreignSpotIsLive ? foreignSpotLiveValue : foreignSpotRow?.net_value
+  const foreignFuturesRow = latestFlowRow(marketData.futures?.flows, '외국인')
+
+  const basisLatest = basisData?.latest
+  const expiry = basisData?.expiry
+  const derivativeLatest = derivativeFlow?.latest
+  const derivativeUniverse = derivativeFlow?.universe
+
+  // 프로그램 차익 순매수 — 코스피+코스닥 합산(신용융자 타일 creditLoanSum과 동일한 관례).
+  const programLatest = (id) => {
+    const points = programFlow[id] || []
+    return points.length > 0 ? points[points.length - 1].value : null
+  }
+  const programDate = (id) => {
+    const points = programFlow[id] || []
+    return points.length > 0 ? points[points.length - 1].date : null
+  }
+  const programArbKospi = programLatest('prog_arb_kospi')
+  const programArbKosdaq = programLatest('prog_arb_kosdaq')
+  const programArbLatest =
+    programArbKospi === null && programArbKosdaq === null ? null : (programArbKospi ?? 0) + (programArbKosdaq ?? 0)
+  const programArbDate = latestOf(programDate('prog_arb_kospi'), programDate('prog_arb_kosdaq'))
+
+  // 시그널 배지(PLAN.md §4.5-5, 중립 표현 — "함정" 단정 금지) — ① 외인 현물·선물 방향
+  // 대치, ② 백워데이션, ③ 만기 D-3 이내. 값이 없거나(0 포함) 한쪽이 없으면 판단하지
+  // 않는다(오검 방지 — Math.sign(0)===0이라 자연히 걸러진다).
+  const foreignSpotSign = foreignSpotValue === null || foreignSpotValue === undefined ? 0 : Math.sign(foreignSpotValue)
+  const foreignFuturesSign =
+    foreignFuturesRow?.net_value === null || foreignFuturesRow?.net_value === undefined
+      ? 0
+      : Math.sign(foreignFuturesRow.net_value)
+  const directionMismatch = foreignSpotSign !== 0 && foreignFuturesSign !== 0 && foreignSpotSign !== foreignFuturesSign
+  const backwardationSignal = basisLatest?.backwardation === true
+  const expirySoonSignal = typeof expiry?.d_day === 'number' && expiry.d_day >= 0 && expiry.d_day <= EXPIRY_SOON_D_DAY
+
+  const foreignSignals = [
+    directionMismatch && { key: 'direction', kind: 'warn', label: '현·선 방향 상이' },
+    backwardationSignal && { key: 'backwardation', kind: 'info', label: '백워데이션' },
+    expirySoonSignal && { key: 'expiry', kind: 'warn', label: '만기 임박' },
+  ].filter(Boolean)
+
   // 대표 기준일(대시보드 상단 1회 표시) — 소스별로 수집 시차가 있어(지수/수급/ETF 등)
   // 항상 같은 날짜라는 보장이 없으므로, 각 타일 데이터 날짜들 중 최신값 하나만 뽑는다.
   // 사용자 피드백: "타일마다 날짜가 있는데 중복이다. 어차피 마지막 거래일일 텐데" —
@@ -1107,7 +1340,11 @@ export default function DashboardPage() {
     flowPathTop?.date,
     flowRankTop?.date,
     macroDate('usdkrw'),
-    macroDate('wti')
+    macroDate('wti'),
+    foreignFuturesRow?.date,
+    basisLatest?.date,
+    derivativeLatest?.date,
+    programArbDate
   )
 
   return (
@@ -1208,6 +1445,124 @@ export default function DashboardPage() {
             />
           )
         })}
+      </div>
+
+      {/* 2.5 외인 양손 · 현선물 (PLAN.md §4.5-5) — 중립적 상태 계기판, "함정" 단정 표현
+          금지(§4.5 배경). 시그널 배지는 있을 때만 렌더되고, 클릭하면 전부 같은 상세
+          모달(ForeignPositionModal — 현물/선물 시계열 + 베이시스 오버레이)을 연다. */}
+      <div className="section-title">외인 양손 · 현선물</div>
+      {foreignSignals.length > 0 && (
+        <div className="signal-row">
+          {foreignSignals.map((s) => (
+            <button
+              key={s.key}
+              type="button"
+              className={`badge badge-${s.kind}`}
+              onClick={() => setModal({ type: 'foreignPosition', title: '외인 현물 vs 선물 · 베이시스' })}
+              title="외인 현물·선물 순매수와 베이시스 시계열 — 참고 지표(중립 계기판)"
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="kpi-grid">
+        <KpiTile
+          label="외인 현물"
+          value={
+            foreignSpotValue !== undefined && foreignSpotValue !== null
+              ? eokLabel(foreignSpotValue)
+              : marketLoading
+                ? '…'
+                : '-'
+          }
+          valueClass={
+            foreignSpotValue !== undefined && foreignSpotValue !== null ? (foreignSpotValue >= 0 ? 'up' : 'down') : ''
+          }
+          sub={
+            foreignSpotIsLive ? (
+              <span className="kpi-tile-sub">
+                <Badge kind="live" />
+              </span>
+            ) : (
+              foreignSpotRow?.date && (
+                <span className="kpi-tile-sub">
+                  확정
+                  <StaleDate date={foreignSpotRow.date} baseDate={baseDate} prefix=" · " />
+                </span>
+              )
+            )
+          }
+          title="코스피+코스닥 합계"
+          onClick={() => setModal({ type: 'foreignPosition', title: '외인 현물 vs 선물 · 베이시스' })}
+        />
+        <KpiTile
+          label="외인 선물 (K200)"
+          value={foreignFuturesRow ? eokLabel(foreignFuturesRow.net_value) : marketLoading ? '…' : '-'}
+          valueClass={foreignFuturesRow ? (foreignFuturesRow.net_value >= 0 ? 'up' : 'down') : ''}
+          sub={
+            foreignFuturesRow?.date && (
+              <span className="kpi-tile-sub">
+                확정
+                <StaleDate date={foreignFuturesRow.date} baseDate={baseDate} prefix=" · " />
+              </span>
+            )
+          }
+          title={foreignFuturesRow?.date ? formatDate(foreignFuturesRow.date) : undefined}
+          onClick={() => setModal({ type: 'foreignPosition', title: '외인 현물 vs 선물 · 베이시스' })}
+        />
+        <KpiTile
+          label="개인 방향성(파생ETF)"
+          value={derivativeLatest ? eokLabel(derivativeLatest.net_bet) : '…'}
+          valueClass={derivativeLatest ? (derivativeLatest.net_bet >= 0 ? 'up' : 'down') : ''}
+          sub={
+            <span className="kpi-tile-sub">
+              레버리지 {derivativeUniverse?.leverage ?? 0} · 인버스 {derivativeUniverse?.inverse ?? 0}종목
+              <StaleDate date={derivativeLatest?.date} baseDate={baseDate} prefix=" · " />
+            </span>
+          }
+          title={derivativeLatest?.date ? formatDate(derivativeLatest.date) : undefined}
+          onClick={() => setModal({ type: 'derivativeEtf', title: '개인 방향성(파생ETF) · 순베팅' })}
+        />
+        <KpiTile
+          label="베이시스"
+          value={basisLabel(basisLatest?.basis)}
+          valueClass={basisLatest?.basis === undefined || basisLatest?.basis === null ? '' : basisLatest.basis >= 0 ? 'up' : 'down'}
+          sub={
+            <span className="kpi-tile-sub">
+              {basisLatest?.backwardation === undefined || basisLatest?.backwardation === null ? (
+                '-'
+              ) : basisLatest.backwardation ? (
+                <Badge kind="info">백워데이션 · 차익 매도 유의</Badge>
+              ) : (
+                '콘탱고'
+              )}
+              <StaleDate date={basisLatest?.date} baseDate={baseDate} prefix=" · " />
+            </span>
+          }
+          title={basisLatest?.date ? formatDate(basisLatest.date) : undefined}
+          onClick={() => setModal({ type: 'foreignPosition', title: '외인 현물 vs 선물 · 베이시스' })}
+        />
+        <KpiTile
+          label="프로그램 차익 순매수"
+          value={programArbLatest !== null ? eokLabel(programArbLatest) : '…'}
+          valueClass={programArbLatest === null ? '' : programArbLatest >= 0 ? 'up' : 'down'}
+          sub={
+            <span className="kpi-tile-sub">
+              코스피+코스닥
+              <StaleDate date={programArbDate} baseDate={baseDate} prefix=" · " />
+            </span>
+          }
+          title="코스피+코스닥 합계"
+          onClick={() => setModal({ type: 'foreignPosition', title: '외인 현물 vs 선물 · 베이시스' })}
+        />
+        <KpiTile
+          label="다음 만기"
+          value={expiry?.date ? `${mmdd(expiry.date)} · D-${expiry.d_day}` : '…'}
+          sub={expiry?.quadruple && <Badge kind="warn">네 마녀의 날</Badge>}
+          title={expiry?.date ? formatDate(expiry.date) : undefined}
+          onClick={() => setModal({ type: 'foreignPosition', title: '외인 현물 vs 선물 · 베이시스' })}
+        />
       </div>
 
       {/* 3. 시황 · 자금 */}
@@ -1437,6 +1792,8 @@ export default function DashboardPage() {
         {modal?.type === 'fund' && <FundModal />}
         {modal?.type === 'macro' && <MacroModal />}
         {modal?.type === 'flowSummary' && <FlowSummaryModal />}
+        {modal?.type === 'foreignPosition' && <ForeignPositionModal />}
+        {modal?.type === 'derivativeEtf' && <DerivativeEtfModal />}
         {/* 랭킹 3종 전체 보기 모달 — onRowClick을 STATIC_DATA일 때 undefined로 넘겨
             행 클릭 자체를 비활성화한다(TOP5 카드와 동일한 정적 모드 판단, 위
             Top5RowTile 주석 참고). */}

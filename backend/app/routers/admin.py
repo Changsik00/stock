@@ -19,6 +19,7 @@ from ..collectors import group_snapshot as _group_snapshot_collector  # noqa: F4
 from ..collectors import macro as _macro_collector  # noqa: F401
 from ..collectors import market_flow as _market_flow_collector  # noqa: F401
 from ..collectors import ohlcv as _ohlcv_collector  # noqa: F401
+from ..collectors import program_flow as _program_flow_collector  # noqa: F401
 from ..collectors import value_rank as _value_rank_collector  # noqa: F401
 from ..collectors.base import REGISTRY, run_job
 from ..db import get_session
