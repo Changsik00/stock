@@ -328,7 +328,7 @@ function GroupCaption({ groups }) {
   return (
     <div
       className="group-treemap-caption"
-      style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginTop: 8, fontSize: 12, color: 'var(--text-secondary)' }}
+      style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginBottom: 8, fontSize: 12, color: 'var(--text-secondary)' }}
     >
       {groups.map((group, idx) => (
         <span key={group.name} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
@@ -375,6 +375,7 @@ export default function GroupTreemap({ items, sizeBy = 'value' }) {
           거래대금·시가총액 데이터가 없어 모든 박스를 동일 크기로 표시합니다.
         </div>
       )}
+      <GroupCaption groups={captionGroups} />
       <ResponsiveContainer width="100%" height={420}>
         <Treemap
           data={boxes}
@@ -388,7 +389,6 @@ export default function GroupTreemap({ items, sizeBy = 'value' }) {
           <Tooltip content={<GroupTooltip />} />
         </Treemap>
       </ResponsiveContainer>
-      <GroupCaption groups={captionGroups} />
     </div>
   )
 }
