@@ -102,8 +102,11 @@ export default function FlowPathTable({ loading, error, date, rows, direction = 
                 </tr>
               </thead>
               <tbody>
+                {/* key는 row.code가 아니라 i(순위 인덱스)+code — row.code만으로는 같은
+                    종목이 중복 적재되면 React key가 겹친다(FlowRankTable/ValueRankTable과
+                    동일한 duplicate key 수정). i는 이 리스트 안에서 항상 유일하다. */}
                 {rows.map((row, i) => (
-                  <tr key={row.code}>
+                  <tr key={`${i}-${row.code}`}>
                     <td className="flow-rank-rank">{i + 1}</td>
                     <td>
                       <span className="flow-rank-name">{row.name || row.code}</span>
@@ -112,9 +115,13 @@ export default function FlowPathTable({ loading, error, date, rows, direction = 
                     <td className={`num ${signClass(row.direct_net)}`}>{eokLabel(row.direct_net)}</td>
                     <td>
                       <div className="flow-path-etf-badges">
-                        {(row.top_etfs || []).slice(0, 3).map((etf) => (
+                        {/* key에 인덱스(j)를 섞는다 — 같은 종목의 top_etfs 안에 동일
+                            ETF(code)가 두 번 나타나는 경우(예: 서로 다른 basis/date로
+                            중복 집계된 기여분)가 실제로 관측되어(122630/233740 등)
+                            etf.code만으로는 key가 겹쳤다. */}
+                        {(row.top_etfs || []).slice(0, 3).map((etf, j) => (
                           <span
-                            key={etf.code}
+                            key={`${etf.code}-${j}`}
                             className="flow-path-etf-badge"
                             title={`${etf.name || etf.code} · ${eokLabel(etf.contrib)} · ${
                               BASIS_LABEL[etf.basis] || etf.basis

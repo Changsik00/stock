@@ -19,6 +19,7 @@ import FlowChart from '../components/FlowChart'
 import FlowPathTable from '../components/FlowPathTable'
 import FlowRankTable from '../components/FlowRankTable'
 import GroupTreemap from '../components/GroupTreemap'
+import MacroChart from '../components/MacroChart'
 import MarketFundChart from '../components/MarketFundChart'
 import Modal from '../components/Modal'
 import PeriodPicker from '../components/PeriodPicker'
@@ -26,7 +27,7 @@ import SentimentGauge from '../components/SentimentGauge'
 import StockDetailModal from '../components/StockDetailModal'
 import StockSearch from '../components/StockSearch'
 import ValueRankTable from '../components/ValueRankTable'
-import { DEFAULT_INVESTORS, INVESTOR_COLOR_VAR, MARKETS, MARKET_FUND_IDS } from '../constants'
+import { DEFAULT_INVESTORS, INVESTOR_COLOR_VAR, MACRO_SERIES, MARKETS, MARKET_FUND_IDS } from '../constants'
 import { formatDate } from '../format'
 
 // 대시보드 탭 (PLAN.md §6 3.7-1, 사용자 원문: "장황하게 정보가 노출됨. 디테일은 뒤로
@@ -42,12 +43,22 @@ const eokFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 1, minimu
 const joFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 2, minimumFractionDigits: 2 })
 const scoreFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 1, minimumFractionDigits: 1 })
 const countFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 0 })
+// 환율(원/달러 1자리)·유가(달러 2자리) 타일 포맷 — 매크로 탭 통합(환율/WTI 타일 +
+// 모달, 사용자 원문: "환율·유가 2~3개 차트만으로 탭 하나는 과하다").
+const fxFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 1, minimumFractionDigits: 1 })
+const oilFmt = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2, minimumFractionDigits: 2 })
 
 // KPI 타일 초기 캔들 모달 기본 기간 — MarketPage와 동일하게 90일(3M)에서 시작한다.
 const DEFAULT_CANDLE_DAYS = 90
 // 자금(예탁금/대차잔고/신용융자) 모달 차트 기본 기간 — 추세를 보려면 90일보다 넉넉해야
 // 자연스럽다.
 const DEFAULT_FUND_DAYS = 180
+// 매크로(환율/유가) 모달 차트 기본 기간 — 옛 MacroPage.jsx와 동일하게 1Y로 시작한다
+// (환율/유가는 자금 지표보다 변동 주기가 길어 1년 창이 자연스럽다는 기존 판단 유지).
+const DEFAULT_MACRO_DAYS = 365
+// 환율/WTI 타일의 최신값·전일비 계산용 — 최근 2거래일만 있으면 되므로 짧게 잡는다
+// (fundSeries가 fundLatest/fundPrev용으로 10일을 쓰는 관례와 동일).
+const MACRO_TILE_DAYS = 10
 // 투자자별 수급 요약 타일 + 모달 — 시장 탭과 동일하게 3M 기본.
 const DEFAULT_FLOW_DAYS = 90
 const GROUP_TYPE_OPTIONS = [
@@ -77,6 +88,16 @@ function trillion(million) {
 function trillionLabel(million) {
   const t = trillion(million)
   return t === null ? '-' : `${joFmt.format(t)}조`
+}
+
+function fxLabel(value) {
+  if (typeof value !== 'number') return '-'
+  return `${fxFmt.format(value)}원`
+}
+
+function oilLabel(value) {
+  if (typeof value !== 'number') return '-'
+  return `$${oilFmt.format(value)}`
 }
 
 function scoreClass(score) {
@@ -145,13 +166,18 @@ function staleHintLabel(date, baseDate, suffix) {
 }
 
 // 전일比 화살표 — prev가 없으면(첫 값) 표시하지 않는다.
-function DiffArrow({ current, prev, formatter }) {
+// neutral=true면 up/down 색상 클래스를 붙이지 않는다(중립 회색) — 환율 타일 전용.
+// 환율 상승이 "좋은 것"이 아니라 주가 등락(빨강=상승/파랑=하락) 관례와 혼동될 수
+// 있어, 화살표 방향·값은 그대로 두고 색만 뺀다(다른 타일은 예탁금 타일과 동일하게
+// up/down 색을 그대로 쓴다).
+function DiffArrow({ current, prev, formatter, neutral = false }) {
   if (current === null || current === undefined || prev === null || prev === undefined) return null
   const diff = current - prev
   if (diff === 0) return <span className="kpi-tile-sub">보합</span>
   const up = diff > 0
+  const cls = neutral ? '' : up ? 'up' : 'down'
   return (
-    <span className={`kpi-tile-sub ${up ? 'up' : 'down'}`}>
+    <span className={`kpi-tile-sub ${cls}`}>
       {up ? '▲' : '▼'} {formatter(Math.abs(diff))}
     </span>
   )
@@ -388,6 +414,54 @@ function FundModal() {
   )
 }
 
+// 환율(USD/KRW) · WTI · 브렌트 라인차트 3개 + 기간 선택 — 옛 MacroPage.jsx를 그대로
+// 모달로 옮긴 것이다(차트 렌더 로직은 components/MacroChart.jsx로 뽑아 공용화). 타일은
+// 환율/WTI 2개만 두지만(브렌트는 타일 생략 지시) 모달에서는 기존과 동일하게 3개 라인을
+// 전부 보여준다.
+function MacroModal() {
+  const [days, setDays] = useState(DEFAULT_MACRO_DAYS)
+  const [seriesMap, setSeriesMap] = useState({})
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    fetchMacroSeries(
+      MACRO_SERIES.map((s) => s.id),
+      days
+    )
+      .then((body) => {
+        if (!cancelled) setSeriesMap(body.series || {})
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [days])
+
+  return (
+    <div>
+      <PeriodPicker value={days} onChange={setDays} />
+      {loading && <div className="state">불러오는 중…</div>}
+      {error && <div className="state error">{error}</div>}
+      {!loading && !error && (
+        <div className="chart-stack">
+          {MACRO_SERIES.map((s) => (
+            <MacroChart key={s.id} label={s.label} unit={s.unit} points={seriesMap[s.id] || []} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function FlowSummaryModal() {
   const [days, setDays] = useState(DEFAULT_FLOW_DAYS)
   const [flows, setFlows] = useState({})
@@ -591,6 +665,9 @@ export default function DashboardPage() {
   const [flowLive, setFlowLive] = useState(null)
 
   const [fundSeries, setFundSeries] = useState({})
+  // 환율(USD/KRW)·WTI 타일의 최신값/전일비/기준일 계산용 — 모달(MacroModal)은 별도로
+  // 자기 기간(기본 1Y)만큼 다시 불러오므로 이 state와 무관하다.
+  const [macroSeries, setMacroSeries] = useState({})
 
   const [groupType, setGroupType] = useState('upjong')
   const [groupItems, setGroupItems] = useState([])
@@ -717,6 +794,21 @@ export default function DashboardPage() {
 
   useEffect(() => {
     let cancelled = false
+    fetchMacroSeries(
+      MACRO_SERIES.map((s) => s.id),
+      MACRO_TILE_DAYS
+    )
+      .then((body) => {
+        if (!cancelled) setMacroSeries(body.series || {})
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
     setGroupLoading(true)
     setGroupError(null)
     fetchGroups(groupType)
@@ -801,6 +893,18 @@ export default function DashboardPage() {
     const points = fundSeries[id] || []
     return points.length > 1 ? points[points.length - 2].value : null
   }
+  const macroLatest = (id) => {
+    const points = macroSeries[id] || []
+    return points.length > 0 ? points[points.length - 1].value : null
+  }
+  const macroPrev = (id) => {
+    const points = macroSeries[id] || []
+    return points.length > 1 ? points[points.length - 2].value : null
+  }
+  const macroDate = (id) => {
+    const points = macroSeries[id] || []
+    return points.length > 0 ? points[points.length - 1].date : null
+  }
   // 신용융자 타일 — 코스피+코스닥 두 시리즈를 합산해 단일 숫자로 보여준다(MARKET_FUND_IDS
   // 관례상 별도 "합계" id가 없다). 둘 다 없으면 null(대시 표시), 하나라도 있으면 0으로
   // 보정해 더한다.
@@ -853,15 +957,25 @@ export default function DashboardPage() {
   // 사용자 피드백: "타일마다 날짜가 있는데 중복이다. 어차피 마지막 거래일일 텐데" —
   // 실제로는 다를 수 있어 예외 표시(StaleDate/staleHintLabel)로 보완한다.
   const investorDates = DEFAULT_INVESTORS.map((name) => flowInvestorSummary?.[name]?.date).filter(Boolean)
+  // flowLive.date는 market_closed===false(장중)일 때만 대표 기준일 계산에 넣는다.
+  // 휴장일(주말 등)에도 /api/markets/flow/live가 market_closed:true 상태로 오늘 날짜를
+  // 되돌려주는 경우가 있어, 그 날짜를 그대로 latestOf에 섞으면 baseDate가 실제
+  // 마지막 거래일보다 앞으로(오늘로) 부풀어 다른 모든 타일이 "뒤처진 것처럼"
+  // StaleDate 배지가 붙는 왜곡이 생긴다 — 장이 닫힌 날은 확정치 날짜들만으로
+  // 기준일을 정한다(수급 타일의 "장중 잠정" 배지 게이트인 flowLiveActive와 동일하게
+  // market_closed로 판단).
+  const flowLiveOpen = flowLive?.market_closed === false
   const baseDate = latestOf(
     ...MARKETS.map((m) => latestPriceOf(m.key)?.date),
     etfComponent?.date,
     ...investorDates,
-    flowLive?.kospi?.date,
-    flowLive?.kosdaq?.date,
+    flowLiveOpen ? flowLive?.kospi?.date : null,
+    flowLiveOpen ? flowLive?.kosdaq?.date : null,
     valueRankTop?.date,
     flowPathTop?.date,
-    flowRankTop?.date
+    flowRankTop?.date,
+    macroDate('usdkrw'),
+    macroDate('wti')
   )
 
   return (
@@ -1032,6 +1146,40 @@ export default function DashboardPage() {
           title={etfComponent?.date ? formatDate(etfComponent.date) : undefined}
           onClick={() => setModal({ type: 'sentiment', title: '시장 매수세/매도세 게이지' })}
         />
+        {/* 환율/WTI — 매크로 탭 통합(탭 제거, 타일+모달로 편입). 환율은 상승이 "좋은
+            것"이 아니라 주가 등락 색 관례와 혼동될 수 있어 DiffArrow를 neutral로 켜서
+            화살표 색을 중립(회색)으로 둔다 — 값·화살표 방향·포맷 자체는 다른 타일과
+            동일한 관례(예탁금 타일의 DiffArrow)를 그대로 쓴다. WTI는 색상 구분 유지.
+            브렌트는 타일에서 생략하고 모달(MacroModal)에서만 보여준다. */}
+        <KpiTile
+          label="환율(USD/KRW)"
+          value={fxLabel(macroLatest('usdkrw'))}
+          sub={
+            <>
+              <DiffArrow
+                current={macroLatest('usdkrw')}
+                prev={macroPrev('usdkrw')}
+                formatter={(v) => `${fxFmt.format(v)}원`}
+                neutral
+              />
+              <StaleDate date={macroDate('usdkrw')} baseDate={baseDate} prefix=" · " />
+            </>
+          }
+          title={macroDate('usdkrw') ? formatDate(macroDate('usdkrw')) : undefined}
+          onClick={() => setModal({ type: 'macro', title: '환율 · 유가' })}
+        />
+        <KpiTile
+          label="WTI"
+          value={oilLabel(macroLatest('wti'))}
+          sub={
+            <>
+              <DiffArrow current={macroLatest('wti')} prev={macroPrev('wti')} formatter={(v) => `$${oilFmt.format(v)}`} />
+              <StaleDate date={macroDate('wti')} baseDate={baseDate} prefix=" · " />
+            </>
+          }
+          title={macroDate('wti') ? formatDate(macroDate('wti')) : undefined}
+          onClick={() => setModal({ type: 'macro', title: '환율 · 유가' })}
+        />
       </div>
 
       {/* 4. 컴팩트 트리맵 */}
@@ -1125,6 +1273,7 @@ export default function DashboardPage() {
         {modal?.type === 'sentiment' && <SentimentModal />}
         {modal?.type === 'breadth' && <BreadthModal />}
         {modal?.type === 'fund' && <FundModal />}
+        {modal?.type === 'macro' && <MacroModal />}
         {modal?.type === 'flowSummary' && <FlowSummaryModal />}
         {modal?.type === 'flowRank' && <FlowRankFullModal />}
         {modal?.type === 'valueRank' && <ValueRankFullModal />}

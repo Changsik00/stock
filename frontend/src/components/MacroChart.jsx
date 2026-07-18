@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react'
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { fetchMacroSeries } from '../api'
-import PeriodPicker from '../components/PeriodPicker'
-import { MACRO_SERIES } from '../constants'
+
+// 매크로 시계열(환율/유가 등) 라인차트 1개 카드 — 원래 MacroPage.jsx 안에서만 쓰이던
+// 컴포넌트였으나, 매크로 탭이 대시보드 타일+모달로 통합되면서(PLAN.md §6 3.7-1 계열
+// 후속 지시) DashboardPage의 매크로 모달과 공용으로 쓰기 위해 별도 파일로 뺐다.
 
 const numFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 2 })
 
@@ -29,7 +29,7 @@ function makeTooltip(unit) {
   }
 }
 
-function MacroChart({ id, label, unit, points }) {
+export default function MacroChart({ label, unit, points }) {
   const hasData = points.length > 0
   const data = points.map((p) => ({ ...p, label: dateLabel(p.date) }))
   const Tip = makeTooltip(unit)
@@ -70,53 +70,6 @@ function MacroChart({ id, label, unit, points }) {
             />
           </LineChart>
         </ResponsiveContainer>
-      )}
-    </div>
-  )
-}
-
-// 환율(USD/KRW) · WTI · 브렌트 라인차트 3개 세로 배치 (PLAN.md §5.1/§6 1-3).
-export default function MacroPage() {
-  const [days, setDays] = useState(365)
-  const [seriesMap, setSeriesMap] = useState({})
-  const [error, setError] = useState(null)
-  const [loading, setLoading] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-    setLoading(true)
-    setError(null)
-    fetchMacroSeries(
-      MACRO_SERIES.map((s) => s.id),
-      days
-    )
-      .then((body) => {
-        if (!cancelled) setSeriesMap(body.series || {})
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e.message)
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [days])
-
-  return (
-    <div>
-      <PeriodPicker value={days} onChange={setDays} />
-
-      {loading && <div className="state">불러오는 중…</div>}
-      {error && <div className="state error">{error}</div>}
-
-      {!loading && !error && (
-        <div className="chart-stack">
-          {MACRO_SERIES.map((s) => (
-            <MacroChart key={s.id} id={s.id} label={s.label} unit={s.unit} points={seriesMap[s.id] || []} />
-          ))}
-        </div>
       )}
     </div>
   )

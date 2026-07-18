@@ -68,8 +68,12 @@ export default function ValueRankTable({ rows, loading, error, date }) {
                 </tr>
               </thead>
               <tbody>
+                {/* key에 rank도 섞는다 — market+code만으로는 같은 시장 안에 같은 code가
+                    중복 적재된 경우(예: ETF 중복 수집) 여전히 겹칠 수 있다. rank는 이
+                    리스트 안에서 항상 유일하므로 rank+market+code로 유일성을 보장한다
+                    (FlowRankTable과 동일한 duplicate key 수정). */}
                 {rows.map((row) => (
-                  <tr key={`${row.market}-${row.code}`}>
+                  <tr key={`${row.rank}-${row.market}-${row.code}`}>
                     <td className="flow-rank-rank">{row.rank}</td>
                     <td>
                       <span className="flow-rank-name">

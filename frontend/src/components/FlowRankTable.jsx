@@ -110,8 +110,12 @@ export default function FlowRankTable({
                 </tr>
               </thead>
               <tbody>
+                {/* key는 row.code가 아니라 rank+code — 같은 종목(code)이 코스피/코스닥
+                    통합 랭킹 안에 두 번(예: 다른 소스로 중복 적재된 ETF) 나타날 수 있어
+                    row.code만으로는 React key가 겹쳐 "duplicate key" 경고가 났다.
+                    rank는 이 리스트 안에서 항상 유일하므로 rank+code로 유일성을 보장한다. */}
                 {latest.rows.map((row) => (
-                  <tr key={row.code}>
+                  <tr key={`${row.rank}-${row.code}`}>
                     <td className="flow-rank-rank">{row.rank}</td>
                     <td>
                       <span className="flow-rank-name">
