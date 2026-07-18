@@ -508,7 +508,7 @@ function FlowSummaryModal() {
   )
 }
 
-function FlowRankFullModal() {
+function FlowRankFullModal({ onRowClick }) {
   const [investor, setInvestor] = useState('foreign')
   const [side, setSide] = useState('buy')
   const [dates, setDates] = useState([])
@@ -543,11 +543,12 @@ function FlowRankFullModal() {
       loading={loading}
       error={error}
       dates={dates}
+      onRowClick={onRowClick}
     />
   )
 }
 
-function ValueRankFullModal() {
+function ValueRankFullModal({ onRowClick }) {
   const [market, setMarket] = useState('all')
   const [date, setDate] = useState(null)
   const [rows, setRows] = useState([])
@@ -590,12 +591,12 @@ function ValueRankFullModal() {
           </button>
         ))}
       </div>
-      <ValueRankTable rows={rows} loading={loading} error={error} date={date} />
+      <ValueRankTable rows={rows} loading={loading} error={error} date={date} onRowClick={onRowClick} />
     </div>
   )
 }
 
-function FlowPathFullModal() {
+function FlowPathFullModal({ onRowClick }) {
   const [direction, setDirection] = useState('in')
   const [date, setDate] = useState(null)
   const [rows, setRows] = useState([])
@@ -632,6 +633,7 @@ function FlowPathFullModal() {
       rows={rows}
       direction={direction}
       onDirectionChange={setDirection}
+      onRowClick={onRowClick}
     />
   )
 }
@@ -677,12 +679,7 @@ function AttentionFullModal({ onSelectStock }) {
       {!loading && !error && rows.length > 0 && (
         <div>
           {rows.map((row) => (
-            <button
-              key={row.code}
-              type="button"
-              className="top5-row top5-row-clickable"
-              onClick={() => onSelectStock(row)}
-            >
+            <Top5RowTile key={row.code} clickable onClick={() => onSelectStock(row)}>
               <span className="top5-row-name">
                 <span className="top5-row-label">
                   {row.rank ?? '-'}. {row.name || row.code}
@@ -691,11 +688,32 @@ function AttentionFullModal({ onSelectStock }) {
                 {row.is_etf && <Badge kind="etf" />}
               </span>
               <span className={`top5-row-value ${rateClass(row.change_rate)}`}>{rateLabel(row.change_rate)}</span>
-            </button>
+            </Top5RowTile>
           ))}
         </div>
       )}
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// TOP5 카드 행 — clickable=true면 <button>(hover 배경 + 클릭), false면 기존과 동일한
+// <div>(정적 텍스트). 모든 랭킹 행 클릭 → 종목 상세 모달 통일(사용자 요구, 이전엔
+// 실시간 관심 TOP5만 클릭됐다) 작업에서 4개 TOP5 카드가 공유한다. 정적 배포
+// (STATIC_DATA)에서는 호출부가 clickable=false를 넘겨 행을 비활성으로 둔다 —
+// fetchStockSeries가 정적 스냅샷을 지원하지 않아(§ 정적 모드 판단, api.js 참고)
+// 클릭해봤자 항상 에러만 뜨므로, 차라리 클릭 자체를 막는 쪽이 낫다고 판단했다.
+// ---------------------------------------------------------------------------
+function Top5RowTile({ clickable, onClick, children }) {
+  const Tag = clickable ? 'button' : 'div'
+  return (
+    <Tag
+      type={clickable ? 'button' : undefined}
+      className={`top5-row ${clickable ? 'top5-row-clickable' : ''}`}
+      onClick={clickable ? onClick : undefined}
+    >
+      {children}
+    </Tag>
   )
 }
 
@@ -959,6 +977,19 @@ export default function DashboardPage() {
 
   const closeModal = () => setModal(null)
 
+  // 종목 상세 모달을 여는 공용 헬퍼 — 실시간 관심 TOP5(기존)와 수급/거래대금/ETF경유
+  // 랭킹 3종(이번 작업으로 클릭 가능해짐)이 전부 이 함수 하나로 모인다(사용자 요구:
+  // "모든 랭킹 행 클릭 → 종목 상세 모달"). 열려 있던 리스트 모달을 별도로 닫을
+  // 필요는 없다 — setModal은 단일 상태라 새 타입으로 덮어쓰면 그 자체로 "닫고
+  // 교체"가 된다(Modal.jsx가 modal?.type에 따라 자식을 조건부로만 렌더).
+  const openStockModal = (code, name, extra = {}) =>
+    setModal({
+      type: 'stock',
+      title: `${name || code} · 종목 상세`,
+      code,
+      stock: { code, name, ...extra },
+    })
+
   // 지수 타일 + baseDate 계산이 공유하는 헬퍼 — marketData[key].prices의 마지막 값.
   const latestPriceOf = (key) => {
     const data = marketData[key]
@@ -1095,11 +1126,7 @@ export default function DashboardPage() {
             aria-label="종목 검색 (정적 배포 미지원)"
           />
         ) : (
-          <StockSearch
-            onSelect={(stock) =>
-              setModal({ type: 'stock', title: `${stock.name} · 종목 상세`, code: stock.code, stock })
-            }
-          />
+          <StockSearch onSelect={(stock) => openStockModal(stock.code, stock.name, stock)} />
         )}
         {/* 대표 기준일 — 타일별 개별 날짜 대신 여기 한 번만 노출한다(위 baseDate 계산 참고). */}
         {baseDate && (
@@ -1319,7 +1346,11 @@ export default function DashboardPage() {
           rows={flowRankTop?.rows}
           onMore={() => setModal({ type: 'flowRank', title: '수급 상위 — 전체' })}
           renderRow={(row) => (
-            <div key={row.code} className="top5-row">
+            <Top5RowTile
+              key={row.code}
+              clickable={!STATIC_DATA}
+              onClick={() => openStockModal(row.code, row.name, { market: row.market, is_etf: row.is_etf })}
+            >
               <span className="top5-row-name">
                 <span className="top5-row-label">
                   {row.rank}. {row.name || row.code}
@@ -1328,7 +1359,7 @@ export default function DashboardPage() {
                 {row.is_etf && <Badge kind="etf" />}
               </span>
               <span className="top5-row-value up">{eokLabel(row.net_value)}</span>
-            </div>
+            </Top5RowTile>
           )}
         />
         <Top5Card
@@ -1338,7 +1369,11 @@ export default function DashboardPage() {
           rows={valueRankTop?.rows}
           onMore={() => setModal({ type: 'valueRank', title: '거래대금 상위 — 전체' })}
           renderRow={(row) => (
-            <div key={`${row.market}-${row.code}`} className="top5-row">
+            <Top5RowTile
+              key={`${row.market}-${row.code}`}
+              clickable={!STATIC_DATA}
+              onClick={() => openStockModal(row.code, row.name, { market: row.market, is_etf: row.is_etf })}
+            >
               <span className="top5-row-name">
                 <span className="top5-row-label">
                   {row.rank}. {row.name || row.code}
@@ -1347,7 +1382,7 @@ export default function DashboardPage() {
                 {row.is_etf && <Badge kind="etf" />}
               </span>
               <span className={`top5-row-value ${rateClass(row.change_rate)}`}>{eokLabel(row.value)}</span>
-            </div>
+            </Top5RowTile>
           )}
         />
         <Top5Card
@@ -1357,14 +1392,14 @@ export default function DashboardPage() {
           rows={flowPathTop?.rows}
           onMore={() => setModal({ type: 'flowPath', title: 'ETF 경유 수급 상위 — 전체' })}
           renderRow={(row, i) => (
-            <div key={row.code} className="top5-row">
+            <Top5RowTile key={row.code} clickable={!STATIC_DATA} onClick={() => openStockModal(row.code, row.name)}>
               <span className="top5-row-name">
                 {i + 1}. {row.name || row.code}
               </span>
               <span className={`top5-row-value ${row.via_etf_net >= 0 ? 'up' : 'down'}`}>
                 {eokLabel(row.via_etf_net)}
               </span>
-            </div>
+            </Top5RowTile>
           )}
         />
         {/* 실시간 관심 종목 TOP20(조회수 기준, live-only) — flowLive와 동일하게 정적
@@ -1377,18 +1412,10 @@ export default function DashboardPage() {
           rows={attentionTop?.rows}
           onMore={() => setModal({ type: 'attention', title: '실시간 관심 종목 — 전체' })}
           renderRow={(row) => (
-            <button
+            <Top5RowTile
               key={row.code}
-              type="button"
-              className="top5-row top5-row-clickable"
-              onClick={() =>
-                setModal({
-                  type: 'stock',
-                  title: `${row.name} · 종목 상세`,
-                  code: row.code,
-                  stock: { code: row.code, name: row.name, market: row.market, is_etf: row.is_etf },
-                })
-              }
+              clickable
+              onClick={() => openStockModal(row.code, row.name, { market: row.market, is_etf: row.is_etf })}
             >
               <span className="top5-row-name">
                 <span className="top5-row-label">
@@ -1398,7 +1425,7 @@ export default function DashboardPage() {
                 {row.is_etf && <Badge kind="etf" />}
               </span>
               <span className={`top5-row-value ${rateClass(row.change_rate)}`}>{rateLabel(row.change_rate)}</span>
-            </button>
+            </Top5RowTile>
           )}
         />
       </div>
@@ -1410,19 +1437,21 @@ export default function DashboardPage() {
         {modal?.type === 'fund' && <FundModal />}
         {modal?.type === 'macro' && <MacroModal />}
         {modal?.type === 'flowSummary' && <FlowSummaryModal />}
-        {modal?.type === 'flowRank' && <FlowRankFullModal />}
-        {modal?.type === 'valueRank' && <ValueRankFullModal />}
-        {modal?.type === 'flowPath' && <FlowPathFullModal />}
+        {/* 랭킹 3종 전체 보기 모달 — onRowClick을 STATIC_DATA일 때 undefined로 넘겨
+            행 클릭 자체를 비활성화한다(TOP5 카드와 동일한 정적 모드 판단, 위
+            Top5RowTile 주석 참고). */}
+        {modal?.type === 'flowRank' && (
+          <FlowRankFullModal onRowClick={STATIC_DATA ? undefined : (code, name) => openStockModal(code, name)} />
+        )}
+        {modal?.type === 'valueRank' && (
+          <ValueRankFullModal onRowClick={STATIC_DATA ? undefined : (code, name) => openStockModal(code, name)} />
+        )}
+        {modal?.type === 'flowPath' && (
+          <FlowPathFullModal onRowClick={STATIC_DATA ? undefined : (code, name) => openStockModal(code, name)} />
+        )}
         {modal?.type === 'attention' && (
           <AttentionFullModal
-            onSelectStock={(row) =>
-              setModal({
-                type: 'stock',
-                title: `${row.name} · 종목 상세`,
-                code: row.code,
-                stock: { code: row.code, name: row.name, market: row.market, is_etf: row.is_etf },
-              })
-            }
+            onSelectStock={(row) => openStockModal(row.code, row.name, { market: row.market, is_etf: row.is_etf })}
           />
         )}
         {modal?.type === 'stock' && <StockDetailModal code={modal.code} initial={modal.stock} />}

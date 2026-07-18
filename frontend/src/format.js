@@ -25,4 +25,31 @@ export function formatDate(input) {
   return input
 }
 
+// 억원 표기 통일 유틸 (사용자 피드백: "기관이 0으로 나온다" — 종목 상세 모달에서
+// 백만원/100=억원을 정수로 반올림해 표시하다 보니, 중소형주처럼 |값|이 0.5억원
+// 미만인 실제 소액 순매수/순매도가 전부 "0억원"으로 뭉개져 "데이터가 0인 것"처럼
+// 오해를 샀다. |백만원 값|이 100(=1억원) 미만이면 소수 1자리로 보여 "0.3억원"처럼
+// 실제 크기가 드러나게 하고, 값이 정확히 0이면 "0원"(억원이 아님 — 진짜 무거래와
+// 반올림 손실을 구분), 그 외(1억원 이상)에는 기존처럼 정수로 반올림한다.
+//
+// 입력: 백만원 단위 숫자(net_value/cum_net_value 등, market_flow·flow_rank 관례).
+// 출력: '0.3억원' | '-0.3억원' | '0원' | '12억원' 형태 문자열. null/undefined는 '-'.
+const eokIntFmt = new Intl.NumberFormat('ko-KR')
+const eokDecFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 1, minimumFractionDigits: 1 })
+
+export function formatEok(million) {
+  if (million === null || million === undefined) return '-'
+  if (million === 0) return '0원'
+  if (Math.abs(million) < 100) {
+    const scaled = million / 100
+    // -0.0 방지: 예를 들어 -4백만원(-0.04억원)은 소수 1자리로 반올림하면 "-0.0억원"처럼
+    // 음의 0으로 보인다 — 부호는 있는데 값은 0으로 읽혀 오히려 "0억원" 문제를 다른
+    // 모양으로 재현한다. 반올림 결과가 0이면 부호를 버리고 "0.0억원"으로 통일한다
+    // (0억원과는 다르게 "반올림하면 0에 가깝지만 실제로는 0이 아니다"를 전달한다).
+    const rounded = Math.round(scaled * 10) / 10
+    return `${eokDecFmt.format(rounded === 0 ? 0 : scaled)}억원`
+  }
+  return `${eokIntFmt.format(Math.round(million / 100))}억원`
+}
+
 export default formatDate

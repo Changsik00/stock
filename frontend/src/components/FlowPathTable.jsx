@@ -54,7 +54,10 @@ function EtfContribDot({ contrib }) {
   )
 }
 
-export default function FlowPathTable({ loading, error, date, rows, direction = 'in', onDirectionChange }) {
+// onRowClick(code, name) — FlowRankTable/ValueRankTable과 동일한 선택 prop. 행
+// 클릭만 종목 상세 모달로 연결하고, 기여 ETF 배지(EtfContribDot/title 툴팁)는 원래
+// 자체 onClick이 없어 행 클릭과 겹치지 않는다 — 배지 쪽은 건드리지 않는다.
+export default function FlowPathTable({ loading, error, date, rows, direction = 'in', onDirectionChange, onRowClick }) {
   const isOut = direction === 'out'
   const columnHeaderLabel = isOut ? 'ETF 경유 유출' : 'ETF 경유 유입'
   const hintText = isOut
@@ -106,7 +109,11 @@ export default function FlowPathTable({ loading, error, date, rows, direction = 
                     종목이 중복 적재되면 React key가 겹친다(FlowRankTable/ValueRankTable과
                     동일한 duplicate key 수정). i는 이 리스트 안에서 항상 유일하다. */}
                 {rows.map((row, i) => (
-                  <tr key={`${i}-${row.code}`}>
+                  <tr
+                    key={`${i}-${row.code}`}
+                    className={onRowClick ? 'flow-rank-row-clickable' : undefined}
+                    onClick={onRowClick ? () => onRowClick(row.code, row.name) : undefined}
+                  >
                     <td className="flow-rank-rank">{i + 1}</td>
                     <td>
                       <span className="flow-rank-name">{row.name || row.code}</span>

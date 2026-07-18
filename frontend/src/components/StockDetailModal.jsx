@@ -2,12 +2,12 @@ import { useEffect, useState } from 'react'
 import { Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis } from 'recharts'
 import { fetchStockSeries } from '../api'
 import { DEFAULT_INVESTORS, INVESTOR_COLOR_VAR } from '../constants'
+import { formatEok } from '../format'
 import Badge from './Badge'
 import CandleChart from './CandleChart'
 import PeriodPicker from './PeriodPicker'
 
 const numFmt = new Intl.NumberFormat('ko-KR')
-const eokFmt = new Intl.NumberFormat('ko-KR')
 
 const DEFAULT_STOCK_DAYS = 90
 
@@ -24,11 +24,10 @@ function rateLabel(rate) {
 }
 
 // net_value/cum_net_value는 market_flow와 동일하게 백만원 단위로 내려온다
-// (FlowChart.jsx eok() 관례 그대로) — 백만원 ÷ 100 = 억원.
-function eok(v) {
-  if (v === null || v === undefined) return '-'
-  return `${eokFmt.format(Math.round(v / 100))}억원`
-}
+// (FlowChart.jsx eok() 관례 그대로) — 백만원 ÷ 100 = 억원. 소액(|1억원| 미만) 표시는
+// format.js의 formatEok 공용 유틸에 위임한다(사용자 피드백: 중소형주 기관 순매수가
+// 정수 반올림 탓에 "0억원"으로 뭉개져 데이터가 없는 것처럼 보였다).
+const eok = formatEok
 
 function eokClass(v) {
   if (v === null || v === undefined) return ''

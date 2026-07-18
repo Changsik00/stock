@@ -560,6 +560,17 @@ header h1 {
   border-bottom: none;
 }
 
+/* 랭킹 표 행 클릭 → 종목 상세 모달 통일(사용자 요구: 이전엔 실시간 관심 TOP5만
+   행 클릭이 됐다). FlowRankTable/ValueRankTable/FlowPathTable이 onRowClick prop을
+   받았을 때만 이 클래스를 붙인다(top5-row-clickable:hover와 동일한 배경 강조 관례). */
+.flow-rank-row-clickable {
+  cursor: pointer;
+}
+
+.flow-rank-row-clickable:hover td {
+  background: var(--chip-bg);
+}
+
 .flow-rank-rank {
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
+  STATIC_DATA,
   fetchBreadth,
   fetchBreadthLive,
   fetchFlowPath,
@@ -17,8 +18,10 @@ import FlowPathTable from '../components/FlowPathTable'
 import FlowRankTable from '../components/FlowRankTable'
 import GroupTreemap from '../components/GroupTreemap'
 import MarketFundChart from '../components/MarketFundChart'
+import Modal from '../components/Modal'
 import PeriodPicker from '../components/PeriodPicker'
 import SentimentGauge from '../components/SentimentGauge'
+import StockDetailModal from '../components/StockDetailModal'
 import ValueRankTable from '../components/ValueRankTable'
 import { MARKET_FUND_IDS, MARKETS } from '../constants'
 import { formatDate } from '../format'
@@ -84,6 +87,12 @@ export default function MarketPage() {
   const [valueRankRows, setValueRankRows] = useState([])
   const [valueRankError, setValueRankError] = useState(null)
   const [valueRankLoading, setValueRankLoading] = useState(false)
+  // 종목 상세 모달(PLAN.md §6 3.7-2) — DashboardPage와 달리 MarketPage는 지금까지
+  // 종목 상세 모달이 없었다(수급/거래대금/ETF경유 표는 순수 데이터 표시였다). 모든
+  // 랭킹 행 클릭 → 종목 상세 모달 통일(사용자 요구) 작업으로 최소 상태만 이식한다 —
+  // DashboardPage.jsx의 모달은 타입이 여러 개(candle/sentiment/…)라 { type, ... } 객체를
+  // 쓰지만, 여기서는 종목 상세 하나뿐이라 { code, name, market, is_etf } | null로 충분하다.
+  const [stockModal, setStockModal] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -307,6 +316,12 @@ export default function MarketPage() {
   const hasFlows = Object.keys(flows || {}).length > 0
   const flowCapableMarket = market !== 'futures'
 
+  // 랭킹 표(FlowRankTable/ValueRankTable/FlowPathTable)의 onRowClick(code, name) 콜백 —
+  // 정적 배포(STATIC_DATA)에서는 fetchStockSeries가 스냅샷을 지원하지 않아 클릭해도
+  // 항상 에러만 뜨므로(DashboardPage.jsx의 동일 판단 참고) undefined로 넘겨 행 클릭
+  // 자체를 비활성화한다.
+  const handleRowClick = STATIC_DATA ? undefined : (code, name) => setStockModal({ code, name })
+
   return (
     <div>
       <div className="tabs">
@@ -457,6 +472,7 @@ export default function MarketPage() {
         loading={valueRankLoading}
         error={valueRankError}
         date={valueRankDate}
+        onRowClick={handleRowClick}
       />
 
       <div className="section-title">수급 상위</div>
@@ -468,6 +484,7 @@ export default function MarketPage() {
         loading={flowRankLoading}
         error={flowRankError}
         dates={flowRankDates}
+        onRowClick={handleRowClick}
       />
 
       <div className="section-title">ETF 경유 수급 상위</div>
@@ -478,12 +495,21 @@ export default function MarketPage() {
         rows={flowPathRows}
         direction={flowPathDirection}
         onDirectionChange={setFlowPathDirection}
+        onRowClick={handleRowClick}
       />
 
       <div className="section-title">시장 자금·대차</div>
       {fundLoading && <div className="state">불러오는 중…</div>}
       {fundError && <div className="state error">{fundError}</div>}
       {!fundLoading && !fundError && <MarketFundChart seriesMap={fundSeries} />}
+
+      <Modal
+        open={Boolean(stockModal)}
+        onClose={() => setStockModal(null)}
+        title={stockModal ? `${stockModal.name || stockModal.code} · 종목 상세` : undefined}
+      >
+        {stockModal && <StockDetailModal code={stockModal.code} initial={stockModal} />}
+      </Modal>
     </div>
   )
 }

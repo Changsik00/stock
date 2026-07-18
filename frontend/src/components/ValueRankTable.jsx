@@ -41,7 +41,9 @@ function turnoverLabel(turnoverPercent) {
   return `${turnoverFmt.format(turnoverPercent)}%`
 }
 
-export default function ValueRankTable({ rows, loading, error, date }) {
+// onRowClick(code, name) — FlowRankTable과 동일한 선택 prop(하위호환, 미지정 시
+// 기존처럼 클릭 불가). 종목 상세 모달 연결 통일(사용자 요구) 용도.
+export default function ValueRankTable({ rows, loading, error, date, onRowClick }) {
   return (
     <div>
       <div className="toggle-row">
@@ -73,7 +75,11 @@ export default function ValueRankTable({ rows, loading, error, date }) {
                     리스트 안에서 항상 유일하므로 rank+market+code로 유일성을 보장한다
                     (FlowRankTable과 동일한 duplicate key 수정). */}
                 {rows.map((row) => (
-                  <tr key={`${row.rank}-${row.market}-${row.code}`}>
+                  <tr
+                    key={`${row.rank}-${row.market}-${row.code}`}
+                    className={onRowClick ? 'flow-rank-row-clickable' : undefined}
+                    onClick={onRowClick ? () => onRowClick(row.code, row.name) : undefined}
+                  >
                     <td className="flow-rank-rank">{row.rank}</td>
                     <td>
                       <span className="flow-rank-name">

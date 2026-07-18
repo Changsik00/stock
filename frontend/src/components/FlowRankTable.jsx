@@ -36,6 +36,11 @@ const SIDE_OPTIONS = [
   { key: 'sell', label: '순매도' },
 ]
 
+// onRowClick(code, name) — 선택 prop. 지정하면 행에 커서 포인터+hover 배경을 주고
+// 클릭 시 호출한다(랭킹 행 클릭 → 종목 상세 모달로 통일하려는 사용자 요구, 이전엔
+// 실시간 관심 TOP5만 클릭 가능했다). 미지정 시(기본값 undefined) 기존과 동일하게
+// 행은 클릭 불가능한 정적 텍스트로 남는다 — 하위호환.
+
 function eokLabel(netValueMillion) {
   if (netValueMillion === null || netValueMillion === undefined) return '-'
   return `${eokFmt.format(netValueMillion / 100)}억원`
@@ -59,6 +64,7 @@ export default function FlowRankTable({
   loading,
   error,
   dates,
+  onRowClick,
 }) {
   const latest = dates && dates.length > 0 ? dates[0] : null
   const amountColorClass = side === 'sell' ? 'down' : 'up'
@@ -115,7 +121,11 @@ export default function FlowRankTable({
                     row.code만으로는 React key가 겹쳐 "duplicate key" 경고가 났다.
                     rank는 이 리스트 안에서 항상 유일하므로 rank+code로 유일성을 보장한다. */}
                 {latest.rows.map((row) => (
-                  <tr key={`${row.rank}-${row.code}`}>
+                  <tr
+                    key={`${row.rank}-${row.code}`}
+                    className={onRowClick ? 'flow-rank-row-clickable' : undefined}
+                    onClick={onRowClick ? () => onRowClick(row.code, row.name) : undefined}
+                  >
                     <td className="flow-rank-rank">{row.rank}</td>
                     <td>
                       <span className="flow-rank-name">
