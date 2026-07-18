@@ -4,6 +4,11 @@ import { formatDate } from '../format'
 
 const numFmt = new Intl.NumberFormat('ko-KR')
 
+// 크로스헤어 범례용 % 표기: 등락률은 부호 포함 소수 2자리, 변동폭은 소수 1자리.
+function fmtSignedPct(v) {
+  return `${v > 0 ? '+' : ''}${v.toFixed(2)}%`
+}
+
 // "YYYYMMDD" 또는 "YYYY-MM-DD" -> lightweight-charts가 요구하는 "YYYY-MM-DD".
 function toLwcTime(d) {
   const digits = String(d).replaceAll('-', '')
@@ -32,6 +37,9 @@ export default function CandleChart({ data, height = 360, volumeHeightRatio = 0.
   const candleSeriesRef = useRef(null)
   const volumeSeriesRef = useRef(null)
   const legendRef = useRef(null)
+  // time("YYYY-MM-DD") -> { changeRate, rangeRate } — 크로스헤어 범례에서 등락률·변동폭을
+  // 찾는 용도. updateLegend는 마운트 시 1회 만든 클로저라 ref로 최신 데이터를 넘긴다.
+  const legendMetaRef = useRef(new Map())
 
   const points = useMemo(
     () =>
@@ -44,6 +52,7 @@ export default function CandleChart({ data, height = 360, volumeHeightRatio = 0.
           low: d.low,
           close: d.close,
           volume: d.volume ?? 0,
+          changeRate: typeof d.changeRate === 'number' ? d.changeRate : null,
         })),
     [data]
   )
@@ -106,13 +115,28 @@ export default function CandleChart({ data, height = 360, volumeHeightRatio = 0.
       }
       legend.style.visibility = 'visible'
       const up = bar.close >= bar.open
+      const meta = legendMetaRef.current.get(bar.time)
+      // 전일 대비 등락률 — 상승 빨강(--up)/하락 파랑(--down), 첫 봉 등 계산 불가 시 생략.
+      let rateHtml = ''
+      if (meta && meta.changeRate != null) {
+        const attr =
+          meta.changeRate > 0
+            ? 'class="up"'
+            : meta.changeRate < 0
+              ? 'class="down"'
+              : 'style="color:var(--text-secondary);font-weight:400"' // 보합은 중립색
+        rateHtml = ` <span ${attr}>(${fmtSignedPct(meta.changeRate)})</span>`
+      }
+      // 당일 변동폭 (고가-저가)/전일종가 — 방향이 아닌 진폭이라 중립색.
+      const rangeHtml = meta && meta.rangeRate != null ? `<span>변동 ${meta.rangeRate.toFixed(1)}%</span>` : ''
       legend.innerHTML =
         `<span>${formatDate(bar.time)}</span>` +
         `<span>시 ${numFmt.format(bar.open)}</span>` +
         `<span>고 ${numFmt.format(bar.high)}</span>` +
         `<span>저 ${numFmt.format(bar.low)}</span>` +
-        `<span class="${up ? 'up' : 'down'}">종 ${numFmt.format(bar.close)}</span>` +
-        `<span>량 ${numFmt.format(bar.volume)}</span>`
+        `<span class="${up ? 'up' : 'down'}">종 ${numFmt.format(bar.close)}${rateHtml}</span>` +
+        `<span>량 ${numFmt.format(bar.volume)}</span>` +
+        rangeHtml
     }
 
     chart.subscribeCrosshairMove((param) => {
@@ -161,6 +185,20 @@ export default function CandleChart({ data, height = 360, volumeHeightRatio = 0.
     const candleSeries = candleSeriesRef.current
     const volumeSeries = volumeSeriesRef.current
     if (!candleSeries || !volumeSeries) return
+
+    // 범례용 등락률·변동폭 사전 계산. changeRate 필드가 없으면 직전 봉 종가로 계산하고
+    // (첫 봉은 생략), 변동폭은 (고-저)/전일종가 — 전일종가가 없으면 시가 기준.
+    const meta = new Map()
+    let prevClose = null
+    for (const p of points) {
+      let changeRate = p.changeRate
+      if (changeRate == null && prevClose > 0) changeRate = ((p.close - prevClose) / prevClose) * 100
+      const rangeBase = prevClose > 0 ? prevClose : p.open
+      const rangeRate = rangeBase > 0 ? ((p.high - p.low) / rangeBase) * 100 : null
+      meta.set(p.time, { changeRate: changeRate ?? null, rangeRate })
+      prevClose = p.close
+    }
+    legendMetaRef.current = meta
 
     const vars = readCssVars(['--up', '--down'])
     candleSeries.setData(points.map(({ time, open, high, low, close }) => ({ time, open, high, low, close })))
