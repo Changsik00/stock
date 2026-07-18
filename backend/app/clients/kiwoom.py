@@ -239,6 +239,7 @@ TR_RESOURCE_URL: dict[str, str] = {
     "ka10051": "/api/dostk/sect",  # 업종별투자자순매수요청 (PLAN.md §1 시장 전체 수급 후보, 2026-07-19 실호출 확정)
     "ka10063": "/api/dostk/mrkcond",  # 장중투자자별매매요청 (PLAN.md §6 3.7-3, 2026-07-18 실호출 확정 — 종목별 배열, 모듈 docstring 참고)
     "ka10066": "/api/dostk/mrkcond",  # 장마감후투자자별매매요청 (PLAN.md §6 3.7-3, 2026-07-18 실호출 확정 — 종목별 배열, 모듈 docstring 참고)
+    "ka90010": "/api/dostk/mrkcond",  # 프로그램매매추이요청 일자별 (PLAN.md §4.5-4, 2026-07-19 실호출 확정)
 }
 
 # README 실측치: TR별 지속 1 req/s(거부 0), 버스트 약 2건.
@@ -779,3 +780,67 @@ class KiwoomClient:
         """
         body = {"mrkt_tp": mrkt_tp, "amt_qty_tp": amt_qty_tp, "trde_tp": trde_tp, "stex_tp": stex_tp}
         return await self.call_tr("ka10066", body, cont_yn=cont_yn, next_key=next_key)
+
+    async def program_trading_by_date(
+        self,
+        mrkt_tp: str,
+        date: dt.date | str,
+        amt_qty_tp: str = "1",
+        min_tic_tp: str = "1",
+        stex_tp: str = "3",
+        cont_yn: str | None = None,
+        next_key: str | None = None,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        """프로그램매매추이요청 일자별 (ka90010) — PLAN.md §4.5-4 차익/비차익 프로그램매매.
+
+        실호출 검증 결과는 이 모듈 docstring의 "ka90010(프로그램매매추이요청
+        일자별) 실측" 절 참고. 핵심 요약:
+
+        - 응답은 종목이 아니라 **날짜별 배열**(`prm_trde_trnsn`)이다 — 한 번
+          호출로 여러 거래일치(요청일 기준 과거로 다건, 실측 약 20건/페이지)가
+          한꺼번에 오고, `cont-yn`/`next-key`로 더 과거까지 연속조회할 수 있다.
+          즉 "일자별 추이"라는 이름 그대로 하루 1콜이 아니라 **페이지당 다건
+          시계열**이라 백필 호출 수가 날짜 수보다 훨씬 적게 든다.
+        - 각 행의 `cntr_tm`은 `YYYYMMDDHHmmss`이지만 시분초는 항상
+          `000000`이라 사실상 날짜 문자열이다(`cntr_tm[:8]`로 날짜만 뽑아
+          쓰면 됨).
+        - 차익거래 순매수: `dfrt_trde_netprps` (부호 포함 문자열, 단위는
+          `amt_qty_tp`에 따라 백만원(금액) 또는 천주(수량)).
+          비차익거래 순매수: `ndiffpro_trde_netprps`. 그 외 매수/매도
+          개별 값, 전체 순매수(`all_netprps`), 참고용 `kospi200`/`basis`도
+          같이 온다(이 프로젝트는 순매수만 macro_series에 적재).
+
+        Args:
+            mrkt_tp: 시장구분 — 코스피/코스닥별로 거래소 커버리지에 따라 세
+                가지 코드가 있다: KRX만("P00101"/"P10102"), NXT만
+                ("P001_NX01"/"P101_NX02"), KRX+NXT 통합
+                ("P001_AL01"/"P001_AL02"). 이 프로젝트는 시장 전체 값을
+                원하므로 통합 코드(`P001_AL01`=코스피, `P001_AL02`=코스닥)를
+                쓴다(collectors/program_flow.py 참고) — `stex_tp="3"`(통합)과
+                짝이 맞는 조합.
+            date: 조회 기준일. 이 값 이전(포함) 과거 시계열이 반환된다.
+            amt_qty_tp: 금액수량구분 — "1"=금액(백만원, 기본값), "2"=수량(천주).
+            min_tic_tp: 분틱구분 — "0"=틱, "1"=분(기본값, GitHub 통합테스트
+                기본값과 동일). 응답이 일자별이라 이 값이 결과에 영향을 주는
+                것을 실측으로 확인하지 못했다(문서상 필수 파라미터라 값만
+                채워 보냄).
+            stex_tp: 거래소구분 — "1"=KRX, "2"=NXT, "3"=통합(기본값).
+
+        Returns:
+            `(응답 body, 응답 헤더)` — 응답 body의 `prm_trde_trnsn`이 날짜별 배열
+            (최신순으로 추정). 연속조회가 필요하면 응답 헤더의 cont-yn/next-key를
+            다음 호출에 그대로 넘긴다.
+        """
+        if isinstance(date, dt.date):
+            date_str = date.strftime("%Y%m%d")
+        else:
+            date_str = date
+
+        body = {
+            "date": date_str,
+            "amt_qty_tp": amt_qty_tp,
+            "mrkt_tp": mrkt_tp,
+            "min_tic_tp": min_tic_tp,
+            "stex_tp": stex_tp,
+        }
+        return await self.call_tr("ka90010", body, cont_yn=cont_yn, next_key=next_key)
