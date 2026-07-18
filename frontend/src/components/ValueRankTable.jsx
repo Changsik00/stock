@@ -1,3 +1,6 @@
+import Badge from './Badge'
+import { formatDate } from '../format'
+
 // 거래대금 상위 종목 테이블 — "돈이 모이는 곳" (PLAN.md §4.6 3.6-1).
 //
 // 순수 표시 컴포넌트다: fetch 없이 props로만 데이터를 받는다. 데이터 로딩/시장 필터
@@ -10,15 +13,12 @@
 // (FlowRankTable과 달리 이 표는 buy/sell 탭이 없고 값 자체의 부호로 방향이
 // 정해지므로 FlowPathTable의 signClass 패턴을 따른다).
 //
-// market 배지(코스피/코스닥)는 새 CSS를 추가하지 않고 기존 flow-path-etf-badge
-// 클래스(중립색 pill)를 재사용한다. ETF 배지는 FlowRankTable과 동일하게 etf-badge
-// 클래스(청록색)를 그대로 쓴다.
+// market·ETF 배지는 FlowRankTable과 동일하게 공용 Badge.jsx(코스피/코스닥/ETF 색상
+// 구분)를 쓴다.
 
 const eokFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 1, minimumFractionDigits: 1 })
 const rateFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 2, minimumFractionDigits: 2 })
 const turnoverFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 1, minimumFractionDigits: 1 })
-
-const MARKET_LABEL = { kospi: '코스피', kosdaq: '코스닥' }
 
 function eokLabel(valueMillion) {
   if (valueMillion === null || valueMillion === undefined) return '-'
@@ -45,7 +45,7 @@ export default function ValueRankTable({ rows, loading, error, date }) {
   return (
     <div>
       <div className="toggle-row">
-        {date && <span className="toggle-hint">{date} 기준</span>}
+        {date && <span className="toggle-hint">{formatDate(date)} 기준</span>}
       </div>
 
       {loading && <div className="state">불러오는 중…</div>}
@@ -74,12 +74,8 @@ export default function ValueRankTable({ rows, loading, error, date }) {
                     <td>
                       <span className="flow-rank-name">
                         {row.name || row.code}
-                        {row.market && (
-                          <span className="flow-path-etf-badge">
-                            {MARKET_LABEL[row.market] || row.market}
-                          </span>
-                        )}
-                        {row.is_etf && <span className="etf-badge">ETF</span>}
+                        {row.market && <Badge kind={row.market} />}
+                        {row.is_etf && <Badge kind="etf" />}
                       </span>
                     </td>
                     <td className="num">{eokLabel(row.value)}</td>

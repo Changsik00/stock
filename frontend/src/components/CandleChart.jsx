@@ -1,5 +1,6 @@
 import { CandlestickSeries, HistogramSeries, createChart } from 'lightweight-charts'
 import { useEffect, useMemo, useRef } from 'react'
+import { formatDate } from '../format'
 
 const numFmt = new Intl.NumberFormat('ko-KR')
 
@@ -106,7 +107,7 @@ export default function CandleChart({ data, height = 360, volumeHeightRatio = 0.
       legend.style.visibility = 'visible'
       const up = bar.close >= bar.open
       legend.innerHTML =
-        `<span>${bar.time}</span>` +
+        `<span>${formatDate(bar.time)}</span>` +
         `<span>시 ${numFmt.format(bar.open)}</span>` +
         `<span>고 ${numFmt.format(bar.high)}</span>` +
         `<span>저 ${numFmt.format(bar.low)}</span>` +

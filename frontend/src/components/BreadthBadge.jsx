@@ -1,3 +1,5 @@
+import { formatDate } from '../format'
+
 // 시장 등락 종목수(breadth) 배지 — "코스피 512↑ 40— 380↓" + 상승/하락 비율 가로 막대
 // (PLAN.md §3.5/§4.6 3.6-2).
 //
@@ -153,7 +155,7 @@ export default function BreadthBadge({ kospi, kosdaq, date }) {
         }
       `}</style>
 
-      {date && <div className="breadth-badge-date">{date} 기준</div>}
+      {date && <div className="breadth-badge-date">{formatDate(date)} 기준</div>}
 
       {!hasAny && <div className="breadth-badge-empty">등락 종목수 데이터가 없습니다.</div>}
 

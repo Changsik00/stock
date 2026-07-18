@@ -1,3 +1,6 @@
+import Badge from './Badge'
+import { formatDate } from '../format'
+
 // 투자자별(외인/기관) 순매수/순매도 상위 종목 테이블 (PLAN.md §4.5/§6 3.5-2b, 시장 탭
 // "수급 상위").
 //
@@ -20,9 +23,8 @@ const qtyFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 0 })
 const turnoverFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 1, minimumFractionDigits: 1 })
 
 // §4.6 3.6-1: flow_rank.market은 2026-07-18부터 적재되는 nullable 컬럼 — NULL(과거
-// 적재분)이면 배지를 표시하지 않는다. 배지 스타일은 ValueRankTable과 동일하게 기존
-// flow-path-etf-badge(중립색 pill)를 재사용한다.
-const MARKET_LABEL = { kospi: '코스피', kosdaq: '코스닥' }
+// 적재분)이면 배지를 표시하지 않는다. 배지는 ValueRankTable과 동일하게 공용
+// Badge.jsx(코스피/코스닥/ETF 색상 구분)를 재사용한다.
 
 const INVESTOR_OPTIONS = [
   { key: 'foreign', label: '외국인' },
@@ -85,7 +87,7 @@ export default function FlowRankTable({
             {opt.label}
           </button>
         ))}
-        {latest && <span className="toggle-hint">{latest.date} 기준 (코스피+코스닥 통합)</span>}
+        {latest && <span className="toggle-hint">{formatDate(latest.date)} 기준 (코스피+코스닥 통합)</span>}
       </div>
 
       {loading && <div className="state">불러오는 중…</div>}
@@ -114,12 +116,8 @@ export default function FlowRankTable({
                     <td>
                       <span className="flow-rank-name">
                         {row.name || row.code}
-                        {row.market && (
-                          <span className="flow-path-etf-badge">
-                            {MARKET_LABEL[row.market] || row.market}
-                          </span>
-                        )}
-                        {row.is_etf && <span className="etf-badge">ETF</span>}
+                        {row.market && <Badge kind={row.market} />}
+                        {row.is_etf && <Badge kind="etf" />}
                       </span>
                     </td>
                     <td className={`num ${amountColorClass}`}>{eokLabel(row.net_value)}</td>

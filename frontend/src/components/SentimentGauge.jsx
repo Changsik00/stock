@@ -1,3 +1,5 @@
+import { formatDate } from '../format'
+
 // 시장 종합 매수세/매도세 게이지 (PLAN.md §4.6 3.6-4).
 //
 // 순수 프레젠테이션 컴포넌트다 — 데이터 페칭 없이 props(GET /api/markets/sentiment
@@ -81,7 +83,7 @@ function ComponentBar({ id, component }) {
       )}
       {component && (
         <div className="sentiment-gauge-component-detail">
-          {component.date ? `${component.date} · ` : ''}
+          {component.date ? `${formatDate(component.date)} · ` : ''}
           {meta.detail(component)}
         </div>
       )}
@@ -231,7 +233,7 @@ export default function SentimentGauge({ loading, error, score, approx: _approx,
           <div className="sentiment-gauge-title-row">
             <span className="sentiment-gauge-title">시장 매수세/매도세 게이지</span>
             <span className="sentiment-gauge-approx">
-              근사치(상위 랭킹·ETF 유니버스 기반 — 시장 전체 정밀값 아님){date ? ` · ${date} 기준` : ''}
+              근사치(상위 랭킹·ETF 유니버스 기반 — 시장 전체 정밀값 아님){date ? ` · ${formatDate(date)} 기준` : ''}
             </span>
           </div>
 

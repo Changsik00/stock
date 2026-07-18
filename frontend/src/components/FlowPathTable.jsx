@@ -1,3 +1,5 @@
+import { formatDate } from '../format'
+
 // ETF 경유 수급 상위 테이블 (PLAN.md §4.5, 시장 탭 "ETF 경유 수급 상위").
 //
 // flow_path.via_etf_net = Σ ETF의 순유입(우선 net_inflow, 없으면 flow_rank 근사) ×
@@ -75,7 +77,7 @@ export default function FlowPathTable({ loading, error, date, rows, direction = 
           ))}
         {date && (
           <span className="toggle-hint">
-            {date} 기준 {hintText}
+            {formatDate(date)} 기준 {hintText}
           </span>
         )}
       </div>
@@ -116,7 +118,7 @@ export default function FlowPathTable({ loading, error, date, rows, direction = 
                             className="flow-path-etf-badge"
                             title={`${etf.name || etf.code} · ${eokLabel(etf.contrib)} · ${
                               BASIS_LABEL[etf.basis] || etf.basis
-                            } · ${etf.date} · ${etf.contrib > 0 ? '설정' : etf.contrib < 0 ? '환매' : ''}`}
+                            } · ${formatDate(etf.date)} · ${etf.contrib > 0 ? '설정' : etf.contrib < 0 ? '환매' : ''}`}
                           >
                             <EtfContribDot contrib={etf.contrib} />
                             {etf.name || etf.code}

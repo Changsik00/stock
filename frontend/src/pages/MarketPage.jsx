@@ -21,6 +21,7 @@ import PeriodPicker from '../components/PeriodPicker'
 import SentimentGauge from '../components/SentimentGauge'
 import ValueRankTable from '../components/ValueRankTable'
 import { MARKET_FUND_IDS, MARKETS } from '../constants'
+import { formatDate } from '../format'
 
 // 수급 상위 테이블 조회 기간(일) — flow_rank는 배치를 반복 실행한 날짜만 누적되고
 // 소스 자체도 주말/공휴일 지연이 있어(PLAN.md §4.5, backend clients/naver_rank.py
@@ -326,7 +327,7 @@ export default function MarketPage() {
         <div className="stat-row">
           <div className="stat">
             <span className="stat-label">기준일</span>
-            <span className="stat-value">{latest.date}</span>
+            <span className="stat-value">{formatDate(latest.date)}</span>
           </div>
           <div className="stat">
             <span className="stat-label">시가</span>

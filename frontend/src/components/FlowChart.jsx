@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Bar, BarChart, Cell, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis } from 'recharts'
 import { ALL_INVESTORS, DEFAULT_INVESTORS, EXTRA_INVESTORS, INVESTOR_COLOR_VAR } from '../constants'
+import { formatDate } from '../format'
 
 const numFmt = new Intl.NumberFormat('ko-KR')
 
@@ -57,7 +58,7 @@ function InvestorRow({ name, rows }) {
         </span>
         {latest && (
           <span className="flow-row-latest">
-            누적 {eok(latest.cumulative)} · {latest.label} 기준
+            누적 {eok(latest.cumulative)} · {formatDate(latest.date)} 기준
           </span>
         )}
       </div>
