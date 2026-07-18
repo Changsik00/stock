@@ -1,7 +1,7 @@
 """3년치 매크로(환율/유가) 시계열 초기 적재 (PLAN.md §6, Phase 1-2).
 
-- 환율(usdkrw): ECOS 기간 조회 한 번 (`ECOS_API_KEY` 미설정 시 sample 키 -> 최대 10건만
-  반환되는 것이 정상 동작임, clients/ecos.py 참고)
+- 환율(usdkrw): naver_fx 기간 조회 한 번(내부적으로 naver 페이징 처리) — naver 우선,
+  실패 시 FRED CSV(DEXKOUS)로 자동 폴백 (clients/naver_fx.py 참고)
 - 유가(wti/brent): yfinance 기간 조회 한 번씩, 실패 시 FRED CSV로 자동 폴백
 
 Usage: python -m scripts.backfill_macro [years]  (기본 3년)
@@ -21,7 +21,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("backfill_macro")
 
-from app.clients import commodities, ecos  # noqa: E402
+from app.clients import commodities, naver_fx  # noqa: E402
 from app.collectors.macro import OIL_SERIES, upsert_series_rows  # noqa: E402
 from app.db import async_session_factory  # noqa: E402
 
@@ -33,12 +33,11 @@ async def main(years: int = 3) -> None:
     async with async_session_factory() as session:
         total = 0
 
-        logger.info("ECOS 환율(usdkrw) 기간 조회: %s ~ %s", start, end)
-        usdkrw_rows = ecos.fetch_usdkrw(start, end)
-        for row in usdkrw_rows:
-            row["source"] = "ecos"
+        logger.info("환율(usdkrw) 기간 조회: %s ~ %s (naver 우선, 실패 시 FRED 폴백)", start, end)
+        usdkrw_rows = naver_fx.fetch_usdkrw(start, end)
         n = await upsert_series_rows(session, usdkrw_rows, "usdkrw")
-        logger.info("usdkrw: %d건 적재", n)
+        source = usdkrw_rows[0]["source"] if usdkrw_rows else "-"
+        logger.info("usdkrw: %d건 적재 (source=%s)", n, source)
         total += n
 
         for series in OIL_SERIES:

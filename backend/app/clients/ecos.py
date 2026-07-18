@@ -7,6 +7,14 @@ NOTE: 발급받은 `ECOS_API_KEY`가 없으면 ECOS의 'sample' 키를 사용한
 요청하면 `ERROR-301 조회건수 값의 타입이 유효하지 않습니다`로 거부됨). 이 클라이언트는
 sample 키 사용 시 요청 건수를 자동으로 10건으로 clamp해서 에러 없이 동작하게 한다.
 .env에 ECOS_API_KEY를 설정하면 이 제한이 사라지고 기간 전체를 한 번에 조회할 수 있다.
+
+NOTE (2026-07-18): `.env`의 `ECOS_API_KEY`가 비어 있는 채로 운영되면서(위 sample
+키 제약 때문에) 실질적으로 3년치 backfill이 불가능했던 문제로, 일별 수집기
+(`collectors/macro.py`)와 backfill 스크립트(`scripts/backfill_macro.py`)의 기본
+usdkrw 소스는 무키인 `clients/naver_fx.py`(naver 우선, FRED 폴백)로 교체되었다.
+이 모듈은 삭제하지 않고 남겨둔다 — ECOS는 한국은행이 직접 산출하는 공식
+매매기준율이라 필요 시(정밀도가 중요한 경우 등) `ECOS_API_KEY`를 발급받아
+선택적으로 쓸 수 있는 정밀 소스로 유지한다.
 """
 
 from __future__ import annotations

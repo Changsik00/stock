@@ -1,4 +1,4 @@
-"""환율(ECOS) + 유가(commodities: yfinance→FRED) + KOFIA(예탁금/신용융자/대차잔고)
+"""환율(naver_fx: naver→FRED) + 유가(commodities: yfinance→FRED) + KOFIA(예탁금/신용융자/대차잔고)
 수집 → macro_series upsert.
 
 REGISTRY["macro"]로 등록된다 (routers/admin.py가 이 모듈을 import해서 등록을 트리거함).
@@ -14,7 +14,7 @@ import httpx
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..clients import commodities, ecos, kofia
+from ..clients import commodities, kofia, naver_fx
 from ..models import MacroSeries
 from .base import REGISTRY
 
@@ -96,16 +96,14 @@ async def _collect_kofia(session: AsyncSession, start: dt.date, target_date: dt.
 
 
 async def collect_macro(session: AsyncSession, target_date: dt.date) -> int:
-    """Fetch USD/KRW (ECOS) + WTI/Brent (yfinance/FRED) + KOFIA(예탁금/신용융자/대차잔고)
+    """Fetch USD/KRW (naver/FRED) + WTI/Brent (yfinance/FRED) + KOFIA(예탁금/신용융자/대차잔고)
     around target_date, upsert all."""
     start = target_date - dt.timedelta(days=LOOKBACK_DAYS)
     total = 0
 
     # Blocking network calls (requests/yfinance/httpx-sync) run in a thread so they
     # don't stall the event loop while the API server is also serving requests.
-    usdkrw_rows = await asyncio.to_thread(ecos.fetch_usdkrw, start, target_date)
-    for row in usdkrw_rows:
-        row["source"] = "ecos"
+    usdkrw_rows = await asyncio.to_thread(naver_fx.fetch_usdkrw, start, target_date)
     total += await upsert_series_rows(session, usdkrw_rows, "usdkrw")
 
     for series in OIL_SERIES:
