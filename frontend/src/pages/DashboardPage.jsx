@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import {
   STATIC_DATA,
+  fetchAttention,
   fetchBreadth,
   fetchBreadthLive,
   fetchFlowLive,
@@ -74,6 +75,10 @@ const FLOW_RANK_LOOKBACK_DAYS = 7
 // 장중 잠정 수급(PLAN.md §6 3.7-3) 자동 갱신 주기 — 백엔드 60초 캐시(routers/markets.py
 // GET /api/markets/flow/live)와 맞춘다. 그보다 짧게 폴링해도 캐시 히트라 낭비만 커진다.
 const FLOW_LIVE_POLL_MS = 60_000
+// 실시간 관심 종목 TOP20 자동 갱신 주기 — 백엔드 60초 캐시(routers/markets.py
+// GET /api/markets/attention)와 맞춘다. FLOW_LIVE_POLL_MS와 동일한 값이지만 소스가
+// 달라(플로우 vs 조회수 순위) 각자 독립 폴링/캐시를 갖는다.
+const ATTENTION_POLL_MS = 60_000
 
 function eokLabel(million) {
   if (typeof million !== 'number') return '-'
@@ -631,6 +636,69 @@ function FlowPathFullModal() {
   )
 }
 
+// 실시간 관심 종목 TOP20 전체 보기 — ValueRankFullModal/FlowPathFullModal과 동일하게
+// 마운트 시(모달이 열릴 때) 자기 데이터를 불러오는 자기완결 컴포넌트다. 다른
+// FullModal들과 달리 행이 클릭 가능해야 하므로(종목 상세 모달로 전환) 호출부
+// (DashboardPage)가 onSelectStock 콜백을 넘겨준다 — 이 컴포넌트 자체는 setModal을
+// 모르므로 이 방식으로만 상위 상태를 바꿀 수 있다. 20행짜리 단순 목록이라 별도
+// 테이블 컴포넌트 파일(ValueRankTable처럼)로 뽑지 않고 여기 인라인으로 둔다.
+function AttentionFullModal({ onSelectStock }) {
+  const [attention, setAttention] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    fetchAttention()
+      .then((body) => {
+        if (!cancelled) setAttention(body)
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const rows = attention?.rows || []
+
+  return (
+    <div>
+      <div className="toggle-hint" style={{ marginBottom: 8 }}>
+        조회수 기준 · 60초 갱신
+      </div>
+      {loading && <div className="state">불러오는 중…</div>}
+      {error && <div className="state error">{error}</div>}
+      {!loading && !error && rows.length === 0 && <div className="state">표시할 데이터가 없습니다.</div>}
+      {!loading && !error && rows.length > 0 && (
+        <div>
+          {rows.map((row) => (
+            <button
+              key={row.code}
+              type="button"
+              className="top5-row top5-row-clickable"
+              onClick={() => onSelectStock(row)}
+            >
+              <span className="top5-row-name">
+                <span className="top5-row-label">
+                  {row.rank ?? '-'}. {row.name || row.code}
+                </span>
+                {row.market && <Badge kind={row.market} />}
+                {row.is_etf && <Badge kind="etf" />}
+              </span>
+              <span className={`top5-row-value ${rateClass(row.change_rate)}`}>{rateLabel(row.change_rate)}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // TOP5 요약 행 — 표(FlowRankTable 등)를 그대로 축소하지 않고, "종목명·핵심 숫자·배지"
 // 만 남긴 가벼운 목록을 별도로 그린다(사용자 요구: "100개짜리 리스트도 뒤로").
@@ -677,6 +745,10 @@ export default function DashboardPage() {
   const [flowRankTop, setFlowRankTop] = useState(null)
   const [valueRankTop, setValueRankTop] = useState(null)
   const [flowPathTop, setFlowPathTop] = useState(null)
+  // 실시간 관심 종목 TOP20(PLAN.md 사용자 지시, live-only) — API 응답 바디를 그대로
+  // 담는다({ rows, qry_tp, queried_at }). flowLive와 동일하게 정적 배포에서는 항상
+  // null로 남는다.
+  const [attentionTop, setAttentionTop] = useState(null)
 
   const [modal, setModal] = useState(null) // { type, title, ...params } | null
 
@@ -774,6 +846,29 @@ export default function DashboardPage() {
     }
     load()
     const intervalId = setInterval(load, FLOW_LIVE_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(intervalId)
+    }
+  }, [])
+
+  // 실시간 관심 종목 TOP20 폴링 — flowLive 폴링과 동일한 패턴(정적 배포에서는 시도하지
+  // 않음, 60초 간격 setInterval, 언마운트 시 정리, 실패 시 조용히 null로 두고 카드가
+  // "표시할 데이터가 없습니다"를 자연히 보여주게 둔다).
+  useEffect(() => {
+    if (STATIC_DATA) return undefined
+    let cancelled = false
+    function load() {
+      fetchAttention()
+        .then((body) => {
+          if (!cancelled) setAttentionTop(body)
+        })
+        .catch(() => {
+          if (!cancelled) setAttentionTop(null)
+        })
+    }
+    load()
+    const intervalId = setInterval(load, ATTENTION_POLL_MS)
     return () => {
       cancelled = true
       clearInterval(intervalId)
@@ -965,6 +1060,12 @@ export default function DashboardPage() {
   // 기준일을 정한다(수급 타일의 "장중 잠정" 배지 게이트인 flowLiveActive와 동일하게
   // market_closed로 판단).
   const flowLiveOpen = flowLive?.market_closed === false
+  // attentionTop.queried_at은 의도적으로 baseDate 계산에 넣지 않는다 — flowLive.date와
+  // 달리 "거래일 날짜"가 아니라 조회 시각을 담은 전체 ISO 타임스탬프(예:
+  // "2026-07-18T17:40:47.354047+00:00")라 formatDate가 'YYYY-MM-DD'로 정규화하지
+  // 못한다(8자리 숫자가 아님). 억지로 넣어도 latestOf의 length===10 필터에 걸러져
+  // 아무 효과가 없고, 의미상으로도 "당일 거래 기준일"과 "지금 이 순간"은 다른
+  // 개념이라 섞으면 오히려 baseDate 해석이 혼란스러워진다.
   const baseDate = latestOf(
     ...MARKETS.map((m) => latestPriceOf(m.key)?.date),
     etfComponent?.date,
@@ -1266,6 +1367,40 @@ export default function DashboardPage() {
             </div>
           )}
         />
+        {/* 실시간 관심 종목 TOP20(조회수 기준, live-only) — flowLive와 동일하게 정적
+            배포에서는 attentionTop이 항상 null이라 카드가 "표시할 데이터가 없습니다"로
+            자연히 빈 상태를 보여준다. 다른 3개 카드와 달리 행 자체가 클릭 가능해
+            바로 종목 상세 모달로 이어진다(StockSearch onSelect와 동일한 모달 타입). */}
+        <Top5Card
+          title="실시간 관심 TOP5"
+          hint="조회수 기준 · 60초 갱신"
+          rows={attentionTop?.rows}
+          onMore={() => setModal({ type: 'attention', title: '실시간 관심 종목 — 전체' })}
+          renderRow={(row) => (
+            <button
+              key={row.code}
+              type="button"
+              className="top5-row top5-row-clickable"
+              onClick={() =>
+                setModal({
+                  type: 'stock',
+                  title: `${row.name} · 종목 상세`,
+                  code: row.code,
+                  stock: { code: row.code, name: row.name, market: row.market, is_etf: row.is_etf },
+                })
+              }
+            >
+              <span className="top5-row-name">
+                <span className="top5-row-label">
+                  {row.rank ?? '-'}. {row.name || row.code}
+                </span>
+                {row.market && <Badge kind={row.market} />}
+                {row.is_etf && <Badge kind="etf" />}
+              </span>
+              <span className={`top5-row-value ${rateClass(row.change_rate)}`}>{rateLabel(row.change_rate)}</span>
+            </button>
+          )}
+        />
       </div>
 
       <Modal open={Boolean(modal)} onClose={closeModal} title={modal?.title}>
@@ -1278,6 +1413,18 @@ export default function DashboardPage() {
         {modal?.type === 'flowRank' && <FlowRankFullModal />}
         {modal?.type === 'valueRank' && <ValueRankFullModal />}
         {modal?.type === 'flowPath' && <FlowPathFullModal />}
+        {modal?.type === 'attention' && (
+          <AttentionFullModal
+            onSelectStock={(row) =>
+              setModal({
+                type: 'stock',
+                title: `${row.name} · 종목 상세`,
+                code: row.code,
+                stock: { code: row.code, name: row.name, market: row.market, is_etf: row.is_etf },
+              })
+            }
+          />
+        )}
         {modal?.type === 'stock' && <StockDetailModal code={modal.code} initial={modal.stock} />}
       </Modal>
     </div>

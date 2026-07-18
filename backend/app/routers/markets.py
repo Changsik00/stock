@@ -24,6 +24,14 @@ ka10066 장중 잠정 수급 probe" 절 참고) — 대신 이미 검증된 ka10
 fetch_live_flow). 라이브 호출이 실패하면 market_flow DB의 최신 확정치로
 폴백한다(provisional=False) — breadth/live와 달리 이 엔드포인트는 그 폴백을
 위해 DB 세션이 필요하다.
+
+Also owns GET /api/markets/attention — "실시간 관심 종목 TOP20" 카드. 키움
+ka00198(실시간종목조회순위, qry_tp="4"=당일 누적)을 온디맨드로 호출하고
+breadth/live·flow/live와 같은 60초 메모리 캐시 패턴으로 감싼다. ka00198
+응답에는 market(코스피/코스닥)·ETF 여부 필드가 없어 로컬 `stocks` 테이블과
+`stk_cd` 기준으로 조인해서 채운다(순위·종목명·등락율은 TR 응답을 그대로
+신뢰). breadth/live와 같은 이유로 **DB에는 절대 쓰지 않는다** — 실시간
+성격이라 DB 저장 없음(§3.5 원칙과 동일).
 """
 
 from __future__ import annotations
@@ -41,7 +49,7 @@ from ..clients import naver_breadth
 from ..clients.kiwoom import KiwoomClient
 from ..collectors.market_flow import fetch_live_flow
 from ..db import get_session
-from ..models import MarketBreadth, MarketFlow
+from ..models import MarketBreadth, MarketFlow, Stock
 from ..services import get_market_series_from_db
 
 logger = logging.getLogger(__name__)
@@ -314,4 +322,95 @@ async def market_flow_live(session: AsyncSession = Depends(get_session)):
         }
         _flow_live_cache["data"] = payload
         _flow_live_cache["ts"] = now
+        return payload
+
+
+# GET /api/markets/attention 60초 메모리 캐시 — breadth/live·flow/live와 동일한
+# 패턴이지만 각 라이브 엔드포인트는 독립 캐시를 쓴다(모듈 docstring 참고).
+_ATTENTION_CACHE_TTL_SECONDS = 60
+_attention_cache: dict[str, object] = {"ts": 0.0, "data": None}
+_attention_cache_lock = asyncio.Lock()
+
+
+def _parse_attention_row(row: dict) -> dict | None:
+    code = row.get("stk_cd")
+    if not code:
+        return None
+    try:
+        rank = int(row.get("bigd_rank"))
+    except (TypeError, ValueError):
+        rank = None
+    try:
+        change_rate = float(row.get("base_comp_chgr"))
+    except (TypeError, ValueError):
+        change_rate = None
+    return {
+        "rank": rank,
+        "code": code,
+        "name": row.get("stk_nm") or "",
+        "change_rate": change_rate,
+    }
+
+
+@router.get("/api/markets/attention")
+async def market_attention_live(session: AsyncSession = Depends(get_session)):
+    """실시간 관심 종목 TOP20 — 키움 ka00198(qry_tp="4"=당일 누적)을 온디맨드로
+    호출하고 60초 메모리 캐시로 감싼다. **market_attention류 테이블에는 절대
+    쓰지 않는다** — 실시간 성격이라 DB 저장 없음(모듈 docstring 참고).
+
+    ka00198 응답에는 market/ETF 여부 필드가 없어 `stocks` 테이블과 `stk_cd`
+    기준으로 조인해 채운다. 종목명은 TR의 `stk_nm`을 우선 쓰고(실측상 신뢰
+    가능), 비어 있으면 `stocks.name` -> 코드 순으로 폴백한다.
+
+    Returns ``{"rows": [...], "qry_tp": "4", "queried_at": iso8601}`` — 각 행은
+    ``{"rank", "code", "name", "change_rate", "is_etf", "market"}``
+    (``market``은 ``"kospi"``/``"kosdaq"``/``None``, 소문자).
+    """
+    now = time.monotonic()
+    async with _attention_cache_lock:
+        cached = _attention_cache["data"]
+        if cached is not None and (now - _attention_cache["ts"]) < _ATTENTION_CACHE_TTL_SECONDS:
+            return cached
+
+        try:
+            async with KiwoomClient() as client:
+                data, _headers = await client.realtime_inquiry_rank(qry_tp="4")
+        except Exception as e:  # noqa: BLE001 - 인증/네트워크/API 에러 전부 502로 변환
+            raise HTTPException(502, f"attention live fetch failed: {str(e)[:200]}") from e
+
+        parsed = [row for row in (_parse_attention_row(r) for r in data.get("item_inq_rank", [])) if row]
+
+        codes = [row["code"] for row in parsed]
+        stock_meta: dict[str, dict] = {}
+        if codes:
+            stmt = select(Stock.code, Stock.name, Stock.market, Stock.is_etf).where(Stock.code.in_(codes))
+            for code, name, market, is_etf in (await session.execute(stmt)).all():
+                stock_meta[code] = {"name": name, "market": market, "is_etf": is_etf}
+
+        rows = []
+        for row in parsed:
+            meta = stock_meta.get(row["code"])
+            name = row["name"] or (meta["name"] if meta else "") or row["code"]
+            market = meta["market"].lower() if meta and meta.get("market") else None
+            is_etf = bool(meta["is_etf"]) if meta else False
+            rows.append(
+                {
+                    "rank": row["rank"],
+                    "code": row["code"],
+                    "name": name,
+                    "change_rate": row["change_rate"],
+                    "is_etf": is_etf,
+                    "market": market,
+                }
+            )
+
+        rows.sort(key=lambda r: (r["rank"] is None, r["rank"]))
+
+        payload = {
+            "rows": rows,
+            "qry_tp": "4",
+            "queried_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        _attention_cache["data"] = payload
+        _attention_cache["ts"] = now
         return payload

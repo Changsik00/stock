@@ -895,6 +895,27 @@ header h1 {
   color: var(--down);
 }
 
+/* 실시간 관심 TOP5 카드 전용 — 이 카드만 행이 클릭 가능해(종목 상세 모달) <button>으로
+   렌더한다(DashboardPage.jsx). 다른 3개 카드의 .top5-row(<div>)는 그대로 두고, 이
+   변형에서만 버튼 기본 테두리/배경/폰트를 .top5-row와 같은 모양으로 리셋한 뒤
+   hover 강조를 추가한다 — hover 관례는 .kpi-tile:hover(테두리 강조)와 달리 행
+   단위라 배경 강조(.chip-bg)가 더 자연스럽다. */
+.top5-row-clickable {
+  width: 100%;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  text-align: left;
+}
+
+.top5-row-clickable:hover {
+  background: var(--chip-bg);
+}
+
 /* 종목 검색 자동완성 (PLAN.md §6 3.7-2, StockSearch.jsx) — 입력창은 기존
    .dashboard-search를 그대로 재사용해 "준비 중" 자리표시자와 시각적으로 동일하게
    보이게 하고, 이 래퍼는 드롭다운을 절대배치로 붙이기 위한 위치 기준(position:

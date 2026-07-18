@@ -185,6 +185,16 @@ export async function fetchFlowLive() {
   return getJson('/api/markets/flow/live')
 }
 
+// GET /api/markets/attention -> { rows: [{rank, code, name, change_rate, is_etf,
+// market}], qry_tp, queried_at } — 실시간 관심 종목 TOP20(키움 ka00198, 60초 서버
+// 캐시). fetchFlowLive와 마찬가지로 로컬 전용 기능이라 정적 배포(VITE_STATIC_DATA)에는
+// 대상이 아니다 — "실시간 조회수 순위"라는 개념 자체가 스냅샷으로 남길 수 없는
+// 값이라 스냅샷 폴백을 만들지 않는다(호출부 DashboardPage가 STATIC_DATA일 때 이
+// 함수를 아예 호출하지 않는다).
+export async function fetchAttention() {
+  return getJson('/api/markets/attention')
+}
+
 // GET /api/groups?type=upjong|theme -> [{name, change_rate, value, market_sum}] —
 // 해당 group_type의 최신 날짜 스냅샷 (PLAN.md §4.6 3.6-3 트리맵).
 export async function fetchGroups(type = 'upjong') {

@@ -299,6 +299,47 @@ async def test_after_hours_investor_trading_request_shape(make_client):
     assert row["ind_invsr"] == "1123"
 
 
+def _realtime_inquiry_rank_response(request: httpx.Request) -> httpx.Response:
+    assert request.headers["api-id"] == "ka00198"
+    return httpx.Response(
+        200,
+        json={
+            "return_code": 0,
+            "return_msg": "정상적으로 처리되었습니다",
+            "item_inq_rank": [
+                {"stk_nm": "SK하이닉스", "bigd_rank": "1", "stk_cd": "000660", "base_comp_chgr": "-12.10"},
+                {"stk_nm": "삼성전자", "bigd_rank": "2", "stk_cd": "005930", "base_comp_chgr": "-9.30"},
+                {"stk_nm": "기아", "bigd_rank": "3", "stk_cd": "000270", "base_comp_chgr": "+1.72"},
+            ],
+        },
+        headers={"cont-yn": "N", "next-key": "", "api-id": "ka00198"},
+    )
+
+
+async def test_realtime_inquiry_rank_request_shape(make_client):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return _token_response(request)
+        assert request.url.path == "/api/dostk/stkinfo"
+        captured["body"] = json.loads(request.content)
+        return _realtime_inquiry_rank_response(request)
+
+    client = make_client(handler)
+    try:
+        data, headers = await client.realtime_inquiry_rank()
+    finally:
+        await client.aclose()
+
+    assert captured["body"] == {"qry_tp": "4"}
+    assert headers["api-id"] == "ka00198"
+    rows = data["item_inq_rank"]
+    assert len(rows) == 3
+    assert rows[0] == {"stk_nm": "SK하이닉스", "bigd_rank": "1", "stk_cd": "000660", "base_comp_chgr": "-12.10"}
+    assert rows[2]["stk_cd"] == "000270"
+
+
 async def test_return_code_error_raises_kiwoom_api_error(make_client):
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/oauth2/token":
