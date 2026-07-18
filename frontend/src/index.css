@@ -632,3 +632,246 @@ header h1 {
   display: block;
   margin-bottom: 8px;
 }
+
+/* ==========================================================================
+   대시보드 탭 (PLAN.md §6 3.7-1, DashboardPage.jsx) — 핵심 숫자 위주 첫 화면.
+   디테일(차트/전체 리스트)은 전부 Modal.jsx 뒤로 숨긴다.
+   ========================================================================== */
+
+/* 대시보드는 "첫 화면 무스크롤" 목표(PLAN.md §6 3.7-1)라 시장 탭이 쓰는 기본
+   .section-title/.kpi-grid/.top5-grid 여백보다 더 촘촘해야 한다. 시장 탭(상세 뷰)의
+   여백은 그대로 두기 위해(공유 클래스 자체는 건드리지 않음) .dashboard-page로
+   범위를 좁혀 덮어쓴다. */
+.dashboard-page .section-title {
+  margin: 18px 0 8px;
+}
+
+.dashboard-page .section-title:first-of-type {
+  margin-top: 14px;
+}
+
+.dashboard-search {
+  width: 100%;
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+}
+
+.dashboard-search:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.kpi-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+  font-family: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.kpi-tile:hover {
+  border-color: var(--axis);
+}
+
+.kpi-tile-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.kpi-tile-label .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.kpi-tile-value {
+  font-size: 19px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.kpi-tile-value.up {
+  color: var(--up);
+}
+
+.kpi-tile-value.down {
+  color: var(--down);
+}
+
+.kpi-tile-value.flat {
+  color: var(--text-muted);
+}
+
+.kpi-tile-sub {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.kpi-tile-sub.up {
+  color: var(--up);
+}
+
+.kpi-tile-sub.down {
+  color: var(--down);
+}
+
+.top5-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.top5-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px 6px;
+}
+
+.top5-card-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.top5-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.top5-more {
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--series-price);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 2px 0;
+}
+
+.top5-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.top5-row:last-child {
+  border-bottom: none;
+}
+
+.top5-row-name {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.top5-row-value {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.top5-row-value.up {
+  color: var(--up);
+}
+
+.top5-row-value.down {
+  color: var(--down);
+}
+
+/* 공용 모달 (Modal.jsx) */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 40px 16px;
+  z-index: 100;
+  overflow-y: auto;
+}
+
+.modal-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  width: 100%;
+  max-height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.modal-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.modal-close {
+  font-family: inherit;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 6px;
+}
+
+.modal-close:hover {
+  background: var(--chip-bg);
+  color: var(--text-primary);
+}
+
+.modal-body {
+  padding: 16px 18px 20px;
+  overflow-y: auto;
+}

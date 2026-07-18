@@ -355,7 +355,10 @@ function GroupCaption({ groups }) {
   )
 }
 
-export default function GroupTreemap({ items, sizeBy = 'value' }) {
+// height: 트리맵 렌더 높이(px) — 기본 420은 시장 탭(상세 뷰) 크기. 대시보드 탭은
+// 무스크롤 첫 화면 목표(PLAN.md §6 3.7-1)를 위해 더 낮은 값(예: 260)을 넘긴다.
+// 동작(데이터 처리/접기/색 스케일)은 그대로이고 렌더 높이만 바뀐다.
+export default function GroupTreemap({ items, sizeBy = 'value', height = 420 }) {
   // tradeValue: 원본 거래대금을 recharts Treemap의 'value' 필드 덮어쓰기(위 TreemapCell
   // 주석 참고)로부터 지키기 위한 별칭이다 — content/Tooltip 어느 쪽도 props.value를
   // 원본 거래대금으로 신뢰할 수 없으므로 여기서 한 번만 복제해 둔다.
@@ -382,7 +385,7 @@ export default function GroupTreemap({ items, sizeBy = 'value' }) {
         </div>
       )}
       <GroupCaption groups={captionGroups} />
-      <ResponsiveContainer width="100%" height={420}>
+      <ResponsiveContainer width="100%" height={height}>
         <Treemap
           data={boxes}
           dataKey="sizeValue"
