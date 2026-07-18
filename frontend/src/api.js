@@ -12,7 +12,7 @@ async function getJson(url) {
 // public/data/*.json 스냅샷을 fetch해서 클라이언트에서 슬라이싱한다. 스냅샷은
 // 항상 최대 1095일 창을 담고 있으므로 (수집 스크립트, PLAN.md 참고) 요청받은
 // days만큼 잘라내면 라이브 API와 동일한 응답 모양이 된다.
-const STATIC_DATA = import.meta.env.VITE_STATIC_DATA === '1'
+export const STATIC_DATA = import.meta.env.VITE_STATIC_DATA === '1'
 
 // URL별로 파싱된 JSON을 캐싱해 탭/기간 전환마다 같은 스냅샷 파일을 다시 받지 않는다.
 const staticJsonCache = new Map()
@@ -181,6 +181,20 @@ export async function fetchGroups(type = 'upjong') {
     return fetchStaticJson(`data/groups-${type}.json`)
   }
   return getJson(`/api/groups?type=${type}`)
+}
+
+// GET /api/stocks/search?q=...&limit=15 -> [{code, name, market, is_etf}] — 온디맨드
+// API라 정적 스냅샷 대상이 아니다(PLAN.md §6 3.7-2: "온디맨드 API라 스냅샷 대상
+// 아님") — STATIC_DATA 분기가 없다. 정적 배포 모드에서는 호출부(StockSearch)가 이
+// 함수를 아예 호출하지 않고 검색창을 비활성화된 채로 둔다.
+export async function fetchStockSearch(q, limit = 15) {
+  return getJson(`/api/stocks/search?q=${encodeURIComponent(q)}&limit=${limit}`)
+}
+
+// GET /api/stocks/{code}/series?days=N -> {code, name, market, is_etf, days, prices,
+// flows, meta} — 마찬가지로 온디맨드 전용(정적 스냅샷 없음).
+export async function fetchStockSeries(code, days = 180) {
+  return getJson(`/api/stocks/${code}/series?days=${days}`)
 }
 
 // GET /api/macro/series?ids=usdkrw,wti,brent&days=N -> { days, series: { id: [...] } }

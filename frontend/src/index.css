@@ -281,6 +281,17 @@ header h1 {
   color: var(--down);
 }
 
+/* StockDetailModal의 콤보 라인차트 툴팁(3개 투자자를 한 번에 나열)에서 쓰는 색상 점 —
+   기존 .dot 계열이 전부 특정 부모(.kpi-tile-label 등)로 스코프돼 있어 여기서만
+   재정의한다. */
+.tooltip-row .dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 2px;
+}
+
 /* 페이지 탭(시장/매크로/종목/ETF) — 기존 .tabs(시장/기간 토글)와 위계를 구분하기 위해
    별도 클래스로 둔다. */
 .page-tabs {
@@ -791,14 +802,24 @@ header h1 {
   border-bottom: none;
 }
 
+/* 버그 수정: .top5-row-name 전체 박스에 text-overflow/white-space를 걸면
+   ellipsis가 박스 오른쪽 픽셀 경계에서만 잘려, flex:none인 Badge(코스피/코스닥/ETF)가
+   줄어들 자리를 못 만들고 텍스트 중간이 그대로 잘려 나갔다("코" "E" 처럼 한 글자만
+   보이는 원인). 이제 이 박스는 overflow만 숨기고, 실제 말줄임은 이름 텍스트를 감싼
+   .top5-row-label에서만 일어나게 해 배지는 항상 전체 텍스트로 렌더된다. */
 .top5-row-name {
   display: flex;
   align-items: center;
   gap: 5px;
   overflow: hidden;
+  color: var(--text-primary);
+}
+
+.top5-row-label {
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text-primary);
+  min-width: 0;
 }
 
 .top5-row-value {
@@ -812,6 +833,194 @@ header h1 {
 }
 
 .top5-row-value.down {
+  color: var(--down);
+}
+
+/* 종목 검색 자동완성 (PLAN.md §6 3.7-2, StockSearch.jsx) — 입력창은 기존
+   .dashboard-search를 그대로 재사용해 "준비 중" 자리표시자와 시각적으로 동일하게
+   보이게 하고, 이 래퍼는 드롭다운을 절대배치로 붙이기 위한 위치 기준(position:
+   relative)만 담당한다. */
+.stock-search {
+  position: relative;
+  margin-bottom: 14px;
+}
+
+.stock-search .dashboard-search {
+  margin-bottom: 0;
+}
+
+.stock-search-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  max-height: 320px;
+  overflow-y: auto;
+  z-index: 20;
+}
+
+.stock-search-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  color: var(--text-primary);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: 9px 12px;
+  cursor: pointer;
+}
+
+.stock-search-row:last-child {
+  border-bottom: none;
+}
+
+.stock-search-row:hover,
+.stock-search-row.highlighted {
+  background: var(--chip-bg);
+}
+
+.stock-search-row-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.stock-search-row-code {
+  flex: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.stock-search-empty {
+  padding: 14px 12px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* 종목 상세 모달 (PLAN.md §6 3.7-2, StockDetailModal.jsx) — 헤더(이름/코드/배지/
+   현재가)와 투자자별 수급 요약(스탯 타일 3개 + 누적 콤보 라인차트)에 쓰는 규칙.
+   기존 .kpi-tile/.chart-card/.flow-* 시각 언어(둥근 surface 카드, var(--border))를
+   그대로 따른다. */
+.stock-detail-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.stock-detail-name {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.stock-detail-code {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.stock-detail-price {
+  margin-left: auto;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.stock-detail-rate {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.stock-detail-rate.up {
+  color: var(--up);
+}
+
+.stock-detail-rate.down {
+  color: var(--down);
+}
+
+.stock-detail-flow {
+  margin-top: 16px;
+}
+
+.stock-detail-flow-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.stock-detail-flow-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.stock-detail-flow-tile-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.stock-detail-flow-tile-label .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.stock-detail-flow-tile-value {
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.stock-detail-flow-tile-value.up {
+  color: var(--up);
+}
+
+.stock-detail-flow-tile-value.down {
+  color: var(--down);
+}
+
+.stock-detail-flow-tile-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.stock-detail-flow-tile-sub.up {
+  color: var(--up);
+}
+
+.stock-detail-flow-tile-sub.down {
   color: var(--down);
 }
 

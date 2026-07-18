@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
+  STATIC_DATA,
   fetchBreadth,
   fetchBreadthLive,
   fetchFlowPath,
@@ -21,6 +22,8 @@ import MarketFundChart from '../components/MarketFundChart'
 import Modal from '../components/Modal'
 import PeriodPicker from '../components/PeriodPicker'
 import SentimentGauge from '../components/SentimentGauge'
+import StockDetailModal from '../components/StockDetailModal'
+import StockSearch from '../components/StockSearch'
 import ValueRankTable from '../components/ValueRankTable'
 import { DEFAULT_INVESTORS, INVESTOR_COLOR_VAR, MARKETS, MARKET_FUND_IDS } from '../constants'
 import { formatDate } from '../format'
@@ -746,14 +749,25 @@ export default function DashboardPage() {
 
   return (
     <div className="dashboard-page">
-      {/* 검색바 자리 — 종목 검색 연동은 Phase 3.7-2 다음 단계 작업. */}
-      <input
-        type="text"
-        className="dashboard-search"
-        placeholder="종목 검색 — 준비 중"
-        disabled
-        aria-label="종목 검색 (준비 중)"
-      />
+      {/* 종목 검색 (PLAN.md §6 3.7-2) — 온디맨드 API(/api/stocks/search)라 정적
+          스냅샷 대상이 아니다. 정적 배포(STATIC_DATA=1)에서는 검색을 서빙할 수 없으므로
+          같은 자리에 비활성 입력만 남겨 레이아웃이 흔들리지 않게 한다. */}
+      {STATIC_DATA ? (
+        <input
+          type="text"
+          className="dashboard-search"
+          placeholder="종목 검색 — 준비 중"
+          disabled
+          title="정적 배포에선 종목 검색 미지원"
+          aria-label="종목 검색 (정적 배포 미지원)"
+        />
+      ) : (
+        <StockSearch
+          onSelect={(stock) =>
+            setModal({ type: 'stock', title: `${stock.name} · 종목 상세`, code: stock.code, stock })
+          }
+        />
+      )}
 
       {/* 1. 지수 3종 */}
       <div className="section-title" style={{ marginTop: 16 }}>
@@ -877,7 +891,9 @@ export default function DashboardPage() {
           renderRow={(row) => (
             <div key={row.code} className="top5-row">
               <span className="top5-row-name">
-                {row.rank}. {row.name || row.code}
+                <span className="top5-row-label">
+                  {row.rank}. {row.name || row.code}
+                </span>
                 {row.market && <Badge kind={row.market} />}
                 {row.is_etf && <Badge kind="etf" />}
               </span>
@@ -893,7 +909,9 @@ export default function DashboardPage() {
           renderRow={(row) => (
             <div key={`${row.market}-${row.code}`} className="top5-row">
               <span className="top5-row-name">
-                {row.rank}. {row.name || row.code}
+                <span className="top5-row-label">
+                  {row.rank}. {row.name || row.code}
+                </span>
                 {row.market && <Badge kind={row.market} />}
                 {row.is_etf && <Badge kind="etf" />}
               </span>
@@ -950,6 +968,7 @@ export default function DashboardPage() {
         {modal?.type === 'flowRank' && <FlowRankFullModal />}
         {modal?.type === 'valueRank' && <ValueRankFullModal />}
         {modal?.type === 'flowPath' && <FlowPathFullModal />}
+        {modal?.type === 'stock' && <StockDetailModal code={modal.code} initial={modal.stock} />}
       </Modal>
     </div>
   )
