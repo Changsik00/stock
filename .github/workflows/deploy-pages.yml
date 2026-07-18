@@ -80,9 +80,21 @@ jobs:
 
       - name: Backfill macro data (3y)
         working-directory: backend
-        # ECOS_API_KEY가 시크릿에 없으면 환율은 sample 키로 소량만 채워지고 실패하지 않는
-        # 것이 정상이지만(clients/ecos.py), 만일을 대비해 실패해도 계속 진행한다.
+        # 환율(usdkrw)은 무키 네이버 marketIndex API 1차 + FRED DEXKOUS 폴백
+        # (clients/naver_fx.py, 2026-07-19 ECOS 의존 제거) — ECOS_API_KEY 시크릿 불필요.
+        # 유가는 yfinance→FRED 폴백. 만일을 대비해 실패해도 계속 진행한다.
         run: python -m scripts.backfill_macro 3 || echo "::warning::backfill_macro failed, continuing without full macro snapshot data"
+
+      - name: Backfill market flow (최근 90일, 키움 ka10051)
+        working-directory: backend
+        # 시장(코스피/코스닥) 투자자별 순매수 — 키움 REST ka10051 (2026-07-19 pykrx→키움 교체).
+        # 3년 전체 백필(~25분)은 CI마다 돌리기엔 과해서 최근 90일만 증분 적재한다
+        # (이미 적재된 날짜는 스크립트가 스킵하므로 매 실행 비용은 실제로는 수 분 이내).
+        # 주의: 키움 API는 앱키 발급 시 IP 등록제라 GitHub 호스티드 러너의 유동 IP에서는
+        # 인증(토큰 발급)이 거부될 수 있다. 그 경우 이 스텝은 warning만 남기고 잡은 계속
+        # 진행되며, 배포된 정적 스냅샷에서 "투자자별 수급" 섹션만 비게 된다(다른 데이터는
+        # 정상 배포). 근본 해결은 고정 IP 러너/프록시 또는 self-hosted 러너 필요.
+        run: python -m scripts.backfill_market_flow --days 90 || echo "::warning::backfill_market_flow failed (Kiwoom auth may be rejected from GitHub runner IPs — IP allowlist), continuing without market flow data"
 
       - name: Collect ETF master/holdings (오늘 스냅샷)
         working-directory: backend

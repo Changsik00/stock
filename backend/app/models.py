@@ -79,7 +79,7 @@ class StockOhlcv(Base):
 
 
 class MarketFlow(Base):
-    """시장별 투자자 순매수 (KIS 3분류 + pykrx 13분류 겸용, source 컬럼으로 구분)."""
+    """시장별 투자자 순매수 (KIS 3분류 + pykrx/kiwoom 13분류 겸용, source 컬럼으로 구분)."""
 
     __tablename__ = "market_flow"
 

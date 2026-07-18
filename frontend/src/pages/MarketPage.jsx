@@ -44,7 +44,8 @@ const VALUE_RANK_MARKET_OPTIONS = [
 
 // 코스피/코스닥/선물: 지수 캔들+거래량(CandleChart, lightweight-charts) 아래에 투자자별
 // 수급(FlowChart)을 이어 붙인다 (PLAN.md §5.1/§6 1-5). market_flow가 비어 있으면
-// (KRX 로그인 미설정) 수급 영역은 안내 배너로 대체하고, 화면은 시세만으로도 성립한다.
+// (키움 ka10051 수집 미실행/인증 불가) 수급 영역은 안내 배너로 대체하고, 화면은
+// 시세만으로도 성립한다.
 export default function MarketPage() {
   const [market, setMarket] = useState('kospi')
   const [days, setDays] = useState(90)
@@ -397,9 +398,10 @@ export default function MarketPage() {
             <FlowChart flows={flows} />
           ) : (
             <div className="banner">
-              수급 데이터 수집 대기 (KRX 로그인 설정 필요) — data.krx.co.kr 무료 회원가입 후
-              .env의 KRX_ID/KRX_PW를 설정하면 코스피·코스닥 투자자별 순매수가 이 영역에
-              표시됩니다.
+              수급 데이터 수집 대기 — 키움 ka10051 수집(market_flow)이 아직 실행되지 않았거나
+              이 배포 환경에서 키움 인증이 불가합니다(IP 등록제). 백엔드에서
+              scripts.backfill_market_flow를 실행하면 코스피·코스닥 투자자별 순매수가 이
+              영역에 표시됩니다.
             </div>
           )}
         </>

@@ -45,8 +45,20 @@
 | 기능 | 대안 |
 |---|---|
 | **선물(K200) 투자자별 수급** — REST API에 선물옵션 도메인 자체가 없음 | KIS API 또는 KRX 크롤링 (아래 §2) |
-| 시장 전체(코스피/코스닥) 투자자별 순매수 **일별 시계열 전용 TR** | `ka10051`(종합 업종) 일자별 반복 호출로 우회 가능하나 비효율. KIS `FHPTJ04040000`이 정석 |
 | 환율/유가 | ECOS / yfinance (§3) |
+
+> **2026-07-19 갱신**: "시장 전체(코스피/코스닥) 투자자별 순매수 일별 시계열
+> 전용 TR 없음" 판단을 재검증 — `ka10051`(업종별투자자순매수,
+> `/api/dostk/sect`)을 실호출 확정한 결과 **"비효율한 우회"가 아니라 유력한
+> pykrx 대체 후보**로 재평가됨. 첫 번째 응답 행이 `inds_cd="001_AL"/"101_AL"`
+> 종합(시장 전체) 집계이고, 13종 투자자 분류(개인/외국인/기관 세부 —
+> 보험·투신·은행·연기금·사모펀드 등)를 제공하며, `base_dt` 파라미터로 과거
+> 임의 일자 조회가 가능함을 확인(`backend/app/clients/kiwoom.py` docstring
+> "ka10051 추가 검증" 절 참고). 날짜당 1콜이지만 rate limit(1 req/s) 기준
+> 3년 백필(~750영업일)도 약 12분이면 끝남 — `KRX_ID`/`PW` 로그인 의존 없이
+> 시장 수급을 확보할 수 있는 경로. **1-4(pykrx 기반 market_flow)의 소스
+> 교체 여부는 별도 의사결정 필요**(pykrx는 13분류가 이미 있어 당장 급하지
+> 않음 — 아래 §7 리스크 표 참고).
 
 ### 이용 조건
 - 키움증권 **실계좌 필요** (비대면 개설 가능), 모의투자 지원(국내주식만)
@@ -82,7 +94,7 @@
 
 | 데이터 | 1순위 | 백업 |
 |---|---|---|
-| USD/KRW 일별 | **한국은행 ECOS API** — `731Y001` / 주기 `D` / 항목 `0000001` (매매기준율). 무료, 키 신청 1일 내, 기간 조회 한 번에 가능. **실호출 검증됨** | 한국수출입은행 API, FRED `DEXKOUS` |
+| USD/KRW 일별 | **네이버 marketIndex API** (무키) — `m.stock.naver.com/front-api/marketIndex/prices?category=exchange&reutersCode=FX_USDKRW` (User-Agent 필요, pageSize 최대 60, 페이징으로 과거 소급 — 3년 백필 실측 완료 2026-07-19, clients/naver_fx.py). 실패 시 FRED `DEXKOUS`(무키 CSV) 자동 폴백 | 한국은행 ECOS API `731Y001/D/0000001` (키 필요 — 정밀 공식 소스 옵션, clients/ecos.py 유지), 한국수출입은행 API |
 | WTI/브렌트 일별 | **yfinance** `CL=F`, `BZ=F` — 현재 정상 동작 확인. 단 비공식이라 429 사태 전력(2024~2025) → **하루 1회 배치 + DB 캐싱 필수** | FRED 공식 CSV `DCOILWTICO`, `DCOILBRENTEU` (무키) |
 | 두바이유 일별 | 무료 공식 API 없음. 오피넷 웹 파싱(T+1) 또는 월별(ECOS `902Y003`)로 타협 | — |
 
@@ -108,9 +120,16 @@
 ### 등락 종목수 (breadth) — 키움 ka20001
 
 - `ka20001` 업종현재가 (업종코드 001=종합KOSPI, 101=종합KOSDAQ) 요청 1건으로
-  상승/상한/보합/하락/하한 종목수를 받는 방식이 정석. 구 OpenAPI+ opt20001에 해당
-  필드가 있었고 REST가 구 TR을 미러링하므로 있을 가능성 높음 — **probe 실호출로 확정 필요**
-- 실패 시 대안: 일별은 pykrx 전 종목 스냅샷에서 카운트, 장중은 네이버 시장 페이지 파싱
+  상승/상한/보합/하락/하한 종목수를 받는 방식 — **2026-07-19 실전 키로 실호출
+  확정**(`backend/app/clients/kiwoom.py` docstring "Phase 1.5-1 probe 실측
+  확정" 참고). 필드명 `rising`(상승)/`stdns`(보합)/`fall`(하락)/`upl`(상한)/
+  `lst`(하한). 같은 날 장중 실측값이 네이버 breadth와 **완전 일치**:
+  KOSPI `rising=384, stdns=40, fall=488, upl=6` ↔ 네이버 384↑/40—/488↓/상한6,
+  KOSDAQ `rising=501, stdns=56, fall=1182` ↔ 네이버 501↑/56—/1182↓.
+- 결론: `ka20001`이 breadth 정밀 소스로 채택 가능함이 확정됨. 다만 §1.5-3/
+  §3.6-2가 이미 네이버 임시 소스로 동작 중이라 교체는 급하지 않은 정밀화
+  작업으로 남겨둠(값이 일치하므로 교체 효과는 "공식 소스로의 신뢰성 강화"
+  수준 — 데이터 자체는 이미 맞음).
 - 적재: `market_breadth` (market, date) — adv/dec/flat/limit_up/limit_down.
   장중 값은 DB에 쌓지 않고 온디맨드 프록시(짧은 캐시)로 제공
 
@@ -364,9 +383,13 @@ DB 상시 접근이 필요한 동적 기능은 대상 밖이며 추후 실서버
 
 ### Phase 0 — 사용자 준비물 (코딩과 무관, 병행 진행)
 - [x] 키움 계좌 + openapi.kiwoom.com 서비스 신청 → 앱키 발급 완료 (`.env` 반영됨)
-- [ ] ECOS 인증키 신청 (ecos.bok.or.kr, 무료, ~1일) → `.env`의 `ECOS_API_KEY` — **환율 백필 선행 조건**
-- [ ] **data.krx.co.kr 무료 회원가입** → `.env`의 `KRX_ID`/`KRX_PW` — 2026-02 KRX 포털
-  개편 이후 pykrx가 이 로그인 없이는 전면 차단됨(구현 중 실확인). **시장 수급 백필 선행 조건**
+- [x] ~~ECOS 인증키 신청~~ — **불필요, 대체 소스 확정(2026-07-19)**: 환율은 무키 네이버
+  marketIndex API 1차 + FRED DEXKOUS 폴백으로 전환(clients/naver_fx.py, §3). ECOS는
+  키 확보 시 쓸 수 있는 정밀 소스 옵션으로만 유지(clients/ecos.py 보존)
+- [x] ~~data.krx.co.kr 무료 회원가입 (KRX_ID/PW)~~ — **불필요, 대체 소스 확정(2026-07-19)**:
+  시장 수급은 키움 `ka10051`(업종별투자자순매수, 종합 행 001_AL/101_AL, 13분류,
+  과거 일자 조회 가능)로 전환 — KRX 로그인 의존 제거(§1 2026-07-19 갱신 참고).
+  pykrx 경로(clients/pykrx_client.py)는 백업 소스로 보존
 - [ ] (선물 수급용) KIS 계좌 + 앱키 — Phase 4 전까지만 결정하면 됨
 
 ### Phase 1 — 기반 골격 + 매크로 (API 키 없이도 개발·검증 가능한 것부터)
@@ -374,18 +397,19 @@ DB 상시 접근이 필요한 동적 기능은 대상 밖이며 추후 실서버
 | # | 작업 | 내용 | 완료 기준 |
 |---|---|---|---|
 | 1-1 ✅ | 인프라 골격 | docker-compose(timescaledb), config.py, db.py, models.py(§5.2 전체), Alembic 마이그레이션, 라우터 뼈대 | `docker compose up` 후 `alembic upgrade head` 성공, `GET /api/admin/status` 200 |
-| 1-2 ✅* | 매크로 수집 | ecos.py + commodities.py(yfinance→FRED 폴백) + collectors/macro.py + backfill(3년) | ECOS sample 키로 환율 10건, FRED로 WTI/브렌트 3년치 DB 적재 확인 |
+| 1-2 ✅ | 매크로 수집 | naver_fx.py(네이버 1차→FRED DEXKOUS 폴백, 2026-07-19 ECOS 의존 제거) + commodities.py(yfinance→FRED 폴백) + collectors/macro.py + backfill(3년) | 환율 3년치(731건, source=naver) + WTI/브렌트 3년치 DB 적재 완료(2026-07-19) |
 | 1-3 ✅ | 매크로 화면 | `GET /api/macro/series` + MacroPage + PeriodPicker | 브라우저에서 환율/유가 3개 라인차트 렌더 |
-| 1-4 ✅* | 시장 수급 수집 | pykrx 기반 market_flow collector (키 불필요, KIS 발급 전 임시 소스) + 3년 backfill | 코스피/코스닥 13분류 일별 순매수 DB 적재 |
+| 1-4 ✅ | 시장 수급 수집 | 키움 ka10051 기반 market_flow collector (source='kiwoom', 2026-07-19 pykrx→키움 교체 — KRX 로그인 불필요, pykrx 코드는 백업 보존) + 3년 backfill | 코스피/코스닥 13분류 일별 순매수 DB 적재 완료(2026-07-19) |
 | 1-5 ✅ | 시장 화면 개편 | `GET /api/markets/{market}/series` + MarketPage (지수 라인 + 수급 스택 막대 + 누적 라인) | 기존 KRX 시세와 수급이 한 화면에 |
 
-*✅\* = 코드 완료, 백필 실행은 키 대기 (1-2: ECOS_API_KEY 환율분, 1-4: KRX_ID/PW)*
+*(2026-07-19: 1-2/1-4의 "키 대기" 각주 해소 — 환율은 네이버, 시장 수급은 키움 ka10051로
+대체 소스 확정 및 3년 백필 완료. ECOS/KRX 키는 더 이상 선행 조건이 아님, Phase 0 참고)*
 
 ### Phase 1.5 — 시장 체력 지표 (2026-07-17 추가) ★ 키움 앱키 재발급 대기로 블로킹
 
 | # | 작업 | 내용 | 완료 기준 |
 |---|---|---|---|
-| 1.5-1 ⚠️ | 키움 probe 실측 | `scripts/kiwoom_probe.py` 실행 — TR URL 확정, rate limit 실측, **ka20001 응답에 등락 종목수 필드 존재 확정** (§3.5). **블로킹**: 2026-07-17 실행 결과 토큰 발급이 실전/모의 양쪽 다 `8001` 인증 실패로 막힘 — TR URL·rate limit·ka20001 필드 전부 미검증. 코드는 준비됨(`ka20001` 호출·`step_d` 덤프 단계 추가 완료, 정적분석 근거 URL 반영) — **앱키 재발급 후 재실행만 하면 됨** | 실측 결과를 kiwoom.py 주석/TR_RESOURCE_URL에 반영, 문서화 — *URL/rate limit/필드 확정은 미완료, 앱키 재발급 대기* |
+| 1.5-1 ✅ | 키움 probe 실측 | `scripts/kiwoom_probe.py` 실행 — TR URL 확정, rate limit 실측, **ka20001 응답에 등락 종목수 필드 존재 확정** (§3.5). **2026-07-19 실전 키로 완료**: ka10001/ka10059(`/api/dostk/stkinfo`), ka20001(`/api/dostk/sect`) 전부 200+return_code=0 실호출 확정. ka20001 필드(`rising/stdns/fall/upl/lst`)가 네이버 breadth와 완전 일치 확인. rate limit은 순간 버스트 한도 ~4(5번째부터 429), 클라이언트 기본값(1 req/s, burst 2)이 이보다 보수적이라 안전 — 변경 불필요 | 실측 결과를 kiwoom.py 주석/TR_RESOURCE_URL에 반영, 문서화 — **완료** |
 | 1.5-2 ✅ | KOFIA 수집 | clients/kofia.py + macro 배치 편입 + 3년 backfill — 예탁금·신용융자·**대차잔고** | macro_series에 kofia 시리즈 3년치 적재, collect_log ok |
 | 1.5-3 ✅* | breadth 수집·API | market_breadth 테이블(마이그레이션) + collectors/breadth.py(일별) + `/breadth`·`/breadth/live` | 일별 등락 종목수 적재 + 장중 live 호출 동작 — *네이버 임시 소스로 선구현(3.6-2), 키움 ka20001은 정밀화용(1.5-1 앱키 재발급 후 교체 예정)* |
 | 1.5-4 ✅* | 화면 반영 | MarketPage에 등락 종목수(장중 배지 + 일별 시계열), 예탁금·신용융자·대차잔고 라인차트 | 시장 탭에서 "코스피 ○○○/△△△ 상승/하락" + 자금 차트 확인 — *자금·대차 차트 3종(MarketFundChart) 완료(2026-07-17), 등락 종목수 배지는 1.5-3 완료 후* |
@@ -457,7 +481,7 @@ DB 상시 접근이 필요한 동적 기능은 대상 밖이며 추후 실서버
 |---|---|---|
 | 키움 rate limit | 공식 수치 미공개 (1~20건/초 관측치 상충) | 초기에 실측, 클라이언트에 보수적 rate limiter 내장 |
 | 선물 수급 소스 | KIS `FHPTJ04030000`의 선물 시장코드 지원 여부 미검증 | Phase 4에서 실호출 검증, 실패 시 KRX/네이버 파싱 |
-| pykrx 안정성 | 2026-02 개편 후 **data.krx.co.kr 무료 회원 로그인 필수**(KRX_ID/PW 없으면 HTTP 400 전면 차단 — 구현 중 실확인). 무인증 크롤링 시대는 끝남 | 무료 가입으로 당장은 사용 가능하나, KIS `FHPTJ04040000`으로의 1차 소스 교체(Phase 4 → 조기 검토)를 권장 |
+| pykrx 안정성 | 2026-02 개편 후 **data.krx.co.kr 무료 회원 로그인 필수**(KRX_ID/PW 없으면 HTTP 400 전면 차단 — 구현 중 실확인). 무인증 크롤링 시대는 끝남 | 무료 가입으로 당장은 사용 가능하나, KIS `FHPTJ04040000` **또는 키움 `ka10051`**(2026-07-19 실호출 확정, §1 참고 — 종합 행 1개로 시장 전체 13분류 순매수, 과거 일자 조회 가능)로의 1차 소스 교체를 권장 |
 | yfinance 429 | 2024~2025 rate limit 사태 반복 | 하루 1회 배치 + FRED 백업 자동 전환 |
 | KOFIA freesis 파싱 | 비공식 통계 화면 POST 파싱 — 사이트 개편 시 장애 가능 | collect_log 실패 감지, 일별 T+1 지표라 하루 지연 허용 가능 |
 | ka20001 등락 종목수 | REST 응답에 구 opt20001의 상승/하락 종목수 필드가 있는지 미확정 | 1.5-1 probe로 실측 확정, 없으면 pykrx 카운트(일별)/네이버 파싱(장중) 대안 |

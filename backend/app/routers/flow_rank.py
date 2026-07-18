@@ -116,11 +116,16 @@ async def flow_path_top(
     via_etf_net < 0인 행만 오름차순(가장 큰 음수=가장 큰 유출이 1등)으로 정렬해
     상위 limit개를 반환한다.
 
-    이름 해석 순서: (1) stocks 테이블(현재는 ETF만 채워져 있음, Phase 2-2 종목마스터
-    수집 전) -> (2) flow_rank(날짜 무관 가장 최근 관측치 — 개별주 이름은 여기서만
-    구할 수 있는 경우가 많다, PLAN.md §4.5 지시 "flow_rank name 활용") -> (3) 그래도
-    없으면 code 그대로. top_etfs는 collectors/flow_path.py가 이미 상위 5개로 잘라
-    저장해 두었으므로 여기서는 그대로 내려준다.
+    이름 해석 순서: (1) stocks 테이블(2026-07-18부터 collectors/value_rank.py가
+    코스피+코스닥 전 종목(~4,000+)을 이름 포함으로 upsert하므로 사실상 이 1순위에서
+    대부분 해결된다 — 그 전에는 collectors/etf_master.py가 적재하는 ETF ~300개만
+    있어서 나머지 종목은 code가 그대로 노출되는 버그가 있었다) -> (2) flow_rank
+    (날짜 무관 가장 최근 관측치 — stocks에 아직 없는 신규/이례적 코드에 대한
+    폴백, PLAN.md §4.5 지시 "flow_rank name 활용") -> (3) 그래도 없으면 code
+    그대로. top_etfs는 collectors/flow_path.py가 이미 상위 5개로 잘라 저장해
+    두었으므로 여기서는 그대로 내려준다. flow_path 행에는 ETF 코드가 남지 않는다
+    (collectors/flow_path.py의 1단계 재귀 분해 + 최종 result 단계 ETF 코드 제외
+    — PLAN.md §4.5 한계 (b) 2026-07-18 해결).
     """
     if direction not in FLOW_PATH_DIRECTIONS:
         raise HTTPException(400, f"direction must be one of {sorted(FLOW_PATH_DIRECTIONS)}")
