@@ -377,3 +377,105 @@ def test_parse_nav_aum():
     result = naver_etf.parse_nav_aum(ETF_ANALYSIS_KODEX200)
     assert result["nav"] == 117145.18
     assert result["aum_million"] == 24_377_900
+
+
+# --- classify_derivative (PLAN.md §4.5/§6 4.5-1) ---
+# 이름들은 2026-07-19 실제 stocks.is_etf=true 300개에서 그대로 가져온 표본이다.
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        # 레버리지 계열 — 배수 표기가 없어도 국내 관행상 전부 2X (+2).
+        ("KODEX 레버리지", 2),
+        ("TIGER 레버리지", 2),
+        ("KODEX 코스닥150레버리지", 2),
+        ("HANARO 200선물레버리지", 2),  # "선물"이 있어도 "레버리지"가 있으면 +2
+        ("KODEX SK하이닉스단일종목레버리지", 2),  # 단일종목 레버리지도 +2
+        # 인버스 1X
+        ("KODEX 인버스", -1),
+        ("TIGER 인버스", -1),
+        ("KODEX 미국달러선물인버스", -1),
+        ("KODEX 코스닥150선물인버스", -1),
+        ("RISE 2차전지TOP10인버스(합성)", -1),  # "합성"은 복제방식일 뿐 방향과 무관
+        # 인버스 2X
+        ("KODEX 200선물인버스2X", -2),
+        ("TIGER 200선물인버스2X", -2),
+        ("KODEX 미국달러선물인버스2X", -2),
+        ("PLUS 삼성전자선물단일종목인버스2X", -2),
+        # 비파생
+        ("KODEX 200", None),
+        ("TIGER 미국S&P500", None),
+        ("마이티 200TR", None),  # "TR"이 "2X"로 오검색되지 않는지 확인
+        ("RISE 삼성전자SK하이닉스채권혼합50", None),
+        # 애매 케이스: 코스피200 롱 + 코스닥150 숏 페어 전략 — 단일 지수 방향성 베팅이
+        # 아니라 시장중립 스프레드 상품이라 의도적으로 None (모듈독스트링 "애매 케이스" 참고)
+        ("KODEX 200롱코스닥150숏선물", None),
+    ],
+)
+def test_classify_derivative(name, expected):
+    assert naver_etf.classify_derivative(name) == expected
+
+
+def test_classify_derivative_handles_none_and_empty():
+    assert naver_etf.classify_derivative(None) is None
+    assert naver_etf.classify_derivative("") is None
+
+
+def test_classify_derivative_full_universe_counts():
+    """2026-07-19 실측 stocks.is_etf=true 300개 이름 전수에 대한 회귀 테스트 —
+    분류 규칙이 바뀌면 이 카운트가 깨져서 알려준다(오분류 눈검증 기준선 고정)."""
+    names = [
+        "1Q SK하이닉스선물단일종목레버리지",
+        "1Q 삼성전자선물단일종목레버리지",
+        "ACE SK하이닉스단일종목레버리지",
+        "ACE 레버리지",
+        "ACE 삼성전자단일종목레버리지",
+        "HANARO 200선물레버리지",
+        "KIWOOM 200선물레버리지",
+        "KIWOOM SK하이닉스선물단일종목레버리지",
+        "KIWOOM 삼성전자선물단일종목레버리지",
+        "KODEX 200선물인버스2X",
+        "KODEX 2차전지산업레버리지",
+        "KODEX KRX300레버리지",
+        "KODEX SK하이닉스단일종목레버리지",
+        "KODEX 레버리지",
+        "KODEX 미국달러선물레버리지",
+        "KODEX 미국달러선물인버스",
+        "KODEX 미국달러선물인버스2X",
+        "KODEX 반도체레버리지",
+        "KODEX 방산TOP10레버리지",
+        "KODEX 삼성전자단일종목레버리지",
+        "KODEX 인버스",
+        "KODEX 코스닥150레버리지",
+        "KODEX 코스닥150선물인버스",
+        "PLUS 200선물레버리지",
+        "PLUS 삼성전자단일종목레버리지",
+        "PLUS 삼성전자선물단일종목인버스2X",
+        "RISE 200선물레버리지",
+        "RISE 2차전지TOP10인버스(합성)",
+        "RISE SK하이닉스단일종목레버리지",
+        "RISE 삼성전자단일종목레버리지",
+        "RISE 코스닥150선물레버리지",
+        "SOL SK하이닉스단일종목레버리지",
+        "SOL SK하이닉스선물단일종목인버스2X",
+        "SOL 조선TOP3플러스레버리지",
+        "TIGER 200IT레버리지",
+        "TIGER 200선물레버리지",
+        "TIGER 200선물인버스2X",
+        "TIGER 200에너지화학레버리지",
+        "TIGER 2차전지TOP10레버리지",
+        "TIGER SK하이닉스단일종목레버리지",
+        "TIGER 레버리지",
+        "TIGER 반도체TOP10레버리지",
+        "TIGER 삼성전자단일종목레버리지",
+        "TIGER 인버스",
+        "TIGER 코스닥150 레버리지",
+        "TIGER 코스닥150선물인버스",
+    ]
+    results = [naver_etf.classify_derivative(n) for n in names]
+    assert len(results) == 46
+    assert sum(1 for m in results if m == 2) == 35
+    assert sum(1 for m in results if m == -1) == 6
+    assert sum(1 for m in results if m == -2) == 5
+    assert all(m is not None for m in results)
