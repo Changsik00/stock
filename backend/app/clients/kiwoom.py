@@ -40,38 +40,77 @@ HTTP라서 Mac/Linux에서도 동작한다. 이 모듈은 OAuth 접근토큰 발
      그대로 사용했다.
 
 `ka10059`의 URL을 공식 문서 TR 상세 페이지에서 조회하면 `/api/dostk/frgnistt`로
-표시되기도 했는데, 이는 위 "주의" 사항(SPA 재사용 의심)과 충돌한다. 실계좌/모의
-앱키가 없어 실호출로 확정할 수 없었으므로, 실제 통합 테스트 증거가 있는 (2)를
-채택하고 `TR_RESOURCE_URL`을 한 곳에 모아 쉽게 고칠 수 있게 했다. **키를 받으면
-`scripts/kiwoom_probe.py`로 가장 먼저 이 URL이 맞는지 확인할 것.**
+표시되기도 했는데, 이는 위 "주의" 사항(SPA 재사용 의심)과 충돌한다. **2026-07-19
+실전 키로 실호출해 `/api/dostk/stkinfo`가 맞다고 확정했다**(아래 "Phase 1.5-1
+probe 실측 확정" 참고) — `/api/dostk/frgnistt`는 오탐이었던 것으로 보인다.
 
-## Phase 1.5-1 probe 시도 결과 (2026-07-17, 실호출 미완료 — 크리덴셜 블로커)
+## Phase 1.5-1 probe 실측 확정 (2026-07-19, 실전 키로 실호출 완료)
 
-`.env`의 `KIWOOM_APP_KEY`/`KIWOOM_APP_SECRET`으로 `scripts/kiwoom_probe.py`를
-실행했으나 **토큰 발급(`POST /oauth2/token`) 단계에서 막혔다**:
+`.env`의 `KIWOOM_APP_KEY`/`KIWOOM_APP_SECRET`(2026-07-17 블로커였던 8001
+인증 실패가 재발급으로 해소됨)으로 실전 서버(`api.kiwoom.com`)에 실호출해
+아래를 전부 확정했다. 모의 서버(`mockapi.kiwoom.com`)는 이 키를 거부함
+(실전 전용 키 — 정상, PLAN.md 참고).
 
-- 실전(`api.kiwoom.com`) / 모의(`mockapi.kiwoom.com`) **양쪽 호스트 모두**
-  `return_code=3`, `return_msg="인증에 실패했습니다[8001:App Key와 Secret Key
-  검증에 실패했습니다]"`로 거부됨. 즉 이 앱키/시크릿 쌍으로는 실전·모의 어느
-  쪽도 인증되지 않는다 — 호스트 선택 문제가 아니라 키 자체(만료/미활성화/IP
-  미등록/포털 오기재 등) 문제로 보인다.
-- 클라이언트 코드 버그가 아님을 `curl`로 동일 요청을 직접 재현해 확인함(같은
-  return_code=3). `.env` 파일 자체의 공백·개행 오염 여부도 hexdump로 확인함 —
-  문제없음.
-- 결과: **TR URL 실호출 검증과 rate limit 실측은 이번 회차에서 수행하지 못함.**
-  아래 `TR_RESOURCE_URL`의 `ka10001`/`ka10059`/`ka20001`은 여전히 (2) GitHub
-  소스코드 정적 분석 근거이며 "실호출로 확정"이 아니다. `ka20001`은 같은
-  저장소의 `src/kiwoom_rest_api/domestic/sector.py`(`RESOURCE_URL =
-  "/api/dostk/sect"`, `industry_current_price` → `ka20001`)와
-  `tests/integration_api_smoke.py`의 `PARAMS["ka20001"] = {"mrkt_tp": "0",
-  "inds_cd": SECTOR}`(`SECTOR = "001"` 종합KOSPI 주석)를 근거로 추가했다 —
-  PLAN.md §3.5의 "`/api/dostk/sect` 유력" 추정과 일치.
-- **다음 작업자 TODO**: 키움 포털에서 앱키/시크릿 재발급 또는 IP 등록 상태
-  확인 후 `KIWOOM_APP_KEY`/`KIWOOM_APP_SECRET`을 갱신하고
-  `scripts/kiwoom_probe.py`를 재실행해 (1) TR URL, (2) `ka20001` 응답의
-  등락 종목수 필드 존재 여부, (3) rate limit을 실측할 것. 스크립트에는
-  `ka20001`을 종목코드 001/101로 호출해 원본 JSON을 덤프하는 단계(`step_d`)를
-  이미 추가해 뒀다.
+- **TR URL 3종 전부 실호출로 확정**(추정 아님):
+  - `ka10001`(종목기본정보) → `/api/dostk/stkinfo` — 200, `return_code=0`,
+    필드 47개. 005930 조회 성공(`stk_nm='삼성전자'`).
+  - `ka10059`(종목별투자자기관별) → `/api/dostk/stkinfo` — 200,
+    `return_code=0`. 응답이 `stk_invsr_orgn` 배열(일자별) 형태.
+  - `ka20001`(업종현재가) → `/api/dostk/sect` — 200, `return_code=0`,
+    필드 25개(+ `inds_cur_prc_tm` 분단위 배열). (2) GitHub 소스코드 근거가
+    전부 맞았다.
+- **`ka20001`에 등락 종목수 필드 존재 확정** — PLAN.md §3.5의 핵심 미확정
+  사항 해소. 필드명: `rising`(상승), `stdns`(보합), `fall`(하락),
+  `upl`(상한), `lst`(하한). 2026-07-18 장중 실측값이 네이버 breadth와
+  **정확히 일치**:
+  - KOSPI(`inds_cd="001"`): `rising=384, stdns=40, fall=488, upl=6` ↔
+    네이버 "코스피 384↑/40—/488↓/상한6" — 완전 일치.
+  - KOSDAQ(`inds_cd="101"`): `rising=501, stdns=56, fall=1182` ↔
+    네이버 "코스닥 501↑/56—/1182↓" — 완전 일치.
+  - 결론: `ka20001`을 breadth 소스로 채택 가능(네이버 파싱 대체 후보).
+    다만 현재 §1.5-3 구현은 네이버 임시 소스로 이미 동작 중이므로,
+    교체는 "정밀화" 우선순위 작업으로 남겨둔다(장중 프록시가 이미
+    네이버로 동작하고 있어 급하지 않음) — PLAN.md §3.6-2 참고.
+- **rate limit 실측**: 클라이언트 rate limiter를 끄고(사실상 무제한) 같은
+  TR(`ka10001`)을 백투백으로 연속 호출하면 **4번째까지 OK, 5번째부터 즉시
+  HTTP 429**(응답 시간 각 ~9ms, 사실상 지연 없이 순간 버스트). 이후
+  클라이언트 기본값(`rate_limit=1.0`, `rate_burst=2`)을 그대로 사용해 8회
+  연속 호출 시 **전부 OK, 429/rc=5 없음**(처음 2건 버스트 후 ~1초 간격).
+  결론: 기존 README 실측 기반 기본값(1 req/s, burst 2)이 실측 관찰(순간
+  버스트 한도 ~4)보다 보수적이라 안전 — **변경 불필요, 그대로 유지**.
+- 실측에 사용한 총 TR 호출 수는 약 20건(토큰 발급 제외) — 절제된 수준에서
+  중단.
+
+## ka10051(업종별투자자순매수) 추가 검증 (2026-07-19, 시장 전체 수급 후보)
+
+PLAN.md §1 "시장 전체(코스피/코스닥) 투자자별 순매수 일별 시계열 전용 TR 없음
+→ `ka10051` 우회 가능하나 비효율" 판단을 재검증하기 위해 `/api/dostk/sect`
+(ka20001과 동일 카테고리, GitHub 소스 `sector.py` 근거)로 실호출:
+
+- 요청 파라미터 확정: `{"mrkt_tp": "0|1"(코스피/코스닥), "amt_qty_tp": "0",
+  "base_dt": "YYYYMMDD", "stex_tp": "3"}`. **과거 일자 지정 가능** —
+  `base_dt=20260702`로 조회하면 당일(`20260718`)과 다른 실제 값이 돌아옴
+  (예: KOSPI `pred_pre` -46381 vs -65532) → 1일 1콜로 원하는 만큼 과거로
+  백필 가능(날짜 범위 조회는 안 되고 날짜당 1콜).
+- 응답은 `inds_netprps`(업종별 배열) — **첫 번째 행이 `inds_cd="001_AL"`
+  (KOSPI) / `"101_AL"`(KOSDAQ) `inds_nm="종합(KOSPI/KOSDAQ)"`인 시장 전체
+  합계 행**이라 개별 업종을 합산할 필요 없이 그 한 행만 쓰면 시장 전체
+  순매수로 바로 쓸 수 있음. 이 행의 `trde_qty`(424280)가 같은 날 ka20001의
+  `trde_qty`와 정확히 일치 — 같은 모집단임을 교차 확인.
+- 투자자 분류 컬럼 13종: `sc_netprps`, `insrnc_netprps`(보험),
+  `invtrt_netprps`(투신), `bank_netprps`(은행), `jnsinkm_netprps`(연기금 추정),
+  `endw_netprps`(기금 추정), `etc_corp_netprps`(기타법인), `ind_netprps`(개인),
+  `frgnr_netprps`(외국인), `native_trmt_frgnr_netprps`(내국인대우외국인),
+  `natn_netprps`(국가), `samo_fund_netprps`(사모펀드), `orgn_netprps`(기관계
+  합계) — pykrx의 13분류와 대등한 세밀도.
+- **결론(pykrx 대체 가능)**: `ka10051`은 시장 전체 투자자별 순매수를
+  (a) 파라미터로 과거 임의 일자 조회, (b) 종합 행 1개로 시장 전체 집계,
+  (c) 13분류 세부 투자자 구분까지 전부 충족한다. PLAN.md §1의 "비효율"
+  평가는 재검토 필요 — 날짜당 1콜이지만 rate limit(1 req/s) 기준 3년
+  백필(~750영업일)도 약 12분이면 끝나 KRX 로그인(`KRX_ID`/`PW`) 없이
+  pykrx를 대체할 유력 후보. `TR_RESOURCE_URL`에 등록해 둠. 실제 마이그레이션
+  여부(1-4 소스 교체)는 별도 의사결정 필요 — 이번 probe는 실호출 가능성만
+  확정.
 """
 
 from __future__ import annotations
@@ -96,13 +135,13 @@ MOCK_BASE_URL = "https://mockapi.kiwoom.com"
 
 TOKEN_ENDPOINT = "/oauth2/token"
 
-# TR(api-id) → 리소스 URL. 출처는 모듈 docstring 참고.
-# 주의(2026-07-17): 크리덴셜 블로커로 실호출 검증 못함 — 전부 (2) GitHub 소스코드
-# 정적 분석 근거. 확정 아님, probe 재실행 시 가장 먼저 검증할 것.
+# TR(api-id) → 리소스 URL. 2026-07-19 실전 키로 실호출 확정(모듈 docstring
+# "Phase 1.5-1 probe 실측 확정" 참고) — 전부 200 + return_code=0 확인됨.
 TR_RESOURCE_URL: dict[str, str] = {
     "ka10001": "/api/dostk/stkinfo",  # 종목기본정보요청
     "ka10059": "/api/dostk/stkinfo",  # 종목별투자자기관별요청
     "ka20001": "/api/dostk/sect",  # 업종현재가요청 (PLAN.md §3.5 breadth 선행 조건)
+    "ka10051": "/api/dostk/sect",  # 업종별투자자순매수요청 (PLAN.md §1 시장 전체 수급 후보, 2026-07-19 실호출 확정)
 }
 
 # README 실측치: TR별 지속 1 req/s(거부 0), 버스트 약 2건.
@@ -482,15 +521,59 @@ class KiwoomClient:
         """업종현재가요청 (ka20001) — PLAN.md §3.5 등락 종목수(breadth) 후보 TR.
 
         Args:
-            inds_cd: 업종코드. "001"=종합(KOSPI), "101"=종합(KOSDAQ) (GitHub
-                통합테스트 `SECTOR = "001"` 주석 근거, 2026-07-17 기준 실호출
-                미검증 — 모듈 docstring 참고).
+            inds_cd: 업종코드. "001"=종합(KOSPI), "101"=종합(KOSDAQ) —
+                2026-07-19 실호출로 확정(모듈 docstring 참고).
             mrkt_tp: 시장구분. 통합테스트 예시 기본값 "0".
 
         Returns:
-            `(응답 body, 응답 헤더)`. 응답 body에 상승/하락/보합/상한/하한
-            종목수 필드가 있는지는 아직 실호출로 확인되지 않았다 —
-            `scripts/kiwoom_probe.py`의 `step_d`로 확인할 것.
+            `(응답 body, 응답 헤더)`. 등락 종목수 필드는 `rising`(상승),
+            `stdns`(보합), `fall`(하락), `upl`(상한), `lst`(하한) —
+            2026-07-19 실호출로 확정, 네이버 breadth와 값 일치 확인됨
+            (모듈 docstring 참고).
         """
         body = {"mrkt_tp": mrkt_tp, "inds_cd": inds_cd}
         return await self.call_tr("ka20001", body, cont_yn=cont_yn, next_key=next_key)
+
+    async def sector_investor_net_buy(
+        self,
+        mrkt_tp: str,
+        base_dt: dt.date | str,
+        amt_qty_tp: str = "0",
+        stex_tp: str = "3",
+        cont_yn: str | None = None,
+        next_key: str | None = None,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        """업종별투자자순매수요청 (ka10051) — PLAN.md §1/§6 1-4 시장 전체 수급 소스.
+
+        pykrx(KRX 로그인 필요)를 대체하는 코스피/코스닥 시장 전체 투자자별 순매수
+        소스. 파라미터/응답 형태 및 "종합" 집계 행 위치·13개 투자자 분류 필드는
+        이 모듈 docstring의 "ka10051(업종별투자자순매수) 추가 검증" 절 참고 —
+        요약하면 `base_dt`로 과거 임의 일자를 1콜로 조회할 수 있고, 응답
+        `inds_netprps` 배열에서 `inds_cd`가 "001_AL"(코스피) 또는 "101_AL"
+        (코스닥)인 행이 시장 전체 합계다.
+
+        Args:
+            mrkt_tp: 시장구분. "0"=코스피, "1"=코스닥.
+            base_dt: 조회 기준일. `dt.date` 또는 이미 포맷된 "YYYYMMDD" 문자열
+                (`stock_investor_daily`의 `date` 처리와 동일한 관례).
+            amt_qty_tp: 금액수량구분 — "0"=금액(기본값, 이 프로젝트의 수집 경로가
+                쓰는 값). "1"=수량도 존재하는 것으로 보이나(탐색적 확인), 수집기는
+                호출 수 예산(날짜당 1콜) 때문에 금액만 사용하고 net_volume은 항상
+                None으로 둔다 — collectors/market_flow.py 참고.
+            stex_tp: 거래소구분. 기본값 "3"(검증된 값 그대로).
+
+        Returns:
+            `(응답 body, 응답 헤더)` — 응답 body의 `inds_netprps`가 업종별 배열.
+        """
+        if isinstance(base_dt, dt.date):
+            base_dt_str = base_dt.strftime("%Y%m%d")
+        else:
+            base_dt_str = base_dt
+
+        body = {
+            "mrkt_tp": mrkt_tp,
+            "amt_qty_tp": amt_qty_tp,
+            "base_dt": base_dt_str,
+            "stex_tp": stex_tp,
+        }
+        return await self.call_tr("ka10051", body, cont_yn=cont_yn, next_key=next_key)

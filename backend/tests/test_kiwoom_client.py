@@ -9,6 +9,7 @@ scripts/kiwoom_probe.py, per PLAN.md §6 Phase 2-1.
 from __future__ import annotations
 
 import datetime as dt
+import json
 
 import httpx
 import pytest
@@ -132,6 +133,76 @@ async def test_rate_limit_429_then_success(make_client, monkeypatch):
 
 async def _noop() -> None:
     return None
+
+
+def _sect_investor_response(request: httpx.Request) -> httpx.Response:
+    assert request.headers["api-id"] == "ka10051"
+    assert request.headers["authorization"] == "Bearer fake-access-token"
+    return httpx.Response(
+        200,
+        json={
+            "return_code": 0,
+            "return_msg": "",
+            "inds_netprps": [
+                {
+                    "inds_cd": "001_AL",
+                    "inds_nm": "종합(KOSPI)",
+                    "ind_netprps": "12345",
+                    "frgnr_netprps": "-6789",
+                }
+            ],
+        },
+        headers={"cont-yn": "N", "next-key": "", "api-id": "ka10051"},
+    )
+
+
+async def test_sector_investor_net_buy_request_shape(make_client):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return _token_response(request)
+        assert request.url.path == "/api/dostk/sect"
+        captured["body"] = json.loads(request.content)
+        return _sect_investor_response(request)
+
+    client = make_client(handler)
+    try:
+        data, headers = await client.sector_investor_net_buy(
+            mrkt_tp="0", base_dt=dt.date(2026, 7, 2)
+        )
+    finally:
+        await client.aclose()
+
+    assert captured["body"] == {
+        "mrkt_tp": "0",
+        "amt_qty_tp": "0",
+        "base_dt": "20260702",
+        "stex_tp": "3",
+    }
+    assert headers["api-id"] == "ka10051"
+    row = data["inds_netprps"][0]
+    assert row["inds_cd"] == "001_AL"
+    assert row["ind_netprps"] == "12345"
+
+
+async def test_sector_investor_net_buy_accepts_preformatted_date_string(make_client):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return _token_response(request)
+        captured["body"] = json.loads(request.content)
+        return _sect_investor_response(request)
+
+    client = make_client(handler)
+    try:
+        await client.sector_investor_net_buy(mrkt_tp="1", base_dt="20260702")
+    finally:
+        await client.aclose()
+
+    assert captured["body"]["base_dt"] == "20260702"
+    assert captured["body"]["mrkt_tp"] == "1"
 
 
 async def test_return_code_error_raises_kiwoom_api_error(make_client):
