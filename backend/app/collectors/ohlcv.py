@@ -1,4 +1,5 @@
-"""코스피/코스닥/코스피200선물 지수 일봉 수집 -> index_ohlcv upsert (PLAN.md §5.2/§5.4).
+"""코스피/코스닥/코스피200선물/코스피200(현물지수) 일봉 수집 -> index_ohlcv upsert
+(PLAN.md §5.2/§5.4/§4.5-3).
 
 KRX Open API(data-dbg.krx.co.kr)가 403(서비스 승인 미비, 2026-07 확인)이라 지수
 일봉 소스를 이 배치로 교체했다:
@@ -56,7 +57,10 @@ YFINANCE_TICKERS = {"kospi": "^KS11", "kosdaq": "^KQ11"}
 
 NAVER_REQUEST_DELAY_SECONDS = 0.5
 
-MARKETS = ("kospi", "kosdaq", "k200_futures")
+# kospi200(KPI200) = KOSPI200 현물지수(§4.5-3, 베이시스 계산의 분모). k200_futures와
+# 마찬가지로 yfinance 폴백 심볼이 없어(YFINANCE_TICKERS에 없음) 네이버 실패 시
+# ValueError로 전파된다(fetch_market_rows 참고) -- k200_futures와 동일한 취급.
+MARKETS = ("kospi", "kosdaq", "k200_futures", "kospi200")
 
 
 def _to_float(v) -> float | None:
@@ -100,10 +104,11 @@ def _fetch_yfinance(ticker: str, start: dt.date, end: dt.date) -> list[dict]:
 
 
 def fetch_market_rows(market: str, start: dt.date, end: dt.date) -> tuple[list[dict], str]:
-    """market(kospi/kosdaq/k200_futures)의 일봉을 [start, end]로 가져온다.
+    """market(kospi/kosdaq/k200_futures/kospi200)의 일봉을 [start, end]로 가져온다.
 
     네이버(clients/naver_index.py)가 1차 소스다. 실패/빈 응답이면 kospi/kosdaq만
-    yfinance로 폴백한다(k200_futures는 yfinance 심볼이 없어 폴백 불가 -> 예외 전파).
+    yfinance로 폴백한다(k200_futures/kospi200은 yfinance 심볼이 없어 폴백 불가 ->
+    예외 전파).
 
     Returns ``(rows, source)`` where source is ``"naver"`` or ``"yfinance-fallback"`` —
     호출측이 폴백 여부를 collect_log.message에 남기는 데 쓴다.
@@ -158,7 +163,7 @@ async def _upsert_rows(session: AsyncSession, market: str, rows: list[dict]) -> 
 
 
 async def collect_ohlcv(session: AsyncSession, target_date: dt.date) -> tuple[int, str | None]:
-    """kospi/kosdaq/k200_futures의 target_date 전후 일봉을 index_ohlcv에 upsert.
+    """kospi/kosdaq/k200_futures/kospi200의 target_date 전후 일봉을 index_ohlcv에 upsert.
 
     Returns ``(rows, message)`` — message는 이번 실행에서 yfinance로 폴백한 시장이
     있으면 그 목록을 담고, 전부 네이버로 성공했으면 None(collectors/base.py가

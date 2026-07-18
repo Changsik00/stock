@@ -1,8 +1,12 @@
-"""지수 일봉(코스피/코스닥/코스피200선물) 3년치 초기 적재 (PLAN.md §6, index_ohlcv).
+"""지수 일봉(코스피/코스닥/코스피200선물/코스피200 현물지수) 3년치 초기 적재
+(PLAN.md §6/§4.5-3, index_ohlcv).
 
-소스: collectors/ohlcv.py의 fetch_market_rows() 그대로 재사용한다 — kospi/kosdaq/
-k200_futures 모두 네이버(clients/naver_index.py) 1차, kospi/kosdaq만 실패 시
-yfinance(^KS11/^KQ11)로 폴백(k200_futures는 yfinance 심볼이 없어 폴백 없음).
+소스: collectors/ohlcv.py의 fetch_market_rows() 그대로 재사용한다(MARKETS도 그
+모듈에서 import) — kospi/kosdaq/k200_futures/kospi200 모두 네이버(clients/
+naver_index.py) 1차, kospi/kosdaq만 실패 시 yfinance(^KS11/^KQ11)로 폴백
+(k200_futures/kospi200은 yfinance 심볼이 없어 폴백 없음). kospi200은 2026-07-19
+§4.5-3 작업으로 MARKETS에 추가됐다 — 이 스크립트 코드 변경 없이 자동으로
+포함된다.
 2026-07-17: 코스닥 volume이 yfinance(^KQ11)에서 최근 2개월을 제외하곤 800~1,300
 수준의 쓰레기 값이었던 게 발견되어 1차 소스를 네이버로 뒤집었다 — 이 스크립트를
 재실행하면 upsert라 기존 kospi/kosdaq 행이 네이버 값으로 전량 덮어써진다(단위가

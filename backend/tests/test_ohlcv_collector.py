@@ -141,5 +141,8 @@ async def test_collect_ohlcv_message_notes_fallback(monkeypatch):
 
     total, message = await ohlcv.collect_ohlcv(session=None, target_date=END)
 
-    assert total == len(FAKE_NAVER_ROWS) * 2 + len(FAKE_YF_ROWS)
+    # kosdaq만 야후 폴백(FAKE_YF_ROWS), 나머지 MARKETS는 전부 네이버(FAKE_NAVER_ROWS) —
+    # MARKETS 길이에 하드코딩하지 않아 kospi200 추가(§4.5-3) 같은 향후 확장에도 안전하다.
+    naver_markets = len(ohlcv.MARKETS) - 1
+    assert total == len(FAKE_NAVER_ROWS) * naver_markets + len(FAKE_YF_ROWS)
     assert message == "폴백 사용: kosdaq=yfinance-fallback"

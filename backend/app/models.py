@@ -42,7 +42,8 @@ class Stock(Base):
 
 
 class IndexOhlcv(Base):
-    """지수 일봉 (market: kospi/kosdaq/k200_futures)."""
+    """지수 일봉 (market: kospi/kosdaq/k200_futures/kospi200 — kospi200은 KOSPI200
+    현물지수, PLAN.md §4.5-3 베이시스 계산용)."""
 
     __tablename__ = "index_ohlcv"
 
