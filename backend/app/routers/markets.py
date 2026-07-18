@@ -212,13 +212,19 @@ _flow_live_cache: dict[str, object] = {"ts": 0.0, "data": None}
 _flow_live_cache_lock = asyncio.Lock()
 
 KST = dt.timezone(dt.timedelta(hours=9))
-# 정규장 마감(15:30 KST) 이후 여부 — PLAN.md §6 3.7-3 지시대로 공휴일/주말 구분 없이
-# "단순히 KST 15:30 이후 여부"만 본다(추정 플래그, 정밀 개장일력 아님).
+# 정규장 여부 추정 플래그 (정밀 개장일력 아님 — 공휴일은 구분 못 함).
+# 주말이거나 정규장 시간(09:00~15:30 KST) 밖이면 closed. 원래는 "15:30 이후"만
+# 봤는데 일요일 새벽에도 open으로 판정돼 대시보드 기준일이 오늘 날짜로 부풀던
+# 왜곡이 있었다(2026-07-19 수정). 공휴일 오검은 남지만, 그 경우에도 프런트가
+# 잠정치 라벨을 붙일 뿐 데이터 자체는 마지막 거래일 값이라 치명적이지 않다.
+_MARKET_OPEN_TIME_KST = dt.time(9, 0)
 _MARKET_CLOSE_TIME_KST = dt.time(15, 30)
 
 
 def _market_closed_kst(now_kst: dt.datetime) -> bool:
-    return now_kst.time() >= _MARKET_CLOSE_TIME_KST
+    if now_kst.weekday() >= 5:  # 토(5)/일(6)
+        return True
+    return not (_MARKET_OPEN_TIME_KST <= now_kst.time() < _MARKET_CLOSE_TIME_KST)
 
 
 def _serialize_flow_investors(rows: list[dict]) -> dict[str, dict]:
