@@ -14,6 +14,7 @@ from ..collectors import breadth as _breadth_collector  # noqa: F401
 from ..collectors import etf_master as _etf_master_collector  # noqa: F401
 from ..collectors import flow_path as _flow_path_collector  # noqa: F401
 from ..collectors import flow_rank as _flow_rank_collector  # noqa: F401
+from ..collectors import futures_flow as _futures_flow_collector  # noqa: F401
 from ..collectors import group_snapshot as _group_snapshot_collector  # noqa: F401
 from ..collectors import macro as _macro_collector  # noqa: F401
 from ..collectors import market_flow as _market_flow_collector  # noqa: F401

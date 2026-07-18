@@ -9,6 +9,12 @@ for the KRX->DB migration note). The legacy `/api/series?market=` path is kept a
 an alias so the existing frontend keeps working until it's migrated — it returns
 only the `series` list (no flows) for backward compatibility.
 
+flows now also covers `market=futures`: market_flow stores K200 선물 투자자별
+순매수 as `market='k200_futures'` (개인/외국인/기관계, collectors/futures_flow.py,
+네이버 m.stock.naver.com 소스 — PLAN.md §4.5 4.5-2). `_build_flows` translates the
+"futures" path param to that storage key via `services.DB_MARKET` (same mapping
+`_build_prices`/index_ohlcv already uses).
+
 Also owns the market_breadth endpoints (PLAN.md §3.5/§4.6 3.6-2):
 - GET /api/markets/{market}/breadth — DB 일별 시계열(collectors/breadth.py가 적재).
 - GET /api/markets/breadth/live — 장중 온디맨드. clients/naver_breadth.py를
@@ -50,7 +56,7 @@ from ..clients.kiwoom import KiwoomClient
 from ..collectors.market_flow import fetch_live_flow
 from ..db import get_session
 from ..models import MarketBreadth, MarketFlow, Stock
-from ..services import get_market_series_from_db
+from ..services import DB_MARKET, get_market_series_from_db
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +64,11 @@ router = APIRouter(tags=["markets"])
 
 MARKETS = {"kospi", "kosdaq", "futures"}
 
-# market_flow는 코스피/코스닥만 적재된다 (선물 투자자별 수급은 PLAN.md §6 Phase 4 대상).
-FLOW_MARKETS = {"kospi", "kosdaq"}
+# market_flow는 코스피/코스닥(kiwoom ka10051) + 선물(네이버, PLAN.md §4.5 4.5-2,
+# collectors/futures_flow.py)까지 3개 다 적재된다. 라우터 경로 파라미터는
+# "futures"지만 market_flow에는 "k200_futures"로 저장돼 있으므로(models.py 컨벤션 —
+# index_ohlcv와 동일하게 DB_MARKET으로 변환), 아래 _build_flows에서 매핑한다.
+FLOW_MARKETS = {"kospi", "kosdaq", "futures"}
 
 # market_breadth도 코스피/코스닥만 있다 (선물은 개별 종목 등락 개념이 없음).
 BREADTH_MARKETS = {"kospi", "kosdaq"}
@@ -88,10 +97,11 @@ async def _build_flows(market: str, days: int, session: AsyncSession) -> dict[st
     if market not in FLOW_MARKETS:
         return {}
 
+    db_market = DB_MARKET.get(market, market)
     since = dt.date.today() - dt.timedelta(days=days)
     stmt = (
         select(MarketFlow)
-        .where(MarketFlow.market == market, MarketFlow.date >= since)
+        .where(MarketFlow.market == db_market, MarketFlow.date >= since)
         .order_by(MarketFlow.investor, MarketFlow.date)
     )
     rows = (await session.execute(stmt)).scalars().all()
