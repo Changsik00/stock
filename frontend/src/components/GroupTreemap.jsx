@@ -8,19 +8,60 @@ import { ResponsiveContainer, Tooltip, Treemap } from 'recharts'
 //
 // value(거래대금, 백만원)는 collectors/group_snapshot.py가 그룹 상세 페이지
 // (sise_group_detail.naver) 구성 종목 거래대금을 합산해 채운다 — 개별 박스 크기는
-// 이 값을 그대로 쓴다(사용자 피드백: "박스 영역이 너무 비슷하다, 원래 비중대로
-// 차이가 있어야 한다"). market_sum(시가총액)은 목록/상세 페이지 어디에도 컬럼이
-// 없어 여전히 항상 null이다(naver_group.py 모듈 docstring 참고) — sizeBy를
-// 'market_sum'으로 쓰면 폴백 동작만 남는다.
+// 이 값을 SIZE_EXPONENT로 압축해 쓴다(아래 **멱 스케일 압축** 참고, 사용자 피드백
+// "박스 영역이 너무 비슷하다, 원래 비중대로 차이가 있어야 한다"에서 시작했지만
+// 실측 후 그대로 쓰면 대형 그룹이 소형 그룹을 픽셀 단위로 지워버려 압축이 필요했다).
+// market_sum(시가총액)은 목록/상세 페이지 어디에도 컬럼이 없어 여전히 항상
+// null이다(naver_group.py 모듈 docstring 참고) — sizeBy를 'market_sum'으로 쓰면
+// 폴백 동작만 남는다.
 //
 // **부분/전체 결측 폴백**: 상세 페이지 조회가 그룹별로 실패할 수 있어(네트워크
 // 오류 등) value가 일부만 null일 수 있다 — 그 그룹만 1로 폴백해 최소 크기로 그린다
 // (다른 그룹은 정상적으로 실제 값 크기를 쓴다). 수집 자체가 실패해 그날 데이터가
 // 전부 null이면(hasRealSize=false) 전체가 동일 크기로 폴백하고 상단에 안내 문구를
 // 보여준다 — 데이터가 비어 있어도 색(등락률)만으로 트리맵이 의미를 갖게 하기 위함.
+//
+// **멱 스케일 압축**: 반도체(20조원)류와 소형 그룹(0.1조원)류를 그대로 넣으면
+// 200:1 면적비가 나와 소형 그룹이 픽셀 단위로 사라진다(사용자 실측). size =
+// value^SIZE_EXPONENT로 압축해 큰 박스 우위는 유지하되 격차를 줄인다. 0.5/0.55/0.65
+// 세 값을 실데이터(테마 266개·업종 79개, 캡션 접기 이후 트리맵에 남는 20개/20개
+// 박스 기준)로 렌더 비교한 결과(스크린샷 3장, exp-0{50,55,65}-{theme,upjong}-v2.png):
+//   - 0.55는 예상과 반대로 가장 나빴다 — 테마 화면의 "기타 상승" 상위 10개 중
+//     3개(통신/정유/2026 하반기 신규상장)가 라벨은 물론 이름조차 안 보이는 얇은
+//     조각으로 밀렸다(squarify 알고리즘이 크기가 제각각인 좁은 조각들을 나쁘게
+//     쪼갠 결과 — 최소 면적 하한에 걸린 박스 수가 0.5/0.65보다 적어(9/20) 균일한
+//     격자로 안정되지 못했다).
+//   - 0.65는 하한(MIN_AREA_RATIO)에 걸리는 박스가 더 많아져(20개 중 12개) 오히려
+//     균일한 격자로 안정적으로 배치되지만, 그 중 3개는 이름만 보이고 등락률 줄은
+//     높이가 모자라 안 보인다.
+//   - 0.5는 테마·업종 두 화면 모두에서 렌더된 20개 박스 전원이 그룹명+등락률을
+//     빠짐없이 보여준 유일한 값이었다(하한 적용 5/20, 업종은 4/20 — 가장 적음).
+//     큰 박스 우위도 여전히 뚜렷하다(테마: 하락 쪽이 전체 폭의 ~85% 차지). 사용자
+//     스펙의 "우위 유지 + 라벨이 읽히는" 두 조건을 동시에 만족하는 값이라 0.5를
+//     채택한다.
+// value가 NULL/0 이하면 1로 폴백하는데, 1^SIZE_EXPONENT === 1이라 폴백 최소 크기는
+// 그대로 유지된다.
+const SIZE_EXPONENT = 0.5
+
 function sizeValueOf(item, sizeBy) {
   const raw = item?.[sizeBy]
-  return typeof raw === 'number' && raw > 0 ? raw : 1
+  const base = typeof raw === 'number' && raw > 0 ? raw : 1
+  return base ** SIZE_EXPONENT
+}
+
+// **최소 면적 하한**: 멱 스케일을 거쳐도 소외 그룹은 여전히 상위 박스 대비
+// 1~2%대로 눌릴 수 있다 — 렌더 대상 박스 전체 sizeValue 합의 MIN_AREA_RATIO
+// 미만이면 그 값(=합 x 비율)으로 올려서 라벨이 최소한 자리를 잡을 여지를 준다.
+// 단일 패스 계산이다 — 올린 뒤 재정규화하지 않는다(합이 소폭 늘어나 다른 박스가
+// 상대적으로 살짝 작아 보일 수 있지만, 그 정도 오차보다 "픽셀로 사라지는 박스가
+// 없어야 한다"는 요구가 우선한다).
+const MIN_AREA_RATIO = 0.012
+
+function applyMinAreaFloor(boxes) {
+  const total = boxes.reduce((sum, b) => sum + b.sizeValue, 0)
+  if (total <= 0) return boxes
+  const floor = total * MIN_AREA_RATIO
+  return boxes.map((b) => (b.sizeValue < floor ? { ...b, sizeValue: floor } : b))
 }
 
 // 색 스케일: 등락률(%)을 -3%~+3%로 클램프한 뒤, 0%=중립(--surface, 라이트/다크 각각
@@ -33,36 +74,16 @@ function sizeValueOf(item, sizeBy) {
 const CLAMP_PERCENT = 3
 
 // 접기(fold) 규칙 (사용자 피드백: 테마 266개를 전부 그리면 강약이 안 보인다).
-//   - |등락률| < NEUTRAL_THRESHOLD_PERCENT% → "보합권" 한 박스로 합친다.
-//   - 나머지 중 상승/하락 각각 상위 TOP_N개만 개별 박스로 그리고, 그 밖은
-//     "기타 상승"/"기타 하락" 집계 박스 하나씩으로 합친다.
+//   - |등락률| < NEUTRAL_THRESHOLD_PERCENT% → "보합권"으로 묶는다.
+//   - 나머지 중 상승/하락 각각 상위 TOP_N개만 트리맵에 개별 박스로 그린다.
+// 보합권/기타 상승/기타 하락은 더 이상 트리맵 박스로 그리지 않는다(사용자 피드백:
+// 집계 박스가 화면을 과하게 차지해 정작 봐야 할 상위 그룹들이 묻힌다) — 대신 맵
+// 아래 한 줄 캡션으로 강등한다(GroupCaption 참고). 트리맵에는 개별 통과분(최대
+// TOP_N*2개)만 그려지므로 상위 그룹의 면적/라벨이 항상 화면을 지배한다.
 // 업종(79개)·테마(266개) 모두 이 컴포넌트 하나를 공유하므로 여기서 접으면 두 화면에
 // 자동으로 적용된다(항목 수가 적은 업종은 자연히 접히는 항목이 적거나 없다).
 const NEUTRAL_THRESHOLD_PERCENT = 1
 const TOP_N = 10
-
-// 집계 박스 크기 결정 — 두 갈래(hasRealSize 여부에 따라 buildAggregateBox가 고른다):
-//
-// 1) 값 데이터가 없는 날(균등 폴백, 개별 박스가 전부 1): 크기 = sqrt(묶인 개수),
-//    최대 AGGREGATE_SIZE_CAP으로 제한한다. 개별 박스가 1이므로 "10개 묶임"은 개별
-//    박스의 ~3배, "100개 묶임"은 ~10배로 화면을 지배하지 않으면서도 "많이 묶였다"는
-//    크기 차이가 보인다(선형 스케일이면 항목이 많은 테마에서 집계 박스가 화면
-//    절반을 잡아먹는다).
-// 2) 실제 거래대금이 있는 날: 크기 = min(묶인 그룹들의 value 합, 그 화면에서 개별로
-//    그려진 박스 중 가장 큰 값 x AGGREGATE_SIZE_CAP_RATIO). 실측(2026-07-18) 확인
-//    결과 "기타 하락"류 집계는 상위 10개 하락 박스 합보다 실제 거래대금 합이
-//    2~3배 더 크다(테마: top10 하락 합 109.5조 vs 나머지 151개 합 291.7조) — sqrt로
-//    감쇠하면(마그니튜드 차가 너무 커서) 반대로 픽셀 단위로 사라져 버리므로, 대신
-//    "개별 최상위 박스보다 커지지 않게" 상한을 씌운다(사용자 피드백 "개별 상위
-//    박스가 주인공이어야 한다"). 상한에 걸리지 않으면(집계 합이 작으면) 실제 합
-//    그대로 쓰여 "이 묶음이 상대적으로 얼마나 큰가"가 여전히 보인다.
-const AGGREGATE_SIZE_CAP = 8
-const AGGREGATE_SIZE_CAP_RATIO = 0.5
-
-// 집계 박스는 색 보간 강도를 낮춰(원래 등락률의 60%로 계산) 개별 박스보다 살짝
-// 채도를 낮춘다 — 라벨에 "기타"/count가 이미 명시되지만, 색만 봐도 "이건 평균이지
-// 실제 개별 종목 등락률이 아니다"를 구분할 수 있게 하기 위함.
-const AGGREGATE_COLOR_DAMPEN = 0.6
 
 export function changeRateMixStrength(changeRate) {
   if (typeof changeRate !== 'number' || Number.isNaN(changeRate)) return 0
@@ -76,11 +97,6 @@ export function colorForChangeRate(changeRate) {
   if (pct === 0) return 'var(--surface)'
   const base = typeof changeRate === 'number' && changeRate < 0 ? '--down' : '--up'
   return `color-mix(in srgb, var(${base}) ${pct}%, var(--surface))`
-}
-
-export function colorForAggregate(changeRate) {
-  if (typeof changeRate !== 'number' || Number.isNaN(changeRate)) return 'var(--surface)'
-  return colorForChangeRate(changeRate * AGGREGATE_COLOR_DAMPEN)
 }
 
 // 보간 강도가 높을수록(진한 빨강/파랑) 흰 글자가 잘 읽히고, 낮을수록(연한 배경, 거의
@@ -119,24 +135,24 @@ function bigValueLabel(million) {
 const MIN_LABEL_WIDTH = 46
 const MIN_LABEL_HEIGHT = 26
 const MIN_RATE_LABEL_HEIGHT = 40
-// 세 번째 줄(거래대금)은 박스가 한층 더 커야 겹치지 않는다 — 개별 박스에만
-// 붙인다(집계 박스는 이미 boxLabel에 "N개 · 평균 x.x%"가 들어가 자리가 없다).
+// 세 번째 줄(거래대금)은 박스가 한층 더 커야 겹치지 않는다.
 const MIN_VALUE_LABEL_WIDTH = 70
 const MIN_VALUE_LABEL_HEIGHT = 56
 
 function TreemapCell(props) {
-  const { x, y, width, height, name, change_rate: changeRate, value, isAggregate, boxLabel } = props
+  // tradeValue(원본 거래대금)를 쓴다 — recharts Treemap이 내부적으로 크기 계산에
+  // 쓴 값을 항상 `value`라는 필드명으로 노드에 덮어써서(node_modules/recharts
+  // Treemap.js의 NODE_VALUE_KEY='value') content로 넘어오는 props.value는 우리
+  // 데이터의 원본 거래대금이 아니라 sizeValue(압축된 크기)로 뒤바뀐다. 원본
+  // API 필드명이 우연히 둘 다 'value'라 충돌하므로, GroupTreemap 하단에서 미리
+  // tradeValue로 별칭을 만들어 이 충돌을 피한다.
+  const { x, y, width, height, name, change_rate: changeRate, tradeValue } = props
   if (width <= 0 || height <= 0) return null
 
   const showName = width >= MIN_LABEL_WIDTH && height >= MIN_LABEL_HEIGHT
   const showSubLabel = showName && height >= MIN_RATE_LABEL_HEIGHT
-  const showValueLabel =
-    !isAggregate && showSubLabel && width >= MIN_VALUE_LABEL_WIDTH && height >= MIN_VALUE_LABEL_HEIGHT
-  // 집계 박스는 채도를 낮춘 색(colorForAggregate)을 쓰므로, 흰 글자 판단 기준도
-  // 그 낮춘 강도로 맞춰야 배경-글자 대비가 실제 렌더 색과 어긋나지 않는다.
-  const textColor = isAggregate
-    ? labelColorFor(changeRate * AGGREGATE_COLOR_DAMPEN)
-    : labelColorFor(changeRate)
+  const showValueLabel = showSubLabel && width >= MIN_VALUE_LABEL_WIDTH && height >= MIN_VALUE_LABEL_HEIGHT
+  const textColor = labelColorFor(changeRate)
 
   return (
     <g>
@@ -146,10 +162,9 @@ function TreemapCell(props) {
         width={width}
         height={height}
         style={{
-          fill: isAggregate ? colorForAggregate(changeRate) : colorForChangeRate(changeRate),
+          fill: colorForChangeRate(changeRate),
           stroke: 'var(--page)',
           strokeWidth: 1.5,
-          strokeDasharray: isAggregate ? '4 2' : undefined,
         }}
       />
       {showName && (
@@ -170,7 +185,7 @@ function TreemapCell(props) {
           fontWeight={600}
           style={{ fill: textColor, pointerEvents: 'none' }}
         >
-          {isAggregate ? boxLabel : rateLabel(changeRate)}
+          {rateLabel(changeRate)}
         </text>
       )}
       {showValueLabel && (
@@ -180,7 +195,7 @@ function TreemapCell(props) {
           fontSize={11}
           style={{ fill: textColor, pointerEvents: 'none', opacity: 0.85 }}
         >
-          {bigValueLabel(value)}
+          {bigValueLabel(tradeValue)}
         </text>
       )}
     </g>
@@ -190,25 +205,6 @@ function TreemapCell(props) {
 function GroupTooltip({ active, payload }) {
   if (!active || !payload?.length) return null
   const node = payload[0].payload
-
-  if (node.isAggregate) {
-    return (
-      <div className="tooltip">
-        <div className="tooltip-date">{node.name}</div>
-        <div className="tooltip-row">
-          <span>{node.fullLabel}</span>
-        </div>
-        {node.topMembers.map((member) => (
-          <div className="tooltip-row" key={member.name}>
-            <span>{member.name}</span>
-            <strong className={member.change_rate > 0 ? 'up' : member.change_rate < 0 ? 'down' : ''}>
-              {rateLabel(member.change_rate)}
-            </strong>
-          </div>
-        ))}
-      </div>
-    )
-  }
 
   return (
     <div className="tooltip">
@@ -221,7 +217,7 @@ function GroupTooltip({ active, payload }) {
       </div>
       <div className="tooltip-row">
         <span>거래대금</span>
-        <strong>{bigValueLabel(node.value) ?? '-'}</strong>
+        <strong>{bigValueLabel(node.tradeValue) ?? '-'}</strong>
       </div>
       <div className="tooltip-row">
         <span>시가총액</span>
@@ -264,16 +260,11 @@ function isFiniteRate(rate) {
   return typeof rate === 'number' && !Number.isNaN(rate)
 }
 
-// 집계 박스 하나를 만든다: 평균 등락률(색상용), 크기(묶인 그룹들의 실제 값 합에
-// 상한을 씌운 값, 또는 값이 없을 때 개수 기반 폴백), 툴팁에 보여줄 |등락률| 상위
-// 5개 멤버, 박스 안/툴팁에 쓸 라벨 문자열을 계산한다.
-//
-// sizeBy/hasRealSize/topIndividualMax는 상한 계산에만 쓴다 — 실제 값이 있으면
-// (hasRealSize) 묶인 그룹들의 value 합을 그대로 쓰되, 그 화면에서 개별로 그려진
-// 박스 중 가장 큰 값의 AGGREGATE_SIZE_CAP_RATIO배를 넘지 않게 자른다(모듈 상단
-// AGGREGATE_SIZE_CAP_RATIO 주석 — "개별 상위 박스가 주인공" 원칙). 값이 없으면
-// (전부 폴백=1) 기존 sqrt(개수) 방식을 그대로 쓴다.
-function buildAggregateBox({ name, members, isNeutral, sizeBy, hasRealSize, topIndividualMax }) {
+// 캡션 그룹 하나를 만든다(보합권/기타 상승/기타 하락 — 더 이상 트리맵 박스가
+// 아니라 GroupCaption의 한 항목이다): 개수, 평균 등락률(색 점 판정용), 캡션 요약
+// 문구, hover 시 보여줄 |등락률| 상위 5개 멤버 타이틀 문자열을 계산한다. 상위 5개
+// 로직은 기존 집계 박스 툴팁(topMembers)과 동일하게 재사용한다.
+function buildCaptionGroup({ name, members, isNeutral, colorKind }) {
   const count = members.length
   const rates = members.map((m) => m.change_rate).filter(isFiniteRate)
   const avgRate = rates.length > 0 ? rates.reduce((sum, r) => sum + r, 0) / rates.length : 0
@@ -282,33 +273,17 @@ function buildAggregateBox({ name, members, isNeutral, sizeBy, hasRealSize, topI
     .slice(0, 5)
     .map((m) => ({ name: m.name, change_rate: m.change_rate }))
 
-  // fullLabel: 사용자 스펙 문구 그대로("±1% 미만 · N개" / "기타 상승 · N개 · 평균 +x.x%") —
-  // 툴팁 제목 줄에 쓴다. boxLabel: 박스 안 두 번째 줄용으로, 첫 줄(name)에 이미 나온
-  // "보합권"/"기타 상승" 이름을 반복하지 않도록 줄인 버전이다.
-  const fullLabel = isNeutral
-    ? `±${NEUTRAL_THRESHOLD_PERCENT}% 미만 · ${count}개`
-    : `${name} · ${count}개 · 평균 ${rateLabel(avgRate)}`
-  const boxLabel = isNeutral ? fullLabel : `${count}개 · 평균 ${rateLabel(avgRate)}`
+  const summary = isNeutral ? `${name} ${count}개` : `${name} ${count}개 (평균 ${rateLabel(avgRate)})`
+  const hoverTitle = topMembers.map((m) => `${m.name} ${rateLabel(m.change_rate)}`).join('\n')
 
-  const memberValueSum = members.reduce((sum, m) => sum + sizeValueOf(m, sizeBy), 0)
-  const sizeValue = hasRealSize
-    ? Math.min(memberValueSum, topIndividualMax * AGGREGATE_SIZE_CAP_RATIO)
-    : Math.min(Math.sqrt(count), AGGREGATE_SIZE_CAP)
-
-  return {
-    name,
-    change_rate: isNeutral ? 0 : avgRate,
-    sizeValue,
-    isAggregate: true,
-    boxLabel,
-    fullLabel,
-    topMembers,
-  }
+  return { name, count, colorKind, summary, hoverTitle }
 }
 
-// 접기 본체: |등락률| < NEUTRAL_THRESHOLD_PERCENT는 보합권으로, 나머지는 상승/하락
-// 상위 TOP_N개만 개별로 남기고 그 밖은 기타 상승/기타 하락 집계 박스로 합친다.
-function foldItems(data, { sizeBy, hasRealSize }) {
+// 접기 본체: |등락률| < NEUTRAL_THRESHOLD_PERCENT는 보합권으로 캡션에 묶고, 나머지는
+// 상승/하락 상위 TOP_N개만 트리맵 박스로 남기고 그 밖은 기타 상승/기타 하락 캡션
+// 그룹으로 묶는다. 트리맵에 그릴 박스(boxes)와 캡션에 보여줄 그룹(captionGroups)을
+// 분리해서 반환한다.
+function foldItems(data) {
   const neutral = []
   const nonNeutral = []
   for (const item of data) {
@@ -322,34 +297,65 @@ function foldItems(data, { sizeBy, hasRealSize }) {
   const up = nonNeutral.filter((d) => d.change_rate > 0).sort((a, b) => b.change_rate - a.change_rate)
   const down = nonNeutral.filter((d) => d.change_rate < 0).sort((a, b) => a.change_rate - b.change_rate)
 
-  const boxes = [...up.slice(0, TOP_N), ...down.slice(0, TOP_N)]
-  // 집계 박스 상한의 기준값 — 이 화면에 개별로 그려질 박스들(top-N up/down) 중
-  // 가장 큰 sizeValue. 값이 없는 폴백 모드에서는 전부 1이라 자연히 1이 된다.
-  const topIndividualMax = boxes.reduce((max, b) => Math.max(max, b.sizeValue), 1)
+  const boxes = applyMinAreaFloor([...up.slice(0, TOP_N), ...down.slice(0, TOP_N)])
 
+  const captionGroups = []
   if (neutral.length > 0) {
-    boxes.push(
-      buildAggregateBox({ name: '보합권', members: neutral, isNeutral: true, sizeBy, hasRealSize, topIndividualMax })
-    )
+    captionGroups.push(buildCaptionGroup({ name: '보합권', members: neutral, isNeutral: true, colorKind: 'neutral' }))
   }
   const upRest = up.slice(TOP_N)
   if (upRest.length > 0) {
-    boxes.push(
-      buildAggregateBox({ name: '기타 상승', members: upRest, isNeutral: false, sizeBy, hasRealSize, topIndividualMax })
-    )
+    captionGroups.push(buildCaptionGroup({ name: '기타 상승', members: upRest, isNeutral: false, colorKind: 'up' }))
   }
   const downRest = down.slice(TOP_N)
   if (downRest.length > 0) {
-    boxes.push(
-      buildAggregateBox({ name: '기타 하락', members: downRest, isNeutral: false, sizeBy, hasRealSize, topIndividualMax })
-    )
+    captionGroups.push(buildCaptionGroup({ name: '기타 하락', members: downRest, isNeutral: false, colorKind: 'down' }))
   }
-  return boxes
+  return { boxes, captionGroups }
+}
+
+const CAPTION_DOT_COLOR = {
+  neutral: 'var(--text-muted)',
+  up: 'var(--up)',
+  down: 'var(--down)',
+}
+
+// 맵 바로 아래 한 줄 캡션 — 보합권/기타 상승/기타 하락을 색 점 + "이름 N개 (평균
+// x.x%)" 요약으로 보여준다. hover(title 속성)하면 그 그룹에서 |등락률| 상위 5개
+// 그룹명+등락률이 줄바꿈으로 뜬다(네이티브 title, 별도 팝오버 구현 불필요).
+function GroupCaption({ groups }) {
+  if (!groups || groups.length === 0) return null
+  return (
+    <div
+      className="group-treemap-caption"
+      style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginTop: 8, fontSize: 12, color: 'var(--text-secondary)' }}
+    >
+      {groups.map((group, idx) => (
+        <span key={group.name} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          {idx > 0 && <span aria-hidden="true" style={{ color: 'var(--text-muted)' }}>·</span>}
+          <span
+            title={group.hoverTitle || undefined}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: group.hoverTitle ? 'help' : 'default' }}
+          >
+            <span
+              aria-hidden="true"
+              style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: CAPTION_DOT_COLOR[group.colorKind] }}
+            />
+            {group.summary}
+          </span>
+        </span>
+      ))}
+    </div>
+  )
 }
 
 export default function GroupTreemap({ items, sizeBy = 'value' }) {
+  // tradeValue: 원본 거래대금을 recharts Treemap의 'value' 필드 덮어쓰기(위 TreemapCell
+  // 주석 참고)로부터 지키기 위한 별칭이다 — content/Tooltip 어느 쪽도 props.value를
+  // 원본 거래대금으로 신뢰할 수 없으므로 여기서 한 번만 복제해 둔다.
   const rawData = (items || []).map((item) => ({
     ...item,
+    tradeValue: item.value,
     sizeValue: sizeValueOf(item, sizeBy),
   }))
 
@@ -359,7 +365,7 @@ export default function GroupTreemap({ items, sizeBy = 'value' }) {
     return <div className="state">표시할 데이터가 없습니다.</div>
   }
 
-  const data = foldItems(rawData, { sizeBy, hasRealSize })
+  const { boxes, captionGroups } = foldItems(rawData)
 
   return (
     <div className="group-treemap">
@@ -371,7 +377,7 @@ export default function GroupTreemap({ items, sizeBy = 'value' }) {
       )}
       <ResponsiveContainer width="100%" height={420}>
         <Treemap
-          data={data}
+          data={boxes}
           dataKey="sizeValue"
           nameKey="name"
           nodeGap={2}
@@ -382,6 +388,7 @@ export default function GroupTreemap({ items, sizeBy = 'value' }) {
           <Tooltip content={<GroupTooltip />} />
         </Treemap>
       </ResponsiveContainer>
+      <GroupCaption groups={captionGroups} />
     </div>
   )
 }
