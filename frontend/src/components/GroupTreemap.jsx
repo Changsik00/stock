@@ -215,14 +215,20 @@ function GroupTooltip({ active, payload }) {
           {rateLabel(node.change_rate)}
         </strong>
       </div>
-      <div className="tooltip-row">
-        <span>거래대금</span>
-        <strong>{bigValueLabel(node.tradeValue) ?? '-'}</strong>
-      </div>
-      <div className="tooltip-row">
-        <span>시가총액</span>
-        <strong>{bigValueLabel(node.market_sum) ?? '-'}</strong>
-      </div>
+      {node.tradeValue > 0 && (
+        <div className="tooltip-row">
+          <span>거래대금</span>
+          <strong>{bigValueLabel(node.tradeValue)}</strong>
+        </div>
+      )}
+      {/* 시가총액(market_sum)은 네이버 소스가 그룹 단위로 제공하지 않아 항상 null —
+          값이 생기기 전까지는 행 자체를 그리지 않는다 (0원 노출 금지). */}
+      {node.market_sum > 0 && (
+        <div className="tooltip-row">
+          <span>시가총액</span>
+          <strong>{bigValueLabel(node.market_sum)}</strong>
+        </div>
+      )}
     </div>
   )
 }

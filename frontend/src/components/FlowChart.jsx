@@ -11,11 +11,12 @@ function dateLabel(iso) {
   return `${digits.slice(4, 6)}/${digits.slice(6, 8)}`
 }
 
-// net_value는 market_flow에 pykrx 원본 단위(원)로 적재되어 있다 — 기존 MarketChart의
-// 거래대금 표시 관례(값/1e8 = 억원)를 그대로 따른다.
+// net_value는 market_flow에 백만 원 단위로 적재되어 있다 (§5.2 공통 단위 —
+// 2026-07-19 키움 ka10051 소스 전환 시 통일. 구 pykrx 시절의 원 단위 가정으로
+// 1e8로 나누면 전부 0억원이 되는 버그가 있었다). 백만 원 ÷ 100 = 억 원.
 function eok(v) {
   if (v === null || v === undefined) return '-'
-  return `${numFmt.format(Math.round(v / 1e8))}억원`
+  return `${numFmt.format(Math.round(v / 100))}억원`
 }
 
 function barTooltip({ active, payload, label }) {
