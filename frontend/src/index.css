@@ -675,6 +675,29 @@ header h1 {
   margin-top: 14px;
 }
 
+/* 검색바 + 대표 기준일(baseDate) 한 줄 배치 — 사용자 피드백: "타일마다 날짜가 있는데
+   중복이다" 대응으로 대시보드 상단에 대표 기준일을 1번만 보여준다(DashboardPage.jsx
+   baseDate 계산 참고). 검색창은 그대로 100% 폭을 쓰되 flex:1로 옆자리를 내준다. */
+.dashboard-header-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.dashboard-header-row .dashboard-search,
+.dashboard-header-row .stock-search {
+  flex: 1;
+  margin-bottom: 0;
+}
+
+.dashboard-base-date {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 .dashboard-search {
   width: 100%;
   font-family: inherit;
@@ -763,6 +786,28 @@ header h1 {
 
 .kpi-tile-sub.down {
   color: var(--down);
+}
+
+/* 등락 종목수 타일("902↑ 1,671↓") — 값 안에 직접 up/down 스팬을 중첩해 쓰므로
+   위 .kpi-tile-value.up/.down(타일 값 span 자체에만 적용)과는 별개로 자손 선택자가
+   필요하다. 한국 증시 관례: 상승=빨강(--up), 하락=파랑(--down), 보합=중립. */
+.kpi-tile-value .up {
+  color: var(--up);
+}
+
+.kpi-tile-value .down {
+  color: var(--down);
+}
+
+.kpi-tile-value .flat {
+  color: var(--text-muted);
+}
+
+/* baseDate보다 뒤처진 타일에만 붙는 작은 회색 날짜(MM-DD) — StaleDate/staleHintLabel
+   (DashboardPage.jsx) 공용. 별도 여백은 두지 않고 호출부의 prefix(" · ")로 구분한다. */
+.stale-date {
+  font-size: 10px;
+  color: var(--text-muted);
 }
 
 .top5-grid {

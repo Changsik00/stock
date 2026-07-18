@@ -103,6 +103,47 @@ function rateLabel(rate) {
   return `${sign}${rate.toFixed(2)}%`
 }
 
+// MM-DD만 뽑는다 (StaleDate/TOP5 "…기준" 라벨 공용) — formatDate가 이미
+// 'YYYY-MM-DD'로 정규화하므로 뒤 5글자만 자르면 된다.
+function mmdd(date) {
+  const d = formatDate(date)
+  return typeof d === 'string' && d.length === 10 ? d.slice(5) : d
+}
+
+// 여러 후보 날짜 중 최신값 — 대표 기준일(대시보드 상단 1회 표시) 계산용.
+// 소스마다 'YYYYMMDD'/'YYYY-MM-DD'가 섞여 올 수 있어 formatDate로 정규화한 뒤
+// 문자열 비교한다(정규화된 'YYYY-MM-DD'는 사전순 비교 = 날짜순 비교).
+function latestOf(...rawDates) {
+  const normalized = rawDates.map((d) => formatDate(d)).filter((d) => typeof d === 'string' && d.length === 10)
+  if (normalized.length === 0) return null
+  return normalized.reduce((a, b) => (b > a ? b : a))
+}
+
+// 대표 기준일(baseDate)보다 뒤처진 타일에만 붙는 작은 회색 날짜(MM-DD) — "뒤처짐" 신호.
+// 사용자 피드백: "타일마다 날짜가 있는데 중복이다. 어차피 마지막 거래일일 텐데" —
+// 실제로는 소스별 시차가 있어 다를 수 있으므로, 최신인 타일은 아무것도 표시하지
+// 않고(대표 기준일과 같다고 간주) 뒤처진 타일에만 예외적으로 이 배지를 남긴다.
+// 정확한 날짜는 항상 타일의 title 속성(hover)으로 확인 가능하다.
+function StaleDate({ date, baseDate, prefix = '' }) {
+  const d = formatDate(date)
+  if (typeof d !== 'string' || d.length !== 10 || !baseDate || d >= baseDate) return null
+  return (
+    <span className="stale-date" title={d}>
+      {prefix}
+      {mmdd(date)}
+    </span>
+  )
+}
+
+// TOP5 카드 "…기준" 라벨 — 대표 기준일과 같으면 생략(중복), 다르면 MM-DD만 붙인다.
+// suffix가 있으면(예: ETF 경유 상위의 "유입") 날짜가 없을 때도 suffix만 별도로
+// 붙일 수 있도록 호출부에서 처리한다(이 함수는 "뒤처졌을 때"만 문자열을 낸다).
+function staleHintLabel(date, baseDate, suffix) {
+  const d = formatDate(date)
+  if (typeof d !== 'string' || d.length !== 10 || !baseDate || d >= baseDate) return null
+  return suffix ? `${mmdd(date)} 기준 · ${suffix}` : `${mmdd(date)} 기준`
+}
+
 // 전일比 화살표 — prev가 없으면(첫 값) 표시하지 않는다.
 function DiffArrow({ current, prev, formatter }) {
   if (current === null || current === undefined || prev === null || prev === undefined) return null
@@ -520,9 +561,9 @@ function FlowPathFullModal() {
 // TOP5 요약 행 — 표(FlowRankTable 등)를 그대로 축소하지 않고, "종목명·핵심 숫자·배지"
 // 만 남긴 가벼운 목록을 별도로 그린다(사용자 요구: "100개짜리 리스트도 뒤로").
 // ---------------------------------------------------------------------------
-function Top5Card({ title, hint, rows, onMore, renderRow, emptyText = '표시할 데이터가 없습니다.' }) {
+function Top5Card({ title, hint, rows, onMore, renderRow, emptyText = '표시할 데이터가 없습니다.', hoverDate }) {
   return (
-    <div className="top5-card">
+    <div className="top5-card" title={hoverDate}>
       <div className="top5-card-header">
         <span className="top5-card-title">{title}</span>
         <button type="button" className="top5-more" onClick={onMore}>
@@ -731,6 +772,12 @@ export default function DashboardPage() {
 
   const closeModal = () => setModal(null)
 
+  // 지수 타일 + baseDate 계산이 공유하는 헬퍼 — marketData[key].prices의 마지막 값.
+  const latestPriceOf = (key) => {
+    const data = marketData[key]
+    return data?.prices?.length ? data.prices[data.prices.length - 1] : null
+  }
+
   // 등락 종목수 압축 칩 — 코스피+코스닥 합계 (BreadthBadge.splitTotals와 동일 규칙:
   // 상승 = adv+limitUp, 하락 = dec+limitDown).
   const breadthTotals = (() => {
@@ -801,27 +848,54 @@ export default function DashboardPage() {
     return out
   })()
 
+  // 대표 기준일(대시보드 상단 1회 표시) — 소스별로 수집 시차가 있어(지수/수급/ETF 등)
+  // 항상 같은 날짜라는 보장이 없으므로, 각 타일 데이터 날짜들 중 최신값 하나만 뽑는다.
+  // 사용자 피드백: "타일마다 날짜가 있는데 중복이다. 어차피 마지막 거래일일 텐데" —
+  // 실제로는 다를 수 있어 예외 표시(StaleDate/staleHintLabel)로 보완한다.
+  const investorDates = DEFAULT_INVESTORS.map((name) => flowInvestorSummary?.[name]?.date).filter(Boolean)
+  const baseDate = latestOf(
+    ...MARKETS.map((m) => latestPriceOf(m.key)?.date),
+    etfComponent?.date,
+    ...investorDates,
+    flowLive?.kospi?.date,
+    flowLive?.kosdaq?.date,
+    valueRankTop?.date,
+    flowPathTop?.date,
+    flowRankTop?.date
+  )
+
   return (
     <div className="dashboard-page">
-      {/* 종목 검색 (PLAN.md §6 3.7-2) — 온디맨드 API(/api/stocks/search)라 정적
-          스냅샷 대상이 아니다. 정적 배포(STATIC_DATA=1)에서는 검색을 서빙할 수 없으므로
-          같은 자리에 비활성 입력만 남겨 레이아웃이 흔들리지 않게 한다. */}
-      {STATIC_DATA ? (
-        <input
-          type="text"
-          className="dashboard-search"
-          placeholder="종목 검색 — 준비 중"
-          disabled
-          title="정적 배포에선 종목 검색 미지원"
-          aria-label="종목 검색 (정적 배포 미지원)"
-        />
-      ) : (
-        <StockSearch
-          onSelect={(stock) =>
-            setModal({ type: 'stock', title: `${stock.name} · 종목 상세`, code: stock.code, stock })
-          }
-        />
-      )}
+      <div className="dashboard-header-row">
+        {/* 종목 검색 (PLAN.md §6 3.7-2) — 온디맨드 API(/api/stocks/search)라 정적
+            스냅샷 대상이 아니다. 정적 배포(STATIC_DATA=1)에서는 검색을 서빙할 수 없으므로
+            같은 자리에 비활성 입력만 남겨 레이아웃이 흔들리지 않게 한다. */}
+        {STATIC_DATA ? (
+          <input
+            type="text"
+            className="dashboard-search"
+            placeholder="종목 검색 — 준비 중"
+            disabled
+            title="정적 배포에선 종목 검색 미지원"
+            aria-label="종목 검색 (정적 배포 미지원)"
+          />
+        ) : (
+          <StockSearch
+            onSelect={(stock) =>
+              setModal({ type: 'stock', title: `${stock.name} · 종목 상세`, code: stock.code, stock })
+            }
+          />
+        )}
+        {/* 대표 기준일 — 타일별 개별 날짜 대신 여기 한 번만 노출한다(위 baseDate 계산 참고). */}
+        {baseDate && (
+          <span
+            className="dashboard-base-date"
+            title={`대표 기준일 — 각 타일 데이터 날짜 중 최신값 (${baseDate})`}
+          >
+            기준일 {formatDate(baseDate)}
+          </span>
+        )}
+      </div>
 
       {/* 1. 지수 3종 */}
       <div className="section-title" style={{ marginTop: 16 }}>
@@ -829,8 +903,7 @@ export default function DashboardPage() {
       </div>
       <div className="kpi-grid">
         {MARKETS.map((m) => {
-          const data = marketData[m.key]
-          const latest = data?.prices?.length ? data.prices[data.prices.length - 1] : null
+          const latest = latestPriceOf(m.key)
           return (
             <KpiTile
               key={m.key}
@@ -840,17 +913,62 @@ export default function DashboardPage() {
               sub={
                 latest && (
                   <span className={`kpi-tile-sub ${rateClass(latest.changeRate)}`}>
-                    {rateLabel(latest.changeRate)} · {formatDate(latest.date)}
+                    {rateLabel(latest.changeRate)}
+                    <StaleDate date={latest.date} baseDate={baseDate} prefix=" · " />
                   </span>
                 )
               }
+              title={latest?.date ? formatDate(latest.date) : undefined}
               onClick={() => setModal({ type: 'candle', market: m.key, title: `${m.label} · 캔들차트` })}
             />
           )
         })}
       </div>
 
-      {/* 2. 시황 · 자금 */}
+      {/* 2. 투자자별 수급 요약 — 장중에는 라이브 잠정치(PLAN.md §6 3.7-3) + "장중 잠정"
+          배지, 그 외(장마감 후·라이브 실패·정적 배포)에는 기존 확정치 + "확정" 라벨로
+          자동 전환된다(flowLiveActive, 위 계산부 참고). 라이브 배지가 날짜 역할을
+          겸하므로 라이브 타일에는 StaleDate를 붙이지 않는다(작업 지시). */}
+      <div className="section-title">투자자별 수급 요약</div>
+      <div className="kpi-grid">
+        {DEFAULT_INVESTORS.map((name) => {
+          const liveValue = flowLiveSummary?.[name]
+          const isLive = liveValue !== undefined
+          const row = flowInvestorSummary?.[name]
+          const value = isLive ? liveValue : row?.net_value
+          const hasValue = value !== undefined && value !== null
+          return (
+            <KpiTile
+              key={name}
+              label={
+                <>
+                  <span className="dot" style={{ background: INVESTOR_COLOR_VAR[name] }} /> {name}
+                </>
+              }
+              value={hasValue ? eokLabel(value) : marketLoading ? '…' : '-'}
+              valueClass={hasValue ? (value >= 0 ? 'up' : 'down') : ''}
+              sub={
+                isLive ? (
+                  <span className="kpi-tile-sub">
+                    <Badge kind="live" />
+                  </span>
+                ) : (
+                  row?.date && (
+                    <span className="kpi-tile-sub">
+                      확정
+                      <StaleDate date={row.date} baseDate={baseDate} prefix=" · " />
+                    </span>
+                  )
+                )
+              }
+              title={!isLive && row?.date ? formatDate(row.date) : undefined}
+              onClick={() => setModal({ type: 'flowSummary', title: '투자자별 수급 (코스피+코스닥)' })}
+            />
+          )
+        })}
+      </div>
+
+      {/* 3. 시황 · 자금 */}
       <div className="section-title">시황 · 자금</div>
       <div className="kpi-grid">
         <KpiTile
@@ -910,12 +1028,13 @@ export default function DashboardPage() {
           label="ETF 순유입 합계"
           value={etfComponent ? eokLabel(etfComponent.net_inflow_sum) : '…'}
           valueClass={etfComponent && etfComponent.net_inflow_sum < 0 ? 'down' : 'up'}
-          sub={etfComponent?.date && <span className="kpi-tile-sub">{formatDate(etfComponent.date)} 기준</span>}
+          sub={<StaleDate date={etfComponent?.date} baseDate={baseDate} />}
+          title={etfComponent?.date ? formatDate(etfComponent.date) : undefined}
           onClick={() => setModal({ type: 'sentiment', title: '시장 매수세/매도세 게이지' })}
         />
       </div>
 
-      {/* 3. 컴팩트 트리맵 */}
+      {/* 4. 컴팩트 트리맵 */}
       <div className="section-title">업종 · 테마 강약</div>
       <div className="toggle-row">
         {GROUP_TYPE_OPTIONS.map((opt) => (
@@ -934,12 +1053,20 @@ export default function DashboardPage() {
       {groupError && <div className="state error">{groupError}</div>}
       {!groupLoading && !groupError && <GroupTreemap items={groupItems} sizeBy="value" height={200} />}
 
-      {/* 4. TOP5 요약 3열 */}
+      {/* 5. TOP5 요약 3열 — "…기준" 라벨은 대표 기준일(baseDate)과 같으면 생략, 다르면
+          MM-DD만 붙인다(staleHintLabel, 대시보드 상단 표시와 동일 규칙). 정확한 날짜는
+          카드 title(hover)로 확인 가능. */}
       <div className="section-title">TOP5 요약</div>
       <div className="top5-grid">
         <Top5Card
           title="수급 상위"
-          hint="외국인 순매수"
+          hint={
+            <>
+              외국인 순매수
+              <StaleDate date={flowRankTop?.date} baseDate={baseDate} prefix=" · " />
+            </>
+          }
+          hoverDate={flowRankTop?.date ? formatDate(flowRankTop.date) : undefined}
           rows={flowRankTop?.rows}
           onMore={() => setModal({ type: 'flowRank', title: '수급 상위 — 전체' })}
           renderRow={(row) => (
@@ -957,7 +1084,8 @@ export default function DashboardPage() {
         />
         <Top5Card
           title="거래대금 상위"
-          hint={valueRankTop?.date ? `${formatDate(valueRankTop.date)} 기준` : undefined}
+          hint={valueRankTop?.date ? staleHintLabel(valueRankTop.date, baseDate) : undefined}
+          hoverDate={valueRankTop?.date ? formatDate(valueRankTop.date) : undefined}
           rows={valueRankTop?.rows}
           onMore={() => setModal({ type: 'valueRank', title: '거래대금 상위 — 전체' })}
           renderRow={(row) => (
@@ -975,7 +1103,8 @@ export default function DashboardPage() {
         />
         <Top5Card
           title="ETF 경유 상위"
-          hint={flowPathTop?.date ? `${formatDate(flowPathTop.date)} 기준 · 유입` : undefined}
+          hint={flowPathTop?.date ? staleHintLabel(flowPathTop.date, baseDate, '유입') || '유입' : undefined}
+          hoverDate={flowPathTop?.date ? formatDate(flowPathTop.date) : undefined}
           rows={flowPathTop?.rows}
           onMore={() => setModal({ type: 'flowPath', title: 'ETF 경유 수급 상위 — 전체' })}
           renderRow={(row, i) => (
@@ -989,42 +1118,6 @@ export default function DashboardPage() {
             </div>
           )}
         />
-      </div>
-
-      {/* 5. 투자자별 수급 요약 — 장중에는 라이브 잠정치(PLAN.md §6 3.7-3) + "장중 잠정"
-          배지, 그 외(장마감 후·라이브 실패·정적 배포)에는 기존 확정치 + "확정(날짜)"
-          라벨로 자동 전환된다(flowLiveActive, 위 계산부 참고). */}
-      <div className="section-title">투자자별 수급 요약</div>
-      <div className="kpi-grid">
-        {DEFAULT_INVESTORS.map((name) => {
-          const liveValue = flowLiveSummary?.[name]
-          const isLive = liveValue !== undefined
-          const row = flowInvestorSummary?.[name]
-          const value = isLive ? liveValue : row?.net_value
-          const hasValue = value !== undefined && value !== null
-          return (
-            <KpiTile
-              key={name}
-              label={
-                <>
-                  <span className="dot" style={{ background: INVESTOR_COLOR_VAR[name] }} /> {name}
-                </>
-              }
-              value={hasValue ? eokLabel(value) : marketLoading ? '…' : '-'}
-              valueClass={hasValue ? (value >= 0 ? 'up' : 'down') : ''}
-              sub={
-                isLive ? (
-                  <span className="kpi-tile-sub">
-                    <Badge kind="live" />
-                  </span>
-                ) : (
-                  row?.date && <span className="kpi-tile-sub">확정 · {formatDate(row.date)}</span>
-                )
-              }
-              onClick={() => setModal({ type: 'flowSummary', title: '투자자별 수급 (코스피+코스닥)' })}
-            />
-          )
-        })}
       </div>
 
       <Modal open={Boolean(modal)} onClose={closeModal} title={modal?.title}>
