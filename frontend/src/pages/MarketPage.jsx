@@ -356,7 +356,11 @@ export default function MarketPage() {
         </div>
       )}
 
-      {(breadth || breadthError) && (
+      {/* 등락 종목수 — 탭에 반응한다: 코스피/코스닥 탭이면 해당 시장 한 줄만, 선물 탭이면
+          섹션 자체를 숨긴다(선물엔 등락 종목수 개념이 없음). BreadthBadge의 market prop이
+          그 필터링을 맡는다 — 대시보드 모달처럼 market을 안 넘기면 기존과 동일하게
+          코스피+코스닥 두 줄이 모두 나온다. */}
+      {flowCapableMarket && (breadth || breadthError) && (
         <div className="breadth-panel">
           {breadth && (
             <>
@@ -367,22 +371,13 @@ export default function MarketPage() {
                 kospi={breadth.kospi}
                 kosdaq={breadth.kosdaq}
                 date={breadth.live ? null : breadth.date}
+                market={market}
               />
             </>
           )}
           {breadthError && <div className="toggle-hint">{breadthError}</div>}
         </div>
       )}
-
-      <div className="breadth-panel">
-        <SentimentGauge
-          loading={sentimentLoading}
-          error={sentimentError}
-          score={sentiment?.score ?? null}
-          approx={sentiment?.approx ?? true}
-          components={sentiment?.components ?? null}
-        />
-      </div>
 
       {loading && <div className="state">불러오는 중…</div>}
       {error && <div className="state error">{error}</div>}
@@ -406,6 +401,25 @@ export default function MarketPage() {
           )}
         </>
       )}
+
+      {/* B. 시장 전체 구역 — 코스피/코스닥/선물 탭 선택과 무관하게 항상 코스피+코스닥
+          통합치를 보여준다(위 A 구역과 달리 market state에 연동하지 않음). 사용자 피드백:
+          "등락 종목수·매수세/매도세 게이지가 탭을 눌러도 안 바뀐다. 탭에 반응하는 것끼리,
+          아닌 것끼리 따로 둬야 한다" — 그래서 탭 무관 지표는 이 구분 헤더 아래로 모은다. */}
+      <div className="section-title">
+        시장 전체 지표{' '}
+        <span className="toggle-hint">(코스피+코스닥 통합 — 위 시장 탭 선택과 무관)</span>
+      </div>
+
+      <div className="breadth-panel">
+        <SentimentGauge
+          loading={sentimentLoading}
+          error={sentimentError}
+          score={sentiment?.score ?? null}
+          approx={sentiment?.approx ?? true}
+          components={sentiment?.components ?? null}
+        />
+      </div>
 
       <div className="section-title">업종·테마 강약</div>
       <div className="toggle-row">

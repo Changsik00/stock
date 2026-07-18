@@ -22,6 +22,10 @@ import { formatDate } from '../format'
 // kospi/kosdaq 각각은 값이 없으면(아직 못 불러왔거나 그 시장만 실패) 생략 가능 — 그
 // 시장 행은 건너뛴다. 값이 전혀 없으면(둘 다 undefined) "데이터 없음" 상태를 보여준다.
 //
+// market prop(선택) — 탭에 반응하는 화면(MarketPage)에서 현재 선택된 시장 한 줄만
+// 보여주고 싶을 때 'kospi' | 'kosdaq'를 넘긴다. 생략(undefined)하면 기존과 동일하게
+// 코스피+코스닥 두 줄을 모두 보여준다(대시보드 모달 등 기존 호출부는 수정 없이 호환).
+//
 // 색상 규칙(§5.4 한국 증시 관행): 상승 = 빨강(--up), 하락 = 파랑(--down), 보합은
 // 중립(--text-muted). index.css를 건드리지 않고도 전역 테마(라이트/다크)를 그대로
 // 타도록 이미 :root에 정의된 CSS 커스텀 프로퍼티(--up/--down/--text-*/--border)를
@@ -93,8 +97,10 @@ function BreadthRow({ market, row }) {
   )
 }
 
-export default function BreadthBadge({ kospi, kosdaq, date }) {
-  const hasAny = Boolean(kospi) || Boolean(kosdaq)
+export default function BreadthBadge({ kospi, kosdaq, date, market }) {
+  const showKospi = market == null || market === 'kospi'
+  const showKosdaq = market == null || market === 'kosdaq'
+  const hasAny = (showKospi && Boolean(kospi)) || (showKosdaq && Boolean(kosdaq))
 
   return (
     <div className="breadth-badge">
@@ -159,8 +165,8 @@ export default function BreadthBadge({ kospi, kosdaq, date }) {
 
       {!hasAny && <div className="breadth-badge-empty">등락 종목수 데이터가 없습니다.</div>}
 
-      <BreadthRow market="kospi" row={kospi} />
-      <BreadthRow market="kosdaq" row={kosdaq} />
+      {showKospi && <BreadthRow market="kospi" row={kospi} />}
+      {showKosdaq && <BreadthRow market="kosdaq" row={kosdaq} />}
     </div>
   )
 }
