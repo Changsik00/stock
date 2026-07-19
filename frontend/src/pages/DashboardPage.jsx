@@ -89,6 +89,13 @@ const VALUE_RANK_MARKET_OPTIONS = [
   { key: 'kosdaq', label: '코스닥' },
 ]
 const FLOW_RANK_LOOKBACK_DAYS = 7
+// 등락 종목수(breadth/live) 자동 갱신 주기 — 백엔드 60초 캐시(routers/markets.py
+// GET /api/markets/breadth/live)와 맞춘다. flow/live·attention과 동일한 값이지만
+// 소스가 달라 독립 폴링을 쓴다. 2026-07-20까지는 이 값을 쓰는 두 useEffect
+// (DashboardPage 본문 + BreadthModal) 모두 최초 1회만 fetch하고 재폴링이 없어서
+// 아무도 요청하지 않으면 화면이 멈춰 있는 버그가 있었다 — 서버 측 능동 60초 갱신
+// 작업(PLAN.md)과 함께 수정.
+const BREADTH_LIVE_POLL_MS = 60_000
 // 장중 잠정 수급(PLAN.md §6 3.7-3) 자동 갱신 주기 — 백엔드 60초 캐시(routers/markets.py
 // GET /api/markets/flow/live)와 맞춘다. 그보다 짧게 폴링해도 캐시 히트라 낭비만 커진다.
 const FLOW_LIVE_POLL_MS = 60_000
@@ -402,8 +409,14 @@ function BreadthModal() {
     }
 
     load()
+    // 모달이 열려 있는 동안에도 백엔드 60초 캐시와 맞춰 계속 갱신한다 — 이전에는
+    // 최초 1회만 fetch하고 끝나서 모달을 오래 띄워둬도 값이 갱신되지 않았다
+    // (DashboardPage 본문의 동일 패턴 useEffect와 같은 수정, PLAN.md 서버 측 능동
+    // 60초 갱신 작업 참고).
+    const intervalId = setInterval(load, BREADTH_LIVE_POLL_MS)
     return () => {
       cancelled = true
+      clearInterval(intervalId)
     }
   }, [])
 
@@ -983,8 +996,14 @@ export default function DashboardPage() {
       }
     }
     load()
+    // flow/live·attention 폴링(아래 두 useEffect)과 동일한 60초 간격 — 이전에는 최초
+    // 1회만 fetch하고 setInterval이 없어서 breadthTotals 배지(상단 등락 종목수)가
+    // 페이지를 오래 열어둬도 갱신되지 않는 버그가 있었다(PLAN.md 서버 측 능동 60초
+    // 갱신 작업에서 발견/수정).
+    const intervalId = setInterval(load, BREADTH_LIVE_POLL_MS)
     return () => {
       cancelled = true
+      clearInterval(intervalId)
     }
   }, [])
 
