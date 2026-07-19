@@ -14,15 +14,33 @@ logging.basicConfig(level=logging.INFO)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ENABLE_SCHEDULER=1일 때만 배치 스케줄러를 기동한다 (기본 꺼짐, PLAN.md §5.1/§6).
-    if os.environ.get("ENABLE_SCHEDULER") == "1":
-        from .collectors.scheduler import shutdown_scheduler, start_scheduler
+    # ENABLE_SCHEDULER=1 -> 평일 18:00 Asia/Seoul 일별 배치(collectors/scheduler.py).
+    # ENABLE_LIVE_REFRESH=1 -> 장중 60초 간격 라이브 캐시 선제 워밍
+    # (collectors/live_refresh.py, routers/markets.py의 breadth/live·flow/live·
+    # attention 캐시). 서로 독립적인 토글이라 하나만 켜거나 둘 다 켤 수 있다 —
+    # 둘 다 켜도 무해하다(서로 다른 캐시/테이블을 건드림). 둘 다 기본 꺼짐(PLAN.md §5.1).
+    scheduler_enabled = os.environ.get("ENABLE_SCHEDULER") == "1"
+    live_refresh_enabled = os.environ.get("ENABLE_LIVE_REFRESH") == "1"
+
+    if scheduler_enabled:
+        from .collectors.scheduler import start_scheduler
 
         start_scheduler()
-        yield
+    if live_refresh_enabled:
+        from .collectors.live_refresh import start_live_refresh_scheduler
+
+        start_live_refresh_scheduler()
+
+    yield
+
+    if scheduler_enabled:
+        from .collectors.scheduler import shutdown_scheduler
+
         shutdown_scheduler()
-    else:
-        yield
+    if live_refresh_enabled:
+        from .collectors.live_refresh import shutdown_live_refresh_scheduler
+
+        shutdown_live_refresh_scheduler()
 
 
 app = FastAPI(title="수급 분석 대시보드 API", lifespan=lifespan)

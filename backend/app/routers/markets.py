@@ -38,6 +38,13 @@ breadth/live·flow/live와 같은 60초 메모리 캐시 패턴으로 감싼다.
 `stk_cd` 기준으로 조인해서 채운다(순위·종목명·등락율은 TR 응답을 그대로
 신뢰). breadth/live와 같은 이유로 **DB에는 절대 쓰지 않는다** — 실시간
 성격이라 DB 저장 없음(§3.5 원칙과 동일).
+
+2026-07-20 서버 측 능동 60초 갱신(PLAN.md): 위 3개 캐시는 원래 "요청이 들어와야
+갱신"하는 수동적 캐시였다. 각각의 캐시 채우기 로직을 `_warm_breadth_live()`,
+`_warm_flow_live(session)`, `_warm_attention(session)`으로 분리해, 이 라우터의
+핸들러(HTTP 요청)뿐 아니라 `collectors/live_refresh.py`의 60초 인터벌 잡(장중에만
+선제적으로 호출)도 같은 함수를 재사용한다 — 캐시/TTL/락은 그대로 모듈 전역이라
+두 호출 경로가 안전하게 캐시를 공유한다.
 """
 
 from __future__ import annotations
@@ -55,6 +62,7 @@ from ..clients import naver_breadth
 from ..clients.kiwoom import KiwoomClient
 from ..collectors.market_flow import fetch_live_flow
 from ..db import get_session
+from ..market_hours import KST, is_market_closed as _market_closed_kst
 from ..models import MarketBreadth, MarketFlow, Stock
 from ..services import DB_MARKET, get_market_series_from_db
 
@@ -186,16 +194,11 @@ def _fetch_breadth_blocking(market: str) -> dict:
     return naver_breadth.fetch_breadth(market)
 
 
-@router.get("/api/markets/breadth/live")
-async def market_breadth_live():
-    """장중 온디맨드 등락 종목수 — 코스피/코스닥을 소스(네이버)에서 직접 조회하고
-    60초 메모리 캐시로 감싼다. **market_breadth 테이블에는 절대 쓰지 않는다**
-    (§3.5 "장중 값은 DB에 쌓지 않는다" 원칙 — 캐시는 프로세스 메모리에만 존재).
-
-    Returns ``{"kospi": {...} | None, "kosdaq": {...} | None, "cached_at": iso8601}``.
-    한 시장 조회가 실패하면 그 시장만 None, 다른 시장은 정상 반환(소스 일시 장애가
-    전체를 막지 않도록) — 둘 다 실패하면 502.
-    """
+async def _warm_breadth_live() -> dict:
+    """breadth/live 캐시를 채우고 payload를 반환한다 — 라우트 핸들러(HTTP 요청)와
+    collectors/live_refresh.py의 60초 인터벌 잡이 공유한다(모듈 docstring
+    "서버 측 능동 60초 갱신" 절 참고). TTL 체크·락·502 판정 등 동작은 원래
+    라우트 핸들러 본문 그대로다 — 순수 리팩토링(2026-07-20)."""
     now = time.monotonic()
     async with _live_cache_lock:
         cached = _live_cache["data"]
@@ -223,26 +226,26 @@ async def market_breadth_live():
         return payload
 
 
+@router.get("/api/markets/breadth/live")
+async def market_breadth_live():
+    """장중 온디맨드 등락 종목수 — 코스피/코스닥을 소스(네이버)에서 직접 조회하고
+    60초 메모리 캐시로 감싼다. **market_breadth 테이블에는 절대 쓰지 않는다**
+    (§3.5 "장중 값은 DB에 쌓지 않는다" 원칙 — 캐시는 프로세스 메모리에만 존재).
+    실제 캐시 채우기는 `_warm_breadth_live()`가 담당한다(live_refresh 스케줄러와
+    공유).
+
+    Returns ``{"kospi": {...} | None, "kosdaq": {...} | None, "cached_at": iso8601}``.
+    한 시장 조회가 실패하면 그 시장만 None, 다른 시장은 정상 반환(소스 일시 장애가
+    전체를 막지 않도록) — 둘 다 실패하면 502.
+    """
+    return await _warm_breadth_live()
+
+
 # GET /api/markets/flow/live 60초 메모리 캐시 — breadth/live와 동일한 이유
 # (프로세스 재기동 시 초기화되는 단순 캐시로 충분, 동시 요청은 asyncio.Lock으로 감쌈).
 _FLOW_LIVE_CACHE_TTL_SECONDS = 60
 _flow_live_cache: dict[str, object] = {"ts": 0.0, "data": None}
 _flow_live_cache_lock = asyncio.Lock()
-
-KST = dt.timezone(dt.timedelta(hours=9))
-# 정규장 여부 추정 플래그 (정밀 개장일력 아님 — 공휴일은 구분 못 함).
-# 주말이거나 정규장 시간(09:00~15:30 KST) 밖이면 closed. 원래는 "15:30 이후"만
-# 봤는데 일요일 새벽에도 open으로 판정돼 대시보드 기준일이 오늘 날짜로 부풀던
-# 왜곡이 있었다(2026-07-19 수정). 공휴일 오검은 남지만, 그 경우에도 프런트가
-# 잠정치 라벨을 붙일 뿐 데이터 자체는 마지막 거래일 값이라 치명적이지 않다.
-_MARKET_OPEN_TIME_KST = dt.time(9, 0)
-_MARKET_CLOSE_TIME_KST = dt.time(15, 30)
-
-
-def _market_closed_kst(now_kst: dt.datetime) -> bool:
-    if now_kst.weekday() >= 5:  # 토(5)/일(6)
-        return True
-    return not (_MARKET_OPEN_TIME_KST <= now_kst.time() < _MARKET_CLOSE_TIME_KST)
 
 
 def _serialize_flow_investors(rows: list[dict]) -> dict[str, dict]:
@@ -280,20 +283,13 @@ async def _fetch_flow_confirmed_for_market(session: AsyncSession, market: str) -
     return {"date": latest_date.isoformat(), "investors": investors, "provisional": False, "source": "market_flow_db"}
 
 
-@router.get("/api/markets/flow/live")
-async def market_flow_live(session: AsyncSession = Depends(get_session)):
-    """장중 잠정 투자자별 순매수 — PLAN.md §6 Phase 3.7-3.
-
-    코스피/코스닥 각각 ka10051(base_dt=오늘)을 온디맨드로 호출해 60초 메모리
-    캐시로 감싼다(모듈 docstring 참고 — ka10063 대신 이 TR을 쓰는 이유). 시장별로
-    독립 처리해 한쪽이 실패해도 다른 쪽은 정상 반환하고, 라이브 호출이 실패한
-    시장은 market_flow DB의 최신 확정치로 폴백한다(``provisional: false``).
-    두 시장 다 라이브·폴백 전부 실패하면 502.
-
-    Returns ``{"kospi": {...}|None, "kosdaq": {...}|None, "market_closed": bool,
-    "cached_at": iso8601}`` — 각 시장 값은 ``{"date", "investors":
-    {투자자명: {net_value, net_volume}}, "provisional", "source"}``.
-    """
+async def _warm_flow_live(session: AsyncSession) -> dict:
+    """flow/live 캐시를 채우고 payload를 반환한다 — 라우트 핸들러와
+    collectors/live_refresh.py가 공유한다(모듈 docstring 참고). DB 폴백
+    (`_fetch_flow_confirmed_for_market`)에 세션이 필요하므로 호출자가 세션을
+    넘긴다 — 라우트는 요청 스코프 세션(Depends(get_session))을, live_refresh는
+    자체적으로 연 세션을 전달한다. 동작은 원래 라우트 핸들러 본문 그대로다
+    (순수 리팩토링, 2026-07-20)."""
     now = time.monotonic()
     async with _flow_live_cache_lock:
         cached = _flow_live_cache["data"]
@@ -335,6 +331,24 @@ async def market_flow_live(session: AsyncSession = Depends(get_session)):
         return payload
 
 
+@router.get("/api/markets/flow/live")
+async def market_flow_live(session: AsyncSession = Depends(get_session)):
+    """장중 잠정 투자자별 순매수 — PLAN.md §6 Phase 3.7-3.
+
+    코스피/코스닥 각각 ka10051(base_dt=오늘)을 온디맨드로 호출해 60초 메모리
+    캐시로 감싼다(모듈 docstring 참고 — ka10063 대신 이 TR을 쓰는 이유). 시장별로
+    독립 처리해 한쪽이 실패해도 다른 쪽은 정상 반환하고, 라이브 호출이 실패한
+    시장은 market_flow DB의 최신 확정치로 폴백한다(``provisional: false``).
+    두 시장 다 라이브·폴백 전부 실패하면 502. 실제 캐시 채우기는
+    `_warm_flow_live(session)`가 담당한다(live_refresh 스케줄러와 공유).
+
+    Returns ``{"kospi": {...}|None, "kosdaq": {...}|None, "market_closed": bool,
+    "cached_at": iso8601}`` — 각 시장 값은 ``{"date", "investors":
+    {투자자명: {net_value, net_volume}}, "provisional", "source"}``.
+    """
+    return await _warm_flow_live(session)
+
+
 # GET /api/markets/attention 60초 메모리 캐시 — breadth/live·flow/live와 동일한
 # 패턴이지만 각 라이브 엔드포인트는 독립 캐시를 쓴다(모듈 docstring 참고).
 _ATTENTION_CACHE_TTL_SECONDS = 60
@@ -362,20 +376,11 @@ def _parse_attention_row(row: dict) -> dict | None:
     }
 
 
-@router.get("/api/markets/attention")
-async def market_attention_live(session: AsyncSession = Depends(get_session)):
-    """실시간 관심 종목 TOP20 — 키움 ka00198(qry_tp="4"=당일 누적)을 온디맨드로
-    호출하고 60초 메모리 캐시로 감싼다. **market_attention류 테이블에는 절대
-    쓰지 않는다** — 실시간 성격이라 DB 저장 없음(모듈 docstring 참고).
-
-    ka00198 응답에는 market/ETF 여부 필드가 없어 `stocks` 테이블과 `stk_cd`
-    기준으로 조인해 채운다. 종목명은 TR의 `stk_nm`을 우선 쓰고(실측상 신뢰
-    가능), 비어 있으면 `stocks.name` -> 코드 순으로 폴백한다.
-
-    Returns ``{"rows": [...], "qry_tp": "4", "queried_at": iso8601}`` — 각 행은
-    ``{"rank", "code", "name", "change_rate", "is_etf", "market"}``
-    (``market``은 ``"kospi"``/``"kosdaq"``/``None``, 소문자).
-    """
+async def _warm_attention(session: AsyncSession) -> dict:
+    """attention 캐시를 채우고 payload를 반환한다 — 라우트 핸들러와
+    collectors/live_refresh.py가 공유한다(모듈 docstring 참고). `stocks` 테이블
+    조인에 세션이 필요하므로 호출자가 세션을 넘긴다(flow/live와 동일한 이유).
+    동작은 원래 라우트 핸들러 본문 그대로다(순수 리팩토링, 2026-07-20)."""
     now = time.monotonic()
     async with _attention_cache_lock:
         cached = _attention_cache["data"]
@@ -424,3 +429,21 @@ async def market_attention_live(session: AsyncSession = Depends(get_session)):
         _attention_cache["data"] = payload
         _attention_cache["ts"] = now
         return payload
+
+
+@router.get("/api/markets/attention")
+async def market_attention_live(session: AsyncSession = Depends(get_session)):
+    """실시간 관심 종목 TOP20 — 키움 ka00198(qry_tp="4"=당일 누적)을 온디맨드로
+    호출하고 60초 메모리 캐시로 감싼다. **market_attention류 테이블에는 절대
+    쓰지 않는다** — 실시간 성격이라 DB 저장 없음(모듈 docstring 참고).
+
+    ka00198 응답에는 market/ETF 여부 필드가 없어 `stocks` 테이블과 `stk_cd`
+    기준으로 조인해 채운다. 종목명은 TR의 `stk_nm`을 우선 쓰고(실측상 신뢰
+    가능), 비어 있으면 `stocks.name` -> 코드 순으로 폴백한다. 실제 캐시 채우기는
+    `_warm_attention(session)`가 담당한다(live_refresh 스케줄러와 공유).
+
+    Returns ``{"rows": [...], "qry_tp": "4", "queried_at": iso8601}`` — 각 행은
+    ``{"rank", "code", "name", "change_rate", "is_etf", "market"}``
+    (``market``은 ``"kospi"``/``"kosdaq"``/``None``, 소문자).
+    """
+    return await _warm_attention(session)
