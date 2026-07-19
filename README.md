@@ -20,6 +20,35 @@
 
 ## 실행
 
+### Docker Compose (권장 — 상시 서비스)
+
+DB(TimescaleDB)·백엔드·프런트 3개 컨테이너를 한 번에 띄웁니다. 사용자 세션에
+종속된 임시 프로세스가 아니라 `docker compose up -d`로 백그라운드(detached)
+기동하므로, 터미널/에이전트 세션이 끝나도 계속 떠 있습니다(DB 컨테이너가
+이미 이 방식으로 상시 운영되던 것과 동일한 패턴을 백엔드/프런트에도 적용).
+
+```bash
+docker compose build
+docker compose up -d
+
+# 확인
+docker compose ps                 # 3개 컨테이너 healthy/running
+docker compose logs -f backend    # 60초 간격 live-refresh 워밍 로그 등
+```
+
+- 백엔드: http://localhost:8123 (`ENABLE_SCHEDULER=1` 평일 18:00 일별 배치,
+  `ENABLE_LIVE_REFRESH=1` 장중 60초 간격 breadth/live·flow/live·attention
+  캐시 선제 워밍 — 둘 다 컨테이너에서는 기본 켜짐)
+- 프런트: http://localhost:5173 (`/api`는 컨테이너 안에서 `backend:8123`으로 프록시)
+- `./backend:/app`, `./frontend:/app` 바인드 마운트로 코드 수정 시 핫리로드(uvicorn
+  `--reload`, vite HMR)가 그대로 동작합니다 — 이미지를 다시 빌드할 필요는 의존성
+  변경(requirements.txt/package.json) 때만 있습니다.
+- 컨테이너 재빌드가 필요할 때: `docker compose build backend` 또는
+  `docker compose up -d --build`
+- 중지: `docker compose down` (볼륨 `pgdata`는 남아 DB 데이터가 보존됩니다)
+
+### 도커 없이 로컬 개발 (대안)
+
 ```bash
 # 1) 백엔드
 cd backend
@@ -33,7 +62,15 @@ npm install
 npm run dev   # http://localhost:5173, /api 는 8123으로 프록시됨
 ```
 
+이 경우 DB는 `docker compose up -d db`로 DB 컨테이너만 띄우거나 별도로 준비해야
+합니다. `vite.config.js`의 `/api` 프록시 대상은 `VITE_API_PROXY_TARGET` 환경변수로
+바꿀 수 있고, 미설정 시 기존처럼 `http://127.0.0.1:8123`을 씁니다.
+
 `.env`는 저장소 루트에 있고 `KRX_OPENAPI_KEY`를 담고 있습니다 (git에는 커밋되지 않음).
+Docker Compose는 `env_file: .env`로 이 파일을 그대로 참조하며, `docker-compose.yml`
+자체에는 시크릿을 하드코딩하지 않습니다(단 `DATABASE_URL`은 컨테이너 내부 네트워크
+주소로 `environment`에서 명시 오버라이드합니다 — `.env`의 `localhost:5433` 값은 호스트에서
+직접 접속할 때만 씁니다).
 
 ## 승인 후 확인
 

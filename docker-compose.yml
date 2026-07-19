@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: stock
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stock}
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -15,6 +15,75 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # 백엔드를 상시 서비스로 기동한다 — 예전에는 사용자 세션에 종속된 임시 bash
+  # 백그라운드 uvicorn 프로세스였는데, 세션이 재활용되면 계속 죽었다. db 서비스와
+  # 같은 방식(docker compose up -d)으로 띄우면 세션과 무관하게 계속 떠 있다.
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # .env의 DATABASE_URL(localhost:5433, 호스트에서 접속용)을 컨테이너 안에서는
+      # 도커 네트워크 내부 주소로 명시 오버라이드한다 — env_file보다 environment가
+      # 우선한다(.github/workflows/deploy-pages.yml CI가 쓰는 것과 같은 패턴).
+      DATABASE_URL: postgresql+asyncpg://stock:stock@db:5432/stock
+      # 평일 18:00 KST 일별 배치(collectors/scheduler.py).
+      ENABLE_SCHEDULER: "1"
+      # 장중 60초 간격 라이브 캐시 선제 워밍(collectors/live_refresh.py) — 서버가
+      # 스스로 breadth/live·flow/live·attention 캐시를 채워, 아무도 요청 안 해도
+      # 값이 멈춰 있지 않게 한다.
+      ENABLE_LIVE_REFRESH: "1"
+    ports:
+      # 127.0.0.1로 제한 — 0.0.0.0으로 열면 같은 네트워크의 다른 기기에서도 접근
+      # 가능해진다(검증 중 실제로 외부 IP의 접속 시도가 관측됨). 이 프로젝트는
+      # "로그인 없이 브라우저만 열면 보이는 개인용 대시보드"이지 공개 서비스가
+      # 아니므로 로컬호스트로만 바인딩한다.
+      - "127.0.0.1:8123:8123"
+    volumes:
+      # 핫리로드용 바인드 마운트 — pip 설치물은 이 경로 바깥(site-packages)이라
+      # 마운트가 /app을 덮어써도 지워지지 않는다(backend/Dockerfile 주석 참고).
+      - ./backend:/app
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8123/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # 프런트엔드도 백엔드와 동일한 이유로 상시 서비스로 기동한다. vite dev 서버 +
+  # HMR — 서버 측 능동 갱신(backend)과 별개로, 프런트는 여전히 폴링(setInterval)으로
+  # breadth/live·flow/live·attention을 60초마다 다시 fetch한다.
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    environment:
+      # 도커 네트워크 안에서는 backend가 127.0.0.1이 아니라 서비스명으로 붙는다
+      # (vite.config.js 참고 — 로컬 비도커 개발에서는 이 변수가 없어 기존 기본값 유지).
+      VITE_API_PROXY_TARGET: http://backend:8123
+      # 바인드 마운트 위에서 vite의 기본 파일 감시가 HMR을 못 잡는 환경(특히 macOS
+      # Docker Desktop)이 있어 폴링으로 전환한다(vite.config.js 참고).
+      CHOKIDAR_USEPOLLING: "true"
+    ports:
+      # backend와 동일한 이유로 127.0.0.1 제한 (§보안 주석 위 참고).
+      - "127.0.0.1:5173:5173"
+    volumes:
+      - ./frontend:/app
+      # 익명 볼륨 — 호스트의 node_modules(다른 OS/아키텍처용일 수 있음)가 컨테이너의
+      # npm ci 설치물을 덮어쓰지 않도록 막는 표준 트릭(frontend/Dockerfile 주석 참고).
+      - /app/node_modules
+    depends_on:
+      - backend
+    healthcheck:
+      # node:22-slim에는 curl/wget이 없어 Node 내장 fetch로 대신한다.
+      test: ["CMD", "node", "-e", "fetch('http://localhost:5173/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
 
 volumes:
   pgdata:
