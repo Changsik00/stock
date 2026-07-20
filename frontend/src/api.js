@@ -287,6 +287,22 @@ export async function fetchDerivativeFlow(days = 30) {
   return getJson(`/api/etf/derivative-flow?days=${days}`)
 }
 
+// GET /api/stocks/{code}/intraday?interval=N -> { code, interval, date, bars: [{date,
+// time: "HHMM", timestamp, open, high, low, close, volume}], cached_at } (PLAN.md §5.1)
+// — 키움 ka10080 온디맨드, "오늘"(최신 거래일) 하루치만. 로컬 전용 기능(실시간성 —
+// fetchFlowLive/fetchAttention과 동일한 이유), STATIC_DATA 대상 아님.
+export async function fetchStockIntraday(code, interval) {
+  return getJson(`/api/stocks/${code}/intraday?interval=${interval}`)
+}
+
+// GET /api/markets/{market}/intraday?interval=N -> { market, interval, date, bars: [...],
+// cached_at } (PLAN.md §5.1) — kospi/kosdaq은 키움 ka20005, futures는 501(선물 분봉
+// 소스 없음, 백엔드 routers/markets.py 모듈 주석 참고). 로컬 전용 기능, STATIC_DATA
+// 대상 아님.
+export async function fetchMarketIntraday(market, interval) {
+  return getJson(`/api/markets/${market}/intraday?interval=${interval}`)
+}
+
 // GET /api/macro/series?ids=usdkrw,wti,brent&days=N -> { days, series: { id: [...] } }
 export async function fetchMacroSeries(ids, days) {
   const idParam = Array.isArray(ids) ? ids.join(',') : ids

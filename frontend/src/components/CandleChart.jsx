@@ -15,6 +15,20 @@ function toLwcTime(d) {
   return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`
 }
 
+// 분봉 timestamp("2026-07-20T09:00:00+09:00") -> lightweight-charts UTCTimestamp(초).
+// intraday 모드는 이 숫자 시간축을 쓴다(PLAN.md §5.1 CandleChart 분봉 토글).
+//
+// 주의: lightweight-charts는 시간축 레이블을 항상 "UTC 벽시계" 기준으로 그린다
+// (브라우저 로컬 타임존과 무관 — 실측 확인: new Date(iso).getTime()을 그대로 넘기면
+// 축이 KST-9시간인 UTC로 표시됨). 한국거래소는 KST 한 타임존만 쓰므로, ISO 문자열의
+// 벽시계 숫자(오프셋 무시)를 그대로 "UTC인 척" 인코딩해 축이 항상 KST로 보이게 한다.
+function toLwcMinuteTime(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(String(iso))
+  if (!m) return Math.floor(new Date(iso).getTime() / 1000)
+  const [, y, mo, d, h, mi] = m
+  return Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi)) / 1000
+}
+
 // index.css의 CSS 변수를 읽어 lightweight-charts(캔버스, CSS var() 미지원)에 실제 색상값으로
 // 넘긴다 — 라이트/다크 두 테마 모두 대응하려면 var() 문자열이 아닌 계산된 색이 필요하다.
 function readCssVars(names) {
@@ -30,15 +44,28 @@ const VAR_NAMES = ['--up', '--down', '--surface', '--grid', '--axis', '--text-mu
 // 컴포넌트로 둔다. 캔들의 상승/하락은 당일 시가 대비 종가(표준 캔들 정의)로 판단하고,
 // 거래량 바도 같은 날의 방향을 그대로 따른다.
 //
-// data: [{ date: "YYYYMMDD", open, high, low, close, volume }, ...] (오름차순)
-export default function CandleChart({ data, height = 360, volumeHeightRatio = 0.22 }) {
+// data: 일봉 모드 [{ date: "YYYYMMDD", open, high, low, close, volume }, ...] (오름차순)
+//   분봉 모드(intraday=true) [{ timestamp: iso8601, time: "HHMM", open, high, low,
+//   close, volume }, ...] (PLAN.md §5.1 — /api/stocks/{code}/intraday,
+//   /api/markets/{market}/intraday 응답 그대로 넘기면 됨). 두 모드는 시간축 타입이
+//   달라(일봉=문자열 "YYYY-MM-DD", 분봉=숫자 UTCTimestamp) 차트 인스턴스를 만드는
+//   시점에 고정해야 한다 — 호출부가 모드 전환 시 `key`를 바꿔 컴포넌트를 remount
+//   시켜야 한다(예: `key={mode}`), 이 컴포넌트 내부에서는 마운트 이후 intraday
+//   prop 변경을 반영하지 않는다.
+export default function CandleChart({
+  data,
+  height = 360,
+  volumeHeightRatio = 0.22,
+  intraday = false,
+  title = '캔들 · 거래량',
+}) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const candleSeriesRef = useRef(null)
   const volumeSeriesRef = useRef(null)
   const legendRef = useRef(null)
-  // time("YYYY-MM-DD") -> { changeRate, rangeRate } — 크로스헤어 범례에서 등락률·변동폭을
-  // 찾는 용도. updateLegend는 마운트 시 1회 만든 클로저라 ref로 최신 데이터를 넘긴다.
+  // time -> { changeRate, rangeRate, label } — 크로스헤어 범례에서 등락률·변동폭·시각
+  // 표기를 찾는 용도. updateLegend는 마운트 시 1회 만든 클로저라 ref로 최신 데이터를 넘긴다.
   const legendMetaRef = useRef(new Map())
 
   const points = useMemo(
@@ -46,15 +73,18 @@ export default function CandleChart({ data, height = 360, volumeHeightRatio = 0.
       (data || [])
         .filter((d) => d.open != null && d.high != null && d.low != null && d.close != null)
         .map((d) => ({
-          time: toLwcTime(d.date),
+          time: intraday ? toLwcMinuteTime(d.timestamp) : toLwcTime(d.date),
           open: d.open,
           high: d.high,
           low: d.low,
           close: d.close,
           volume: d.volume ?? 0,
           changeRate: typeof d.changeRate === 'number' ? d.changeRate : null,
+          // 분봉 범례 라벨("HH:mm") — d.time("HHMM")을 그대로 쓴다(timestamp를 다시
+          // Date로 파싱하면 브라우저 로컬 타임존에 좌우되므로 원본 문자열이 더 안전).
+          label: intraday && d.time ? `${d.time.slice(0, 2)}:${d.time.slice(2, 4)}` : null,
         })),
-    [data]
+    [data, intraday]
   )
 
   // 차트 생성은 마운트 시 1회만 — 데이터/리사이즈는 별도 effect에서 갱신한다.
@@ -77,7 +107,11 @@ export default function CandleChart({ data, height = 360, volumeHeightRatio = 0.
         horzLines: { color: vars['--grid'] || '#e1e0d9' },
       },
       rightPriceScale: { borderColor: vars['--axis'] || '#c3c2b7' },
-      timeScale: { borderColor: vars['--axis'] || '#c3c2b7', timeVisible: false },
+      timeScale: {
+        borderColor: vars['--axis'] || '#c3c2b7',
+        timeVisible: intraday,
+        secondsVisible: false,
+      },
       crosshair: { mode: 0 },
     })
     chartRef.current = chart
@@ -129,8 +163,10 @@ export default function CandleChart({ data, height = 360, volumeHeightRatio = 0.
       }
       // 당일 변동폭 (고가-저가)/전일종가 — 방향이 아닌 진폭이라 중립색.
       const rangeHtml = meta && meta.rangeRate != null ? `<span>변동 ${meta.rangeRate.toFixed(1)}%</span>` : ''
+      // 분봉은 "HH:mm"(meta.label), 일봉은 기존처럼 formatDate("YYYY-MM-DD").
+      const timeLabel = intraday && meta?.label ? meta.label : formatDate(bar.time)
       legend.innerHTML =
-        `<span>${formatDate(bar.time)}</span>` +
+        `<span>${timeLabel}</span>` +
         `<span>시 ${numFmt.format(bar.open)}</span>` +
         `<span>고 ${numFmt.format(bar.high)}</span>` +
         `<span>저 ${numFmt.format(bar.low)}</span>` +
@@ -195,7 +231,7 @@ export default function CandleChart({ data, height = 360, volumeHeightRatio = 0.
       if (changeRate == null && prevClose > 0) changeRate = ((p.close - prevClose) / prevClose) * 100
       const rangeBase = prevClose > 0 ? prevClose : p.open
       const rangeRate = rangeBase > 0 ? ((p.high - p.low) / rangeBase) * 100 : null
-      meta.set(p.time, { changeRate: changeRate ?? null, rangeRate })
+      meta.set(p.time, { changeRate: changeRate ?? null, rangeRate, label: p.label })
       prevClose = p.close
     }
     legendMetaRef.current = meta
@@ -214,7 +250,7 @@ export default function CandleChart({ data, height = 360, volumeHeightRatio = 0.
 
   return (
     <div className="chart-card candle-chart-card">
-      <div className="chart-title">캔들 · 거래량</div>
+      <div className="chart-title">{title}</div>
       <div className="candle-chart-wrap" style={{ height }}>
         <div ref={legendRef} className="candle-legend" />
         <div ref={containerRef} className="candle-chart-container" />

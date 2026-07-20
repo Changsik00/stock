@@ -22,6 +22,18 @@ export const PERIOD_OPTIONS = [
   { key: 1095, label: '3Y' },
 ]
 
+// 분봉 토글(PLAN.md §5.1) — 'daily'는 기존 일봉(PeriodPicker), 나머지는 정수 분(interval
+// 쿼리파라미터, 백엔드 clients/kiwoom.py MINUTE_CHART_INTERVALS 중 실사용 옵션만 노출).
+// 키움 실측으로는 45분도 됐지만 요구된 노출 옵션은 이 6개뿐이라 그대로 좁힌다.
+export const INTRADAY_OPTIONS = [
+  { key: 'daily', label: '일봉' },
+  { key: 1, label: '1분' },
+  { key: 3, label: '3분' },
+  { key: 5, label: '5분' },
+  { key: 10, label: '10분' },
+  { key: 60, label: '60분' },
+]
+
 export const MARKETS = [
   { key: 'kospi', label: '코스피' },
   { key: 'kosdaq', label: '코스닥' },

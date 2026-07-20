@@ -7,6 +7,7 @@ import {
   fetchFlowRank,
   fetchGroups,
   fetchMacroSeries,
+  fetchMarketIntraday,
   fetchMarketSeries,
   fetchSentiment,
   fetchValueRank,
@@ -23,7 +24,7 @@ import PeriodPicker from '../components/PeriodPicker'
 import SentimentGauge from '../components/SentimentGauge'
 import StockDetailModal from '../components/StockDetailModal'
 import ValueRankTable from '../components/ValueRankTable'
-import { MARKET_FUND_IDS, MARKETS } from '../constants'
+import { INTRADAY_OPTIONS, MARKET_FUND_IDS, MARKETS } from '../constants'
 import { formatDate } from '../format'
 
 // 수급 상위 테이블 조회 기간(일) — flow_rank는 배치를 반복 실행한 날짜만 누적되고
@@ -93,6 +94,43 @@ export default function MarketPage() {
   // DashboardPage.jsx의 모달은 타입이 여러 개(candle/sentiment/…)라 { type, ... } 객체를
   // 쓰지만, 여기서는 종목 상세 하나뿐이라 { code, name, market, is_etf } | null로 충분하다.
   const [stockModal, setStockModal] = useState(null)
+  // 분봉 토글(PLAN.md §5.1) — 'daily'(기본, 기존 일봉)면 아래 fetchMarketSeries 로직을
+  // 그대로 쓰고, 정수 분이면 이 state들이 CandleChart를 대체한다. 선물 탭은 분봉 소스가
+  // 없어(routers/markets.py 501) 'daily'로 강제한다(아래 effect).
+  const [intradayMode, setIntradayMode] = useState('daily')
+  const [intradayBars, setIntradayBars] = useState([])
+  const [intradayDate, setIntradayDate] = useState(null)
+  const [intradayError, setIntradayError] = useState(null)
+  const [intradayLoading, setIntradayLoading] = useState(false)
+
+  // 선물 탭에는 분봉 옵션이 없다 — 탭을 선물로 바꾸는 순간 분봉 모드였다면 일봉으로
+  // 되돌린다(백엔드가 501을 주는 조합을 아예 요청하지 않도록).
+  useEffect(() => {
+    if (market === 'futures' && intradayMode !== 'daily') setIntradayMode('daily')
+  }, [market, intradayMode])
+
+  useEffect(() => {
+    if (STATIC_DATA || intradayMode === 'daily' || market === 'futures') return undefined
+    let cancelled = false
+    setIntradayLoading(true)
+    setIntradayError(null)
+    fetchMarketIntraday(market, intradayMode)
+      .then((body) => {
+        if (!cancelled) {
+          setIntradayBars(body.bars || [])
+          setIntradayDate(body.date)
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setIntradayError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setIntradayLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [market, intradayMode])
 
   useEffect(() => {
     let cancelled = false
@@ -337,9 +375,35 @@ export default function MarketPage() {
         ))}
       </div>
 
-      <PeriodPicker value={days} onChange={setDays} />
+      {/* 분봉 토글(PLAN.md §5.1) — 정적 배포에는 실시간 온디맨드 소스가 없어 숨긴다.
+          분봉 모드일 땐 기간(PeriodPicker)이 의미 없으므로(오늘 하루치뿐) 아래에서
+          PeriodPicker 대신 이 토글만 보여준다. */}
+      {!STATIC_DATA && (
+        <div className="toggle-row">
+          {INTRADAY_OPTIONS.map((opt) => {
+            const disabled = market === 'futures' && opt.key !== 'daily'
+            return (
+              <button
+                key={opt.key}
+                type="button"
+                className={`toggle-chip ${intradayMode === opt.key ? 'active' : ''}`}
+                disabled={disabled}
+                title={disabled ? 'K200 선물은 분봉 데이터 소스가 없습니다' : undefined}
+                onClick={() => setIntradayMode(opt.key)}
+              >
+                {opt.label}
+              </button>
+            )
+          })}
+          <span className="toggle-hint">
+            {intradayMode === 'daily' ? '분봉은 오늘 하루치만 제공' : '오늘 하루치 · 참고용'}
+          </span>
+        </div>
+      )}
 
-      {latest && (
+      {intradayMode === 'daily' && <PeriodPicker value={days} onChange={setDays} />}
+
+      {latest && intradayMode === 'daily' && (
         <div className="stat-row">
           <div className="stat">
             <span className="stat-label">기준일</span>
@@ -394,12 +458,34 @@ export default function MarketPage() {
         </div>
       )}
 
-      {loading && <div className="state">불러오는 중…</div>}
-      {error && <div className="state error">{error}</div>}
-      {!loading && !error && prices && prices.length === 0 && (
-        <div className="state">해당 기간에 표시할 데이터가 없습니다.</div>
+      {intradayMode === 'daily' && (
+        <>
+          {loading && <div className="state">불러오는 중…</div>}
+          {error && <div className="state error">{error}</div>}
+          {!loading && !error && prices && prices.length === 0 && (
+            <div className="state">해당 기간에 표시할 데이터가 없습니다.</div>
+          )}
+          {!loading && !error && prices && prices.length > 0 && <CandleChart data={prices} />}
+        </>
       )}
-      {!loading && !error && prices && prices.length > 0 && <CandleChart data={prices} />}
+
+      {intradayMode !== 'daily' && (
+        <>
+          {intradayLoading && <div className="state">불러오는 중…</div>}
+          {intradayError && <div className="state error">{intradayError}</div>}
+          {!intradayLoading && !intradayError && intradayBars.length === 0 && (
+            <div className="state">오늘 분봉 데이터가 없습니다(장 시작 전이거나 휴장일 수 있음).</div>
+          )}
+          {!intradayLoading && !intradayError && intradayBars.length > 0 && (
+            <CandleChart
+              key={`${market}-${intradayMode}`}
+              data={intradayBars}
+              intraday
+              title={`캔들 · 거래량 (${intradayMode}분봉 · ${formatDate(intradayDate)})`}
+            />
+          )}
+        </>
+      )}
 
       {!loading && flowCapableMarket && (
         <>

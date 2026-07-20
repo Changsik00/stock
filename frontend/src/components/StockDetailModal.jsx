@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis } from 'recharts'
-import { fetchStockSeries } from '../api'
-import { DEFAULT_INVESTORS, INVESTOR_COLOR_VAR } from '../constants'
-import { formatEok } from '../format'
+import { STATIC_DATA, fetchStockIntraday, fetchStockSeries } from '../api'
+import { DEFAULT_INVESTORS, INTRADAY_OPTIONS, INVESTOR_COLOR_VAR } from '../constants'
+import { formatDate, formatEok } from '../format'
 import Badge from './Badge'
 import CandleChart from './CandleChart'
 import PeriodPicker from './PeriodPicker'
@@ -133,6 +133,13 @@ export default function StockDetailModal({ code, initial }) {
   const [series, setSeries] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  // 분봉 토글(PLAN.md §5.1) — 'daily'면 기존 일봉 로직 그대로, 정수 분이면 아래
+  // intraday state가 CandleChart를 대체한다(오늘 하루치만, DB 미저장 온디맨드).
+  const [intradayMode, setIntradayMode] = useState('daily')
+  const [intradayBars, setIntradayBars] = useState([])
+  const [intradayDate, setIntradayDate] = useState(null)
+  const [intradayLoading, setIntradayLoading] = useState(false)
+  const [intradayError, setIntradayError] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -152,6 +159,35 @@ export default function StockDetailModal({ code, initial }) {
       cancelled = true
     }
   }, [code, days])
+
+  useEffect(() => {
+    if (STATIC_DATA || intradayMode === 'daily') return undefined
+    let cancelled = false
+    setIntradayLoading(true)
+    setIntradayError(null)
+    fetchStockIntraday(code, intradayMode)
+      .then((body) => {
+        if (!cancelled) {
+          setIntradayBars(body.bars || [])
+          setIntradayDate(body.date)
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setIntradayError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setIntradayLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [code, intradayMode])
+
+  // 모달을 닫았다 다른 종목으로 다시 열 때 이전 종목의 분봉 모드가 남아있지 않도록
+  // — code가 바뀌면 항상 일봉으로 되돌린다(사용자가 매번 다시 고르게 함, 놀람 방지).
+  useEffect(() => {
+    setIntradayMode('daily')
+  }, [code])
 
   const name = series?.name || initial?.name
   const market = series?.market || initial?.market
@@ -178,14 +214,54 @@ export default function StockDetailModal({ code, initial }) {
         )}
       </div>
 
-      <PeriodPicker value={days} onChange={setDays} />
+      {!STATIC_DATA && (
+        <div className="toggle-row">
+          {INTRADAY_OPTIONS.map((opt) => (
+            <button
+              key={opt.key}
+              type="button"
+              className={`toggle-chip ${intradayMode === opt.key ? 'active' : ''}`}
+              onClick={() => setIntradayMode(opt.key)}
+            >
+              {opt.label}
+            </button>
+          ))}
+          <span className="toggle-hint">
+            {intradayMode === 'daily' ? '분봉은 오늘 하루치만 제공' : '오늘 하루치 · 참고용'}
+          </span>
+        </div>
+      )}
 
-      {loading && <div className="state">불러오는 중…</div>}
-      {error && <div className="state error">{error}</div>}
+      {intradayMode === 'daily' && <PeriodPicker value={days} onChange={setDays} />}
 
-      {!loading && !error && prices.length > 0 && <CandleChart data={prices} height={280} />}
-      {!loading && !error && prices.length === 0 && (
-        <div className="state">해당 기간에 표시할 데이터가 없습니다.</div>
+      {intradayMode === 'daily' && (
+        <>
+          {loading && <div className="state">불러오는 중…</div>}
+          {error && <div className="state error">{error}</div>}
+          {!loading && !error && prices.length > 0 && <CandleChart data={prices} height={280} />}
+          {!loading && !error && prices.length === 0 && (
+            <div className="state">해당 기간에 표시할 데이터가 없습니다.</div>
+          )}
+        </>
+      )}
+
+      {intradayMode !== 'daily' && (
+        <>
+          {intradayLoading && <div className="state">불러오는 중…</div>}
+          {intradayError && <div className="state error">{intradayError}</div>}
+          {!intradayLoading && !intradayError && intradayBars.length === 0 && (
+            <div className="state">오늘 분봉 데이터가 없습니다(장 시작 전이거나 휴장일 수 있음).</div>
+          )}
+          {!intradayLoading && !intradayError && intradayBars.length > 0 && (
+            <CandleChart
+              key={`${code}-${intradayMode}`}
+              data={intradayBars}
+              height={280}
+              intraday
+              title={`캔들 · 거래량 (${intradayMode}분봉 · ${formatDate(intradayDate)})`}
+            />
+          )}
+        </>
       )}
 
       {!loading && !error && flowsError && <div className="state">수급 일시 불가</div>}
