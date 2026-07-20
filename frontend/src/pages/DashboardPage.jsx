@@ -3,17 +3,21 @@ import {
   STATIC_DATA,
   fetchAttention,
   fetchBasis,
+  fetchBasisLive,
   fetchBreadth,
   fetchBreadthLive,
   fetchDerivativeFlow,
   fetchFlowLive,
   fetchFlowPath,
   fetchFlowRank,
+  fetchFuturesFlowLive,
   fetchGroups,
+  fetchGroupsLive,
   fetchMacroSeries,
   fetchMarketSeries,
   fetchSentiment,
   fetchValueRank,
+  fetchValueRankLive,
 } from '../api'
 import Badge from '../components/Badge'
 import BreadthBadge from '../components/BreadthBadge'
@@ -103,6 +107,13 @@ const FLOW_LIVE_POLL_MS = 60_000
 // GET /api/markets/attention)와 맞춘다. FLOW_LIVE_POLL_MS와 동일한 값이지만 소스가
 // 달라(플로우 vs 조회수 순위) 각자 독립 폴링/캐시를 갖는다.
 const ATTENTION_POLL_MS = 60_000
+// 거래대금 상위(value-rank)·업종/테마 등락률(groups)·베이시스(basis)·외인 선물수급
+// (futures-flow) 자동 갱신 주기 — 백엔드 5~10분 캐시(routers/basis.py·groups.py·
+// flow_rank.py·markets.py의 LIVE_TTL_SECONDS/_FUTURES_FLOW_LIVE_TTL_SECONDS=420초)와
+// 맞춘다(PLAN.md §4.7 3단 갱신 주기, 2026-07-20 장중 실측: 4개 소스 모두 7분 이내
+// 값 변화 확인). 수급 상위(flow-rank)는 실측 결과 소스가 2영업일 이상 지연돼 있어
+// 라이브로 편입하지 않았다 — EOD(FLOW_RANK_LOOKBACK_DAYS 기준) 그대로 유지.
+const EXTRA_LIVE_POLL_MS = 420_000
 
 function eokLabel(million) {
   if (typeof million !== 'number') return '-'
@@ -910,13 +921,29 @@ export default function DashboardPage() {
   const [derivativeFlow, setDerivativeFlow] = useState(null)
   const [programFlow, setProgramFlow] = useState({})
 
+  // PLAN.md §4.7 3단 갱신 주기(2026-07-20 장중 실측 편입) — 베이시스·외인 선물수급의
+  // 7분 라이브 오버레이. null이면 "라이브 없음"(폴링 전/실패/정적 배포)이라 아래
+  // KPI 타일은 항상 기존 EOD 값(basisData/foreignFuturesRow)으로 폴백한다 —
+  // flowLive와 동일한 "오버레이 + 폴백" 관례. 시그널 판정(foreignSignals)은 EOD
+  // 데이터 기준을 그대로 유지한다(라이브 값은 표시만, 판정 기준은 안 바꿈).
+  const [basisLive, setBasisLive] = useState(null)
+  const [futuresFlowLive, setFuturesFlowLive] = useState(null)
+
   const [groupType, setGroupType] = useState('upjong')
   const [groupItems, setGroupItems] = useState([])
   const [groupLoading, setGroupLoading] = useState(false)
   const [groupError, setGroupError] = useState(null)
+  // 업종/테마 등락률 7분 라이브 오버레이(PLAN.md §4.7) — { type, rows: [{name,
+  // change_rate}], ... }. groupItems(EOD, value/market_sum 포함)와 이름 기준으로
+  // 병합해 트리맵 박스 크기는 유지하면서 색(등락률)만 갱신한다(아래 groupTreemapItems).
+  const [groupLive, setGroupLive] = useState(null)
 
   const [flowRankTop, setFlowRankTop] = useState(null)
   const [valueRankTop, setValueRankTop] = useState(null)
+  // 거래대금 상위 7분 라이브(PLAN.md §4.7) — 응답 스키마가 valueRankTop(EOD, market='all')과
+  // 동일해({date, rows}) 별도 병합 없이 그대로 대체해 쓴다(아래 렌더 시
+  // `!STATIC_DATA && valueRankLive ? valueRankLive : valueRankTop`).
+  const [valueRankLive, setValueRankLive] = useState(null)
   const [flowPathTop, setFlowPathTop] = useState(null)
   // 실시간 관심 종목 TOP20(PLAN.md 사용자 지시, live-only) — API 응답 바디를 그대로
   // 담는다({ rows, qry_tp, queried_at }). flowLive와 동일하게 정적 배포에서는 항상
@@ -1179,6 +1206,98 @@ export default function DashboardPage() {
     }
   }, [])
 
+  // 거래대금 상위 7분 라이브 폴링(PLAN.md §4.7, 2026-07-20 장중 실측 편입) — flowLive/
+  // attentionTop과 동일한 패턴(정적 배포에서는 시도하지 않음, 언마운트 시 정리). 실패
+  // 시 조용히 null로 두고 위 valueRankTop(EOD 1회성 fetch)으로 자연히 폴백한다.
+  useEffect(() => {
+    if (STATIC_DATA) return undefined
+    let cancelled = false
+    function load() {
+      fetchValueRankLive()
+        .then((body) => {
+          if (!cancelled) setValueRankLive(body)
+        })
+        .catch(() => {
+          if (!cancelled) setValueRankLive(null)
+        })
+    }
+    load()
+    const intervalId = setInterval(load, EXTRA_LIVE_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(intervalId)
+    }
+  }, [])
+
+  // 업종/테마 등락률 7분 라이브 폴링(PLAN.md §4.7) — 탭(groupType)이 바뀌면 그 타입으로
+  // 다시 폴링을 시작한다(위 groupItems EOD fetch와 동일한 의존성). 거래대금 합산은
+  // 라이브에 없어(api.js fetchGroupsLive 주석 참고) groupItems의 값과 이름 기준으로
+  // 병합해 쓴다(아래 groupTreemapItems).
+  useEffect(() => {
+    if (STATIC_DATA) return undefined
+    let cancelled = false
+    function load() {
+      fetchGroupsLive(groupType)
+        .then((body) => {
+          if (!cancelled) setGroupLive(body)
+        })
+        .catch(() => {
+          if (!cancelled) setGroupLive(null)
+        })
+    }
+    load()
+    const intervalId = setInterval(load, EXTRA_LIVE_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(intervalId)
+    }
+  }, [groupType])
+
+  // 베이시스 7분 라이브 폴링(PLAN.md §4.7) — basisData(EOD)는 시그널 판정(foreignSignals)
+  // 기준으로 그대로 두고, 이 state는 베이시스 KPI 타일의 표시값만 갱신하는 오버레이다.
+  useEffect(() => {
+    if (STATIC_DATA) return undefined
+    let cancelled = false
+    function load() {
+      fetchBasisLive()
+        .then((body) => {
+          if (!cancelled) setBasisLive(body)
+        })
+        .catch(() => {
+          if (!cancelled) setBasisLive(null)
+        })
+    }
+    load()
+    const intervalId = setInterval(load, EXTRA_LIVE_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(intervalId)
+    }
+  }, [])
+
+  // 외인 선물(K200) 순매수 7분 라이브 폴링(PLAN.md §4.7) — marketData.futures(EOD)는
+  // 시그널 판정 기준으로 그대로 두고, 이 state는 "외인 선물(K200)" KPI 타일의 표시값만
+  // 갱신하는 오버레이다.
+  useEffect(() => {
+    if (STATIC_DATA) return undefined
+    let cancelled = false
+    function load() {
+      fetchFuturesFlowLive()
+        .then((body) => {
+          if (!cancelled) setFuturesFlowLive(body)
+        })
+        .catch(() => {
+          if (!cancelled) setFuturesFlowLive(null)
+        })
+    }
+    load()
+    const intervalId = setInterval(load, EXTRA_LIVE_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(intervalId)
+    }
+  }, [])
+
   const closeModal = () => setModal(null)
 
   // 종목 상세 모달을 여는 공용 헬퍼 — 실시간 관심 TOP5(기존)와 수급/거래대금/ETF경유
@@ -1292,7 +1411,20 @@ export default function DashboardPage() {
   const foreignSpotValue = foreignSpotIsLive ? foreignSpotLiveValue : foreignSpotRow?.net_value
   const foreignFuturesRow = latestFlowRow(marketData.futures?.flows, '외국인')
 
+  // 외인 선물(K200) 7분 라이브 오버레이(PLAN.md §4.7) — 장중이고(market_closed===false)
+  // 값이 있을 때만 "표시"를 라이브로 바꾼다(시그널 판정 foreignFuturesSign은 EOD
+  // 기준 그대로, 아래 futuresFlowLiveNetValue는 KPI 타일 표시 전용).
+  const futuresFlowLiveNetValue =
+    !STATIC_DATA && futuresFlowLive && futuresFlowLive.market_closed === false
+      ? (futuresFlowLive.investors?.['외국인']?.net_value ?? null)
+      : null
+
   const basisLatest = basisData?.latest
+  // 베이시스 7분 라이브 오버레이(PLAN.md §4.7) — KPI 타일 표시 전용(시그널 판정
+  // backwardationSignal은 EOD 기준 basisLatest 그대로).
+  const basisLiveActive = Boolean(
+    !STATIC_DATA && basisLive && basisLive.market_closed === false && typeof basisLive.basis === 'number'
+  )
   const expiry = basisData?.expiry
   const derivativeLatest = derivativeFlow?.latest
   const derivativeUniverse = derivativeFlow?.universe
@@ -1365,6 +1497,25 @@ export default function DashboardPage() {
     derivativeLatest?.date,
     programArbDate
   )
+
+  // 업종/테마 트리맵 — groupItems(EOD, value/market_sum 포함)에 groupLive(7분 라이브,
+  // change_rate만)를 이름 기준으로 병합한다(PLAN.md §4.7). 박스 크기(value)는 EOD
+  // 그대로 유지하고 색(change_rate)만 장중에 갱신되는 셈 — GroupTreemap.jsx는 이
+  // 병합 여부를 모르는 순수 컴포넌트라 그대로 재사용한다. groupLive가 없거나(정적
+  // 배포/폴링 전/실패) 해당 그룹 타입과 다르면 groupItems를 그대로 쓴다.
+  const groupLiveActive = Boolean(!STATIC_DATA && groupLive && groupLive.type === groupType && groupLive.market_closed === false)
+  const groupTreemapItems = groupLiveActive
+    ? groupItems.map((item) => {
+        const live = groupLive.rows.find((r) => r.name === item.name)
+        return live ? { ...item, change_rate: live.change_rate } : item
+      })
+    : groupItems
+
+  // 거래대금 상위 TOP5 카드 — valueRankLive(7분 라이브)가 있고 장중이면 그걸 그대로
+  // 쓰고(응답 스키마가 valueRankTop과 동일), 아니면 valueRankTop(EOD 1회성 fetch)으로
+  // 폴백한다(PLAN.md §4.7).
+  const valueRankLiveActive = Boolean(!STATIC_DATA && valueRankLive && valueRankLive.market_closed === false)
+  const effectiveValueRank = valueRankLiveActive ? valueRankLive : valueRankTop
 
   return (
     <div className="dashboard-page">
@@ -1517,14 +1668,36 @@ export default function DashboardPage() {
         />
         <KpiTile
           label="외인 선물 (K200)"
-          value={foreignFuturesRow ? eokLabel(foreignFuturesRow.net_value) : marketLoading ? '…' : '-'}
-          valueClass={foreignFuturesRow ? (foreignFuturesRow.net_value >= 0 ? 'up' : 'down') : ''}
+          value={
+            futuresFlowLiveNetValue !== null
+              ? eokLabel(futuresFlowLiveNetValue)
+              : foreignFuturesRow
+                ? eokLabel(foreignFuturesRow.net_value)
+                : marketLoading
+                  ? '…'
+                  : '-'
+          }
+          valueClass={
+            futuresFlowLiveNetValue !== null
+              ? futuresFlowLiveNetValue >= 0
+                ? 'up'
+                : 'down'
+              : foreignFuturesRow
+                ? foreignFuturesRow.net_value >= 0
+                  ? 'up'
+                  : 'down'
+                : ''
+          }
           sub={
-            foreignFuturesRow?.date && (
-              <span className="kpi-tile-sub">
-                확정
-                <StaleDate date={foreignFuturesRow.date} baseDate={baseDate} prefix=" · " />
-              </span>
+            futuresFlowLiveNetValue !== null ? (
+              <span className="kpi-tile-sub">7분 갱신 · 장중</span>
+            ) : (
+              foreignFuturesRow?.date && (
+                <span className="kpi-tile-sub">
+                  확정
+                  <StaleDate date={foreignFuturesRow.date} baseDate={baseDate} prefix=" · " />
+                </span>
+              )
             )
           }
           title={foreignFuturesRow?.date ? formatDate(foreignFuturesRow.date) : undefined}
@@ -1545,18 +1718,29 @@ export default function DashboardPage() {
         />
         <KpiTile
           label="베이시스"
-          value={basisLabel(basisLatest?.basis)}
-          valueClass={basisLatest?.basis === undefined || basisLatest?.basis === null ? '' : basisLatest.basis >= 0 ? 'up' : 'down'}
+          value={basisLabel(basisLiveActive ? basisLive.basis : basisLatest?.basis)}
+          valueClass={
+            basisLiveActive
+              ? basisLive.basis >= 0
+                ? 'up'
+                : 'down'
+              : basisLatest?.basis === undefined || basisLatest?.basis === null
+                ? ''
+                : basisLatest.basis >= 0
+                  ? 'up'
+                  : 'down'
+          }
           sub={
             <span className="kpi-tile-sub">
-              {basisLatest?.backwardation === undefined || basisLatest?.backwardation === null ? (
+              {(basisLiveActive ? basisLive.backwardation : basisLatest?.backwardation) === undefined ||
+              (basisLiveActive ? basisLive.backwardation : basisLatest?.backwardation) === null ? (
                 '-'
-              ) : basisLatest.backwardation ? (
+              ) : (basisLiveActive ? basisLive.backwardation : basisLatest?.backwardation) ? (
                 <Badge kind="info">백워데이션 · 차익 매도 유의</Badge>
               ) : (
                 '콘탱고'
               )}
-              <StaleDate date={basisLatest?.date} baseDate={baseDate} prefix=" · " />
+              {basisLiveActive ? ' · 7분 갱신' : <StaleDate date={basisLatest?.date} baseDate={baseDate} prefix=" · " />}
             </span>
           }
           title={basisLatest?.date ? formatDate(basisLatest.date) : undefined}
@@ -1697,11 +1881,13 @@ export default function DashboardPage() {
             {opt.label}
           </button>
         ))}
-        <span className="toggle-hint">일별 스냅샷 · 색 = 등락률</span>
+        <span className="toggle-hint">
+          {groupLiveActive ? '박스 크기 = 일별 거래대금 · 색(등락률) 7분 갱신 · 장중' : '일별 스냅샷 · 색 = 등락률'}
+        </span>
       </div>
       {groupLoading && <div className="state">불러오는 중…</div>}
       {groupError && <div className="state error">{groupError}</div>}
-      {!groupLoading && !groupError && <GroupTreemap items={groupItems} sizeBy="value" height={200} />}
+      {!groupLoading && !groupError && <GroupTreemap items={groupTreemapItems} sizeBy="value" height={200} />}
 
       {/* 5. TOP5 요약 3열 — "…기준" 라벨은 대표 기준일(baseDate)과 같으면 생략, 다르면
           MM-DD만 붙인다(staleHintLabel, 대시보드 상단 표시와 동일 규칙). 정확한 날짜는
@@ -1738,9 +1924,15 @@ export default function DashboardPage() {
         />
         <Top5Card
           title="거래대금 상위"
-          hint={valueRankTop?.date ? staleHintLabel(valueRankTop.date, baseDate) : undefined}
-          hoverDate={valueRankTop?.date ? formatDate(valueRankTop.date) : undefined}
-          rows={valueRankTop?.rows}
+          hint={
+            valueRankLiveActive
+              ? '7분 갱신 · 장중'
+              : effectiveValueRank?.date
+                ? staleHintLabel(effectiveValueRank.date, baseDate)
+                : undefined
+          }
+          hoverDate={effectiveValueRank?.date ? formatDate(effectiveValueRank.date) : undefined}
+          rows={effectiveValueRank?.rows}
           onMore={() => setModal({ type: 'valueRank', title: '거래대금 상위 — 전체' })}
           renderRow={(row) => (
             <Top5RowTile

@@ -218,6 +218,40 @@ export async function fetchStockSeries(code, days = 180) {
   return getJson(`/api/stocks/${code}/series?days=${days}`)
 }
 
+// GET /api/markets/value-rank/live -> { date, rows, market_closed, cached_at } (PLAN.md
+// §4.7 3단 갱신 주기, 2026-07-20 장중 실측으로 5~10분(7분) 서버 캐시 편입) — 코스피+
+// 코스닥 전 종목을 온디맨드 재조회해 거래대금 내림차순으로 재정렬한 라이브 스냅샷.
+// rows 스키마는 fetchValueRank(market='all')와 동일하다. 로컬 전용 기능이라
+// fetchFlowLive/fetchAttention과 마찬가지로 정적 배포(STATIC_DATA) 대상이 아니다 —
+// 호출부(DashboardPage)가 STATIC_DATA일 때 이 함수를 호출하지 않는다.
+export async function fetchValueRankLive() {
+  return getJson('/api/markets/value-rank/live')
+}
+
+// GET /api/groups/live?type=upjong|theme -> { type, rows: [{name, change_rate,
+// value: null, market_sum: null}], market_closed, cached_at } (PLAN.md §4.7) — 목록
+// 페이지만 재조회해 등락률만 장중 갱신한다(거래대금 합산은 그룹당 상세 페이지 345회
+// 호출이 필요해 5~10분 주기에 맞지 않아 EOD 전용으로 유지 — 백엔드 routers/groups.py
+// 모듈 docstring 참고). 로컬 전용 기능, STATIC_DATA 대상 아님.
+export async function fetchGroupsLive(type = 'upjong') {
+  return getJson(`/api/groups/live?type=${type}`)
+}
+
+// GET /api/markets/basis/live -> { date, futures_close, kospi200_close, basis, basis_pct,
+// backwardation, expiry, market_closed, cached_at } (PLAN.md §4.7 — fchart의 "오늘" 봉이
+// 체결마다 갱신됨을 장중 실측으로 확인해 5~10분 캐시 편입). 로컬 전용 기능, STATIC_DATA
+// 대상 아님.
+export async function fetchBasisLive() {
+  return getJson('/api/markets/basis/live')
+}
+
+// GET /api/markets/futures-flow/live -> { date, investors: {투자자명: {net_value,
+// net_volume}}, market_closed, cached_at } (PLAN.md §4.7 — K200 선물 투자자별 순매수
+// 장중 라이브). 로컬 전용 기능, STATIC_DATA 대상 아님.
+export async function fetchFuturesFlowLive() {
+  return getJson('/api/markets/futures-flow/live')
+}
+
 // GET /api/markets/basis?days=N -> { days, series: [{date, futures_close, kospi200_close,
 // basis, basis_pct}], latest: {date, backwardation, basis, basis_pct}, expiry: {date, d_day,
 // quadruple} } (PLAN.md §4.5-3/4.5-5) — K200 선물-현물 베이시스 + 다음 만기. latest/expiry는
