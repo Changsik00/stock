@@ -312,6 +312,106 @@ async def test_series_candle_fetch_failure_returns_502(monkeypatch, seeded_stock
     assert "detail" in body["detail"]
 
 
+# -- 분봉 (GET /{code}/intraday, PLAN.md §5.1) -----------------------------------
+
+
+def _fake_intraday_kiwoom_client(calls: dict, response_or_exc):
+    class _FakeKiwoomClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc) -> bool:
+            return False
+
+        async def stock_minute_chart(self, code: str, tic_scope: str, **kwargs):
+            calls["n"] = calls.get("n", 0) + 1
+            calls["code"] = code
+            calls["tic_scope"] = tic_scope
+            if isinstance(response_or_exc, Exception):
+                raise response_or_exc
+            return response_or_exc, {"cont-yn": "N", "next-key": "", "api-id": "ka10080"}
+
+    return _FakeKiwoomClient
+
+
+@pytest.fixture(autouse=True)
+def _clear_intraday_cache():
+    stocks._intraday_cache.clear()
+    yield
+    stocks._intraday_cache.clear()
+
+
+async def test_intraday_valid_interval_returns_ascending_bars(monkeypatch):
+    fake_response = {
+        "return_code": 0,
+        "stk_min_pole_chart_qry": [
+            {"cur_prc": "-244000", "trde_qty": "100", "cntr_tm": "20260720090500",
+             "open_pric": "-244000", "high_pric": "-244000", "low_pric": "-244000"},
+            {"cur_prc": "-243000", "trde_qty": "200", "cntr_tm": "20260720090000",
+             "open_pric": "-243000", "high_pric": "-243000", "low_pric": "-243000"},
+        ],
+    }
+    calls: dict = {}
+    monkeypatch.setattr(stocks, "KiwoomClient", _fake_intraday_kiwoom_client(calls, fake_response))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/stocks/{TEST_CODE}/intraday", params={"interval": 5})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["code"] == TEST_CODE
+    assert body["interval"] == 5
+    assert body["date"] == "20260720"
+    assert [b["time"] for b in body["bars"]] == ["0900", "0905"]  # 오름차순
+    assert calls["tic_scope"] == "5"
+
+
+async def test_intraday_invalid_interval_returns_400():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/stocks/{TEST_CODE}/intraday", params={"interval": 7})
+
+    assert resp.status_code == 400
+
+
+async def test_intraday_kiwoom_failure_returns_502(monkeypatch):
+    calls: dict = {}
+    monkeypatch.setattr(
+        stocks,
+        "KiwoomClient",
+        _fake_intraday_kiwoom_client(calls, KiwoomAPIError(3, "존재하지 않는 종목코드입니다")),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/stocks/{TEST_CODE}/intraday", params={"interval": 1})
+
+    assert resp.status_code == 502
+    assert resp.json()["detail"]["source"] == "kiwoom_ka10080"
+
+
+async def test_intraday_second_request_within_ttl_hits_cache(monkeypatch):
+    fake_response = {
+        "return_code": 0,
+        "stk_min_pole_chart_qry": [
+            {"cur_prc": "-244000", "trde_qty": "100", "cntr_tm": "20260720090000",
+             "open_pric": "-244000", "high_pric": "-244000", "low_pric": "-244000"},
+        ],
+    }
+    calls: dict = {}
+    monkeypatch.setattr(stocks, "KiwoomClient", _fake_intraday_kiwoom_client(calls, fake_response))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r1 = await client.get(f"/api/stocks/{TEST_CODE}/intraday", params={"interval": 60})
+        r2 = await client.get(f"/api/stocks/{TEST_CODE}/intraday", params={"interval": 60})
+
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    assert calls["n"] == 1  # 두 번째 요청은 캐시 히트
+    assert r1.json() == r2.json()
+
+
 async def test_series_flow_fetch_failure_is_partial_success_200(monkeypatch, seeded_stock):
     target_end = stocks._latest_trading_day()
 

@@ -69,7 +69,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..clients import naver_breadth, naver_futures_flow
-from ..clients.kiwoom import KiwoomClient
+from ..clients.kiwoom import MINUTE_CHART_INTERVALS, KiwoomClient, parse_minute_chart_rows
 from ..collectors.market_flow import fetch_live_flow
 from ..db import get_session
 from ..market_hours import KST, is_market_closed as _market_closed_kst
@@ -643,3 +643,91 @@ async def futures_flow_live():
     "market_closed": bool, "cached_at": iso8601}``.
     """
     return await _warm_futures_flow_live()
+
+
+# GET /api/markets/{market}/intraday — 지수 분봉(PLAN.md §5.1). kospi/kosdaq은
+# 키움 ka20005(업종분봉차트요청)를 온디맨드로 호출해 "오늘"(최신 거래일) 하루치만
+# 반환한다(DB 미저장 — §5 원칙, stocks.py의 종목 분봉과 동일한 캐시 패턴이지만
+# market별 독립 캐시). **futures(K200 선물)는 501** — 네이버(m.stock.naver.com,
+# api.stock.naver.com, siseJson.naver 전부)에서 선물 분봉 소스를 탐색했으나
+# 찾지 못했다(2026-07-21 실측):
+#   - `m.stock.naver.com/api/chart/domestic/index/FUT?periodType=minute` 및
+#     `minuteN`/`min`/숫자 등 변형 전부 빈 응답(반면 dayCandle/weekCandle/
+#     monthCandle은 정상 동작) — 엔드포인트 자체는 살아있지만 분 단위 미지원.
+#   - `.../index/FUT/minute` 서브 리소스는 `[]`(빈 배열, 404 아님)를 반환 —
+#     대조군으로 일반 종목(`item/005930/minute`)도 동일하게 `[]`라 이 리소스
+#     자체가 공개 웹에 비활성화된 것으로 판단.
+#   - 레거시 `fchart.stock.naver.com/siseJson.naver?timeframe=minute`도 헤더
+#     행만 오고 데이터 행 없음.
+#   - `polling.finance.naver.com`은 실시간 스냅샷 1건만 주는 시세 API라 시계열
+#     차트에 쓸 수 없음.
+# 키움 REST에는 애초에 선물 도메인이 없다(PLAN.md §1). 억지로 채우지 않고 501 +
+# 이 근거를 응답에 남긴다.
+INTRADAY_INDEX_CD = {"kospi": "001", "kosdaq": "101"}
+
+_intraday_cache: dict[tuple[str, int], dict] = {}
+_intraday_cache_lock = asyncio.Lock()
+
+
+def _intraday_ttl_seconds(interval: int) -> int:
+    """stocks.py의 동일 이름 함수와 같은 정책(1분봉 60초, 그 외 interval*60초)."""
+    return 60 if interval == 1 else interval * 60
+
+
+async def _warm_market_intraday(market: str, interval: int) -> dict:
+    inds_cd = INTRADAY_INDEX_CD[market]
+    cache_key = (market, interval)
+    ttl = _intraday_ttl_seconds(interval)
+    now = time.monotonic()
+    async with _intraday_cache_lock:
+        cached = _intraday_cache.get(cache_key)
+        if cached is not None and (now - cached["ts"]) < ttl:
+            return cached["data"]
+
+        try:
+            async with KiwoomClient() as client:
+                data, _headers = await client.sector_minute_chart(inds_cd, str(interval))
+        except Exception as e:  # noqa: BLE001 - 인증/네트워크/API 에러 전부 502로 변환
+            raise HTTPException(
+                502, detail={"source": "kiwoom_ka20005", "detail": str(e)[:300]}
+            ) from e
+
+        bars = parse_minute_chart_rows(data, "ka20005")
+        payload = {
+            "market": market,
+            "interval": interval,
+            "date": bars[-1]["date"] if bars else None,
+            "bars": bars,
+            "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        _intraday_cache[cache_key] = {"ts": now, "data": payload}
+        return payload
+
+
+@router.get("/api/markets/{market}/intraday")
+async def market_intraday(market: str, interval: int = Query(..., description="분봉 간격(분)")):
+    """지수 분봉 — kospi/kosdaq은 키움 ka20005를 온디맨드로 호출해 "오늘"(최신
+    거래일) 하루치만 반환(DB 미저장, §5 원칙). futures는 501(위 모듈 주석의
+    탐색 근거 참고). `interval`은 `MINUTE_CHART_INTERVALS`(1/3/5/10/15/30/45/60)만
+    허용, 그 외는 400.
+
+    Returns ``{"market", "interval", "date": "YYYYMMDD"|None, "bars": [...],
+    "cached_at": iso8601}`` — bars 스키마는 `/api/stocks/{code}/intraday`와 동일.
+    """
+    if interval not in MINUTE_CHART_INTERVALS:
+        raise HTTPException(400, f"interval must be one of {sorted(MINUTE_CHART_INTERVALS)}")
+    if market == "futures":
+        raise HTTPException(
+            501,
+            detail={
+                "market": "futures",
+                "detail": (
+                    "K200 선물 분봉 데이터 소스 없음 — 키움 REST에 선물 도메인이 없고, "
+                    "네이버(m.stock.naver.com/api.stock.naver.com/siseJson.naver) 실측 결과 "
+                    "분 단위 차트를 제공하지 않음(PLAN.md §5.1 참고)"
+                ),
+            },
+        )
+    if market not in INTRADAY_INDEX_CD:
+        raise HTTPException(400, f"market must be one of {sorted(INTRADAY_INDEX_CD)} + ['futures'(501)]")
+    return await _warm_market_intraday(market, interval)

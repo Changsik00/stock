@@ -41,7 +41,13 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..clients import naver_index
-from ..clients.kiwoom import KiwoomAPIError, KiwoomAuthError, KiwoomClient
+from ..clients.kiwoom import (
+    MINUTE_CHART_INTERVALS,
+    KiwoomAPIError,
+    KiwoomAuthError,
+    KiwoomClient,
+    parse_minute_chart_rows,
+)
 from ..db import get_session
 from ..models import Stock, StockFlow, StockOhlcv
 
@@ -436,3 +442,76 @@ async def stock_series(
 @router.get("/{code}/whale")
 def stock_whale(code: str):
     raise HTTPException(501, _NOT_IMPLEMENTED)
+
+
+# -- 분봉 (ka10080 온디맨드 + 짧은 메모리 캐시, DB 미저장 — PLAN.md §5 Phase 5.1) ------
+#
+# 분봉은 "오늘 하루치만" 온디맨드 조회로 충분하다는 §5 원칙에 따라 stock_ohlcv 같은
+# 영구 캐시 테이블을 두지 않는다(일봉과 다른 저장 정책 — 모듈 docstring 참고).
+# 캐시는 markets.py의 breadth/live·flow/live와 동일한 "모듈 전역 dict + asyncio.Lock"
+# 패턴이지만, 종목마다 독립 데이터라 (code, interval) 튜플로 키를 잡는다. 프로세스
+# 재기동 시 초기화되는 단순 캐시로 충분(다중 워커 배포 없음, PLAN.md §5.1).
+
+_intraday_cache: dict[tuple[str, int], dict] = {}
+_intraday_cache_lock = asyncio.Lock()
+
+
+def _intraday_ttl_seconds(interval: int) -> int:
+    """1분봉은 60초, 그 외(3/5/10/15/30/45/60분)는 interval*60초 — PLAN.md §5.1
+    지시("interval 값에 따라 TTL 차등") 그대로. 분봉 주기보다 짧게 캐시해봤자
+    같은 봉을 다시 받을 뿐이라 봉 주기에 맞춘 것."""
+    return 60 if interval == 1 else interval * 60
+
+
+async def _warm_stock_intraday(code: str, interval: int) -> dict:
+    """intraday 캐시를 채우고 payload를 반환한다. 키움 호출 실패는 502로 변환
+    (markets.py 라이브 엔드포인트들과 동일한 정책 — 이 엔드포인트는 종목 캔들이
+    응답의 전부라 stock_series의 "수급만 부분 실패 허용"과 달리 실패를 그대로
+    502로 알린다)."""
+    cache_key = (code, interval)
+    ttl = _intraday_ttl_seconds(interval)
+    now = time.monotonic()
+    async with _intraday_cache_lock:
+        cached = _intraday_cache.get(cache_key)
+        if cached is not None and (now - cached["ts"]) < ttl:
+            return cached["data"]
+
+        try:
+            async with KiwoomClient() as client:
+                data, _headers = await client.stock_minute_chart(code, str(interval))
+        except (KiwoomAuthError, KiwoomAPIError) as e:
+            raise HTTPException(
+                502, detail={"source": "kiwoom_ka10080", "detail": str(e)[:300]}
+            ) from e
+        except Exception as e:  # noqa: BLE001 - httpx 등 네트워크 계열 예외 포함
+            raise HTTPException(
+                502, detail={"source": "kiwoom_ka10080", "detail": str(e)[:300]}
+            ) from e
+
+        bars = parse_minute_chart_rows(data, "ka10080")
+        payload = {
+            "code": code,
+            "interval": interval,
+            "date": bars[-1]["date"] if bars else None,
+            "bars": bars,
+            "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        _intraday_cache[cache_key] = {"ts": now, "data": payload}
+        return payload
+
+
+@router.get("/{code}/intraday")
+async def stock_intraday(code: str, interval: int = Query(..., description="분봉 간격(분)")):
+    """종목 분봉 — 키움 ka10080을 온디맨드로 호출해 "오늘"(최신 거래일) 하루치만
+    반환한다(DB 미저장, §5 원칙). `interval`은 실호출로 확정된 값만 허용
+    (`MINUTE_CHART_INTERVALS` — 1/3/5/10/15/30/45/60), 그 외는 400.
+
+    Returns ``{"code", "interval", "date": "YYYYMMDD"|None, "bars": [{"date",
+    "time": "HHMM", "timestamp": iso8601, "open", "high", "low", "close",
+    "volume"}, ...], "cached_at": iso8601}`` — bars는 오름차순(과거->최신).
+    """
+    if interval not in MINUTE_CHART_INTERVALS:
+        raise HTTPException(
+            400, f"interval must be one of {sorted(MINUTE_CHART_INTERVALS)}"
+        )
+    return await _warm_stock_intraday(code, interval)
