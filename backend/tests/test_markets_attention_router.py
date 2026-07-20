@@ -83,9 +83,11 @@ def _make_fake_kiwoom_client(item_inq_rank=None, raise_exc=None):
 def _reset_attention_cache():
     markets._attention_cache["data"] = None
     markets._attention_cache["ts"] = 0.0
+    markets._attention_last_good["data"] = None
     yield
     markets._attention_cache["data"] = None
     markets._attention_cache["ts"] = 0.0
+    markets._attention_last_good["data"] = None
 
 
 @pytest.fixture(autouse=True)
@@ -98,6 +100,14 @@ def _restore_kiwoom_client():
 def _clear_overrides():
     yield
     app.dependency_overrides.clear()
+
+
+# attention의 happy-path 테스트들은 실제 wall-clock과 무관하게 "장중"을 가정한다
+# (2026-07-20 버그 수정으로 _warm_attention이 실제 market_closed를 확인해 키움
+# 호출을 게이트하므로) — 장 마감 케이스는 아래 별도 절이 명시적으로 다룬다.
+@pytest.fixture(autouse=True)
+def _force_market_open(monkeypatch):
+    monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: False)
 
 
 async def test_attention_live_happy_path_with_stock_join():
@@ -182,3 +192,63 @@ async def test_attention_live_caches_within_ttl():
     assert r2.status_code == 200
     assert r1.json()["queried_at"] == r2.json()["queried_at"]
     assert fake_cls.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# 장 마감 게이트 (2026-07-20 버그 수정) — attention은 DB 저장이 없는 실시간 전용
+# 지표라(§3.5) market_flow/market_breadth 같은 확정치 폴백이 없다. 대신 마지막
+# 성공 캐시(`_attention_last_good`)를 재사용한다.
+# ---------------------------------------------------------------------------
+
+
+async def test_attention_market_closed_skips_kiwoom_and_returns_empty(monkeypatch):
+    monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: True)
+
+    def _raise(*args, **kwargs):  # pragma: no cover - 불리면 안 됨
+        raise AssertionError("KiwoomClient should not be constructed when market is closed")
+
+    markets.KiwoomClient = _raise
+    app.dependency_overrides[get_session] = _session_with([])
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/attention")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["market_closed"] is True
+    assert body["rows"] == []
+
+
+async def test_attention_market_closed_reuses_last_good_cache(monkeypatch):
+    # 1) 장중에 한 번 성공시켜 last-good 캐시를 채운다.
+    monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: False)
+    rows = [{"stk_nm": "삼성전자", "bigd_rank": "1", "stk_cd": "005930", "base_comp_chgr": "-9.30"}]
+    markets.KiwoomClient = _make_fake_kiwoom_client(item_inq_rank=rows)
+    stock_rows = [("005930", "삼성전자", "KOSPI", False)]
+    app.dependency_overrides[get_session] = _session_with([_FakeRowsResult(stock_rows)])
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r1 = await client.get("/api/markets/attention")
+    assert r1.status_code == 200
+    assert r1.json()["market_closed"] is False
+    assert len(r1.json()["rows"]) == 1
+
+    # 2) TTL 캐시를 비우고(60초 경과 시뮬레이션) 장이 마감됐다고 바꾼다 — 이번엔
+    # 키움이 호출되면 즉시 AssertionError로 실패해야 한다.
+    markets._attention_cache["data"] = None
+    markets._attention_cache["ts"] = 0.0
+
+    def _raise(*args, **kwargs):  # pragma: no cover - 불리면 안 됨
+        raise AssertionError("KiwoomClient should not be constructed when market is closed")
+
+    markets.KiwoomClient = _raise
+    monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: True)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r2 = await client.get("/api/markets/attention")
+
+    assert r2.status_code == 200
+    body = r2.json()
+    assert body["market_closed"] is True
+    assert len(body["rows"]) == 1
+    assert body["rows"][0]["code"] == "005930"

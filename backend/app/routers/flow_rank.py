@@ -28,17 +28,46 @@ etf_stats(ETF 순유입 합 ÷ AUM 합) 세 요소를 app/sentiment.py의 순수
 근사 게이지다(§4.6 한계: 상위 랭킹·ETF 유니버스 기반 근사치, 시장 전체 정밀값 아님).
 세 요소는 서로 다른 테이블이라 "가장 최근 가용 날짜"가 어긋날 수 있다 — 그대로 두고
 응답에 요소별 date를 그대로 노출해 투명하게 밝힌다.
+
+## GET /api/markets/value-rank/live (PLAN.md §4.7 3단 갱신 주기, 2026-07-20 장중 실측)
+
+장중 실측 결과 quantTop 누적거래대금이 장중에 계속 갱신됨을 확인해 5~10분 캐시로
+편입했다 — DB(value_rank)는 여전히 collectors/value_rank.py 일별 배치가 담당하고,
+이 엔드포인트는 clients/naver_value_rank.py를 직접 온디맨드 재조회해 **메모리
+캐시**로만 감싼다(§3.5 원칙 — DB에 안 씀). breadth/live(routers/markets.py)와
+동일한 warm 함수 + TTL + Lock 패턴이다.
+
+value-rank/live는 EOD 배치와 동일하게 시장 전 종목을 완주(코스피 ~2,478개+코스닥
+~1,821개, naver_value_rank.py 모듈 docstring)해야 정확한 순위가 나와 호출당
+15~30초가 걸린다 — 5~10분 인터벌 잡이 미리 채워두므로 사용자 요청은 대개 캐시
+히트다(캐시 미스일 때만 그 요청이 오래 걸린다, breadth/live 등 기존 라이브
+엔드포인트와 동일한 트레이드오프). turnover는 quantTop 응답에 시가총액이 이미
+포함돼 있어 EOD와 동일하게 계산한다.
+
+**flow-rank/live는 만들지 않는다(2026-07-20 장중 실측 근거)**: sise_deal_rank_iframe
+소스를 09:22·09:31 KST(둘 다 오늘 2026-07-20 장중) 두 차례 직접 재호출했지만 두
+번 다 "최근 2거래일"이 2026-07-15/07-16으로 고정돼 있었다 — 금요일(07-17)과
+오늘(07-20, 진행 중인 세션)이 전혀 반영되지 않는다. DB(flow_rank) 최신 날짜도
+동일하게 07-16에 멈춰 있어(배치가 여러 번 재실행돼도 소스 자체가 최소 2영업일
+이상 지연) 우연한 샘플링이 아니라 이 소스 고유의 지연이다. 5~10분 주기로 다시
+불러도 "가장 최근"이 그대로 며칠 전 값이라 실시간화의 의미가 없으므로 PLAN.md
+§4.7 표대로 **1일 배치(EOD `/api/markets/flow-rank`)만 유지**하고 live 엔드포인트는
+추가하지 않는다.
 """
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..clients import naver_rank, naver_value_rank
 from ..db import get_session
+from ..market_hours import KST, is_market_closed
 from ..models import EtfStat, FlowPath, FlowRank, MarketBreadth, Stock, ValueRank
 from ..sentiment import breadth_score, compute_sentiment, etf_score, flow_score
 
@@ -50,6 +79,17 @@ MARKET_FILTERS = {"all", "kospi", "kosdaq"}
 FLOW_PATH_DIRECTIONS = {"in", "out"}
 # sentiment 요소별 원재료를 찾을 때 "가장 최근 가용 날짜"를 얼마나 과거까지 훑을지.
 SENTIMENT_LOOKBACK_DAYS = 30
+
+# 5~10분 장중 라이브 캐시 TTL — collectors/live_refresh.py 신규 인터벌 잡과 맞춘다.
+LIVE_TTL_SECONDS = 420  # 7분
+
+_value_rank_live_cache: dict[str, object] = {"ts": 0.0, "data": None}
+_value_rank_live_cache_lock = asyncio.Lock()
+
+# 라이브는 EOD보다 서버 부담을 낮추려 요청 간 지연을 조금 줄인다(EOD 0.5초 —
+# collectors/value_rank.py는 배치라 시간 제약이 느슨하지만, 이 라이브 경로는
+# 5~10분마다 반복 호출되므로 총 소요 시간을 줄이는 쪽을 택했다).
+LIVE_REQUEST_DELAY_SECONDS = 0.3
 
 
 @router.get("/api/markets/flow-rank")
@@ -409,3 +449,118 @@ async def market_sentiment(session: AsyncSession = Depends(get_session)) -> dict
             "etf": {"weight": weights["etf"], **etf},
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# value-rank/live — 모듈 docstring "GET /api/markets/value-rank/live" 절 참고
+# (PLAN.md §4.7, 2026-07-20).
+# ---------------------------------------------------------------------------
+
+
+def _fetch_value_rank_market_blocking(market: str) -> dict:
+    return naver_value_rank.fetch_all(market, sleep_seconds=LIVE_REQUEST_DELAY_SECONDS)
+
+
+def _fetch_etf_codes_blocking() -> set[str]:
+    return naver_rank.fetch_etf_codes()
+
+
+async def _warm_value_rank_live() -> dict:
+    """value-rank/live 캐시를 채우고 payload를 반환한다 — 라우트 핸들러와
+    collectors/live_refresh.py의 5~10분 인터벌 잡이 공유한다. 코스피+코스닥을
+    합쳐 거래대금 내림차순으로 재정렬한다(EOD `/value-rank?market=all`과 동일한
+    관례, collectors/value_rank.py TOP_N=100과 맞춰 시장당 상위 100개만 담는다).
+
+    장 마감이면(``is_market_closed``) 네이버를 아예 호출하지 않는다(2026-07-20,
+    신규 5~10분 티어 전체의 기본 원칙) — DB 폴백이 없으므로 마지막 캐시(있으면)를
+    ``market_closed: true``로 재사용하고, 캐시조차 없으면 빈 값으로 응답한다."""
+    now = time.monotonic()
+    async with _value_rank_live_cache_lock:
+        cached = _value_rank_live_cache["data"]
+        if cached is not None and (now - _value_rank_live_cache["ts"]) < LIVE_TTL_SECONDS:
+            return cached
+
+        now_kst = dt.datetime.now(KST)
+        if is_market_closed(now_kst):
+            if cached is not None:
+                payload = {**cached, "market_closed": True}
+            else:
+                payload = {
+                    "date": None,
+                    "rows": [],
+                    "market_closed": True,
+                    "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                }
+            _value_rank_live_cache["data"] = payload
+            _value_rank_live_cache["ts"] = now
+            return payload
+
+        try:
+            etf_codes = await asyncio.to_thread(_fetch_etf_codes_blocking)
+        except Exception:  # noqa: BLE001 - ETF 태깅 실패는 치명적이지 않다(전부 False로 남을 뿐)
+            etf_codes = set()
+
+        rows_all: list[dict] = []
+        errors: dict[str, str] = {}
+        date_seen: dt.date | None = None
+        for market in ("kospi", "kosdaq"):
+            try:
+                result = await asyncio.to_thread(_fetch_value_rank_market_blocking, market)
+            except Exception as e:  # noqa: BLE001
+                errors[market] = str(e)[:200]
+                continue
+            date_seen = date_seen or result.get("date")
+            for row in result["rows"][:100]:
+                value = row.get("value_million")
+                market_value = row.get("market_value_million")
+                turnover = round(value / market_value * 100, 4) if value is not None and market_value else None
+                rows_all.append(
+                    {
+                        "market": market,
+                        "code": row["code"],
+                        "name": row.get("name"),
+                        "value": value,
+                        "change_rate": row.get("change_rate"),
+                        "is_etf": row["code"] in etf_codes,
+                        "turnover": turnover,
+                    }
+                )
+
+        if not rows_all:
+            raise HTTPException(502, f"value-rank live fetch failed: {errors}")
+
+        rows_all.sort(key=lambda r: r["value"] if r["value"] is not None else -1, reverse=True)
+        for i, row in enumerate(rows_all, start=1):
+            row["rank"] = i
+
+        payload = {
+            "date": date_seen.isoformat() if date_seen else None,
+            "rows": rows_all,
+            "market_closed": False,
+            "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        _value_rank_live_cache["data"] = payload
+        _value_rank_live_cache["ts"] = now
+        return payload
+
+
+@router.get("/api/markets/value-rank/live")
+async def value_rank_live() -> dict:
+    """거래대금 상위 종목 장중 라이브(PLAN.md §4.7, 2026-07-20 실측 편입).
+
+    코스피+코스닥 전 종목을 온디맨드로 재조회해 7분 메모리 캐시로 감싼다(모듈
+    docstring 참고). EOD `/api/markets/value-rank`와 달리 market 파라미터는 없다
+    (전체 통합만 제공 — 화면도 항상 "전체" 기준으로 쓴다). **장 마감이면 네이버
+    호출을 생략**하고 마지막 캐시를 ``market_closed: true``로 재사용한다
+    (`_warm_value_rank_live` docstring 참고).
+
+    Returns ``{"date": iso8601|null, "rows": [{"rank", "market", "code", "name",
+    "value", "change_rate", "is_etf", "turnover"}, ...], "market_closed": bool,
+    "cached_at": iso8601}``.
+    """
+    return await _warm_value_rank_live()
+
+
+# flow-rank/live는 만들지 않는다 — 모듈 docstring "flow-rank/live는 만들지 않는다"
+# 절의 2026-07-20 장중 실측 근거 참고(sise_deal_rank_iframe이 2영업일 이상 지연돼
+# 장중 재호출이 의미가 없었다). EOD `/api/markets/flow-rank`만 유지한다.

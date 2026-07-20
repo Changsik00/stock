@@ -94,7 +94,13 @@ def _session_with(results):
     return fake_get_session
 
 
-async def test_flow_live_returns_both_markets_from_kiwoom():
+async def test_flow_live_returns_both_markets_from_kiwoom(monkeypatch):
+    # 이 테스트는 "장중" 경로(키움 라이브 우선 호출)를 검증하므로, 실제 wall-clock이
+    # 언제든 그렇게 동작하도록 장중을 강제한다(2026-07-20 버그 수정으로
+    # _warm_flow_live가 실제 market_closed를 확인해 게이트하기 시작했다 — 장 마감
+    # 케이스는 아래 별도 테스트가 다룬다).
+    monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: False)
+
     async def fake_fetch_live_flow(client, market, target_date):
         return KOSPI_FLOWS if market == "kospi" else KOSDAQ_FLOWS
 
@@ -114,11 +120,13 @@ async def test_flow_live_returns_both_markets_from_kiwoom():
     assert body["kospi"]["source"] == "kiwoom_live"
     assert body["kospi"]["investors"]["외국인"]["net_value"] == -20698
     assert body["kosdaq"]["investors"]["개인"]["net_value"] == 4815
-    assert isinstance(body["market_closed"], bool)
+    assert body["market_closed"] is False
     assert "cached_at" in body
 
 
-async def test_flow_live_falls_back_to_db_when_kiwoom_fails():
+async def test_flow_live_falls_back_to_db_when_kiwoom_fails(monkeypatch):
+    monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: False)
+
     async def fake_fetch_live_flow(client, market, target_date):
         raise RuntimeError("kiwoom auth failed")
 
@@ -152,7 +160,9 @@ async def test_flow_live_falls_back_to_db_when_kiwoom_fails():
     assert body["kosdaq"] is None
 
 
-async def test_flow_live_502_when_both_kiwoom_and_db_fail():
+async def test_flow_live_502_when_both_kiwoom_and_db_fail(monkeypatch):
+    monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: False)
+
     async def fake_fetch_live_flow(client, market, target_date):
         raise RuntimeError("kiwoom auth failed")
 
@@ -170,7 +180,8 @@ async def test_flow_live_502_when_both_kiwoom_and_db_fail():
     assert resp.status_code == 502
 
 
-async def test_flow_live_caches_within_ttl():
+async def test_flow_live_caches_within_ttl(monkeypatch):
+    monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: False)
     calls = []
 
     async def fake_fetch_live_flow(client, market, target_date):
@@ -196,3 +207,66 @@ def test_market_closed_flag_matches_kst_clock():
     after_close = dt.datetime(2026, 7, 20, 16, 0, tzinfo=markets.KST)
     assert markets._market_closed_kst(before_close) is False
     assert markets._market_closed_kst(after_close) is True
+
+
+# ---------------------------------------------------------------------------
+# 장 마감 게이트 (2026-07-20 버그 수정) — market_closed면 키움 라이브 호출을 아예
+# 시도하지 않고 곧바로 DB 확정치 폴백으로 진행한다. 예전에는 market_closed를
+# 응답 메타데이터로만 쓰고 실제로는 항상 키움을 먼저 불렀다(버그).
+# ---------------------------------------------------------------------------
+
+
+async def test_flow_live_market_closed_skips_kiwoom_and_uses_db(monkeypatch):
+    monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: True)
+
+    async def fake_fetch_live_flow(client, market, target_date):  # pragma: no cover - 불리면 안 됨
+        raise AssertionError("fetch_live_flow (Kiwoom) should not be called when market is closed")
+
+    markets.fetch_live_flow = fake_fetch_live_flow
+    try:
+        kospi_rows = [
+            MarketFlow(market="kospi", date=dt.date(2026, 7, 17), investor="개인", net_value=111, net_volume=None),
+        ]
+        results = [
+            _FakeScalarResult(dt.date(2026, 7, 17)),
+            _FakeRowsResult(kospi_rows),
+            _FakeScalarResult(None),
+        ]
+        app.dependency_overrides[get_session] = _session_with(results)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/markets/flow/live")
+    finally:
+        markets.fetch_live_flow = _real_fetch_live_flow
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["market_closed"] is True
+    assert body["kospi"]["provisional"] is False
+    assert body["kospi"]["source"] == "market_flow_db"
+    assert body["kosdaq"] is None
+
+
+async def test_flow_live_market_closed_no_db_returns_empty_not_502(monkeypatch):
+    monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: True)
+
+    async def fake_fetch_live_flow(client, market, target_date):  # pragma: no cover - 불리면 안 됨
+        raise AssertionError("fetch_live_flow (Kiwoom) should not be called when market is closed")
+
+    markets.fetch_live_flow = fake_fetch_live_flow
+    try:
+        results = [_FakeScalarResult(None), _FakeScalarResult(None)]
+        app.dependency_overrides[get_session] = _session_with(results)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/markets/flow/live")
+    finally:
+        markets.fetch_live_flow = _real_fetch_live_flow
+
+    # 장 마감 + DB도 없음은 "소스 장애"가 아니라 "아직 없음"이므로 502가 아니다
+    # (breadth/live의 동일 정책과 일관, test_markets_breadth_router.py 참고).
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["market_closed"] is True
+    assert body["kospi"] is None
+    assert body["kosdaq"] is None

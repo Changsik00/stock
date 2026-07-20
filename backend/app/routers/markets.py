@@ -45,6 +45,16 @@ breadth/live·flow/live와 같은 60초 메모리 캐시 패턴으로 감싼다.
 핸들러(HTTP 요청)뿐 아니라 `collectors/live_refresh.py`의 60초 인터벌 잡(장중에만
 선제적으로 호출)도 같은 함수를 재사용한다 — 캐시/TTL/락은 그대로 모듈 전역이라
 두 호출 경로가 안전하게 캐시를 공유한다.
+
+Also owns GET /api/markets/futures-flow/live (PLAN.md §4.7 3단 갱신 주기, 2026-07-20
+장중 실측) — K200 선물 투자자별(개인/외국인/기관계) 순매수를
+clients/naver_futures_flow.py(m.stock.naver.com/api/index/FUT/trend)로 온디맨드
+재조회한다. 장중 실측 결과 이 소스가 당일 누적치를 체결 진행에 맞춰 갱신함을
+확인해 5~10분 캐시로 편입했다(모듈 docstring 상단과 동일한 이유로, EOD 배치
+collectors/futures_flow.py는 그대로 하루 1회 market_flow에 확정 적재 — 이
+엔드포인트는 DB에 쓰지 않는다, §3.5 원칙). breadth/live와 동일한 warm 함수 +
+TTL + Lock 패턴이지만 DB 폴백이 없어(소스가 항상 최신 스냅샷을 주므로) 세션
+의존이 없다.
 """
 
 from __future__ import annotations
@@ -58,7 +68,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..clients import naver_breadth
+from ..clients import naver_breadth, naver_futures_flow
 from ..clients.kiwoom import KiwoomClient
 from ..collectors.market_flow import fetch_live_flow
 from ..db import get_session
@@ -194,16 +204,65 @@ def _fetch_breadth_blocking(market: str) -> dict:
     return naver_breadth.fetch_breadth(market)
 
 
-async def _warm_breadth_live() -> dict:
+async def _fetch_breadth_confirmed_for_market(session: AsyncSession, market: str) -> dict | None:
+    """market_breadth DB의 해당 시장 최신 날짜 확정치 — 장 마감 시 라이브 폴백
+    (2026-07-20 버그 수정: 장 마감이면 네이버를 아예 호출하지 않고 이 DB 확정치로
+    응답한다, `_fetch_flow_confirmed_for_market`과 동일한 패턴)."""
+    latest_date = (
+        await session.execute(select(func.max(MarketBreadth.date)).where(MarketBreadth.market == market))
+    ).scalar_one_or_none()
+    if latest_date is None:
+        return None
+    rows = (
+        await session.execute(
+            select(MarketBreadth).where(MarketBreadth.market == market, MarketBreadth.date == latest_date)
+        )
+    ).scalars().all()
+    if not rows:
+        return None
+    r = rows[0]
+    return {
+        "date": r.date.isoformat(),
+        "adv": r.adv,
+        "dec": r.dec,
+        "flat": r.flat,
+        "limit_up": r.limit_up,
+        "limit_down": r.limit_down,
+    }
+
+
+async def _warm_breadth_live(session: AsyncSession | None = None) -> dict:
     """breadth/live 캐시를 채우고 payload를 반환한다 — 라우트 핸들러(HTTP 요청)와
     collectors/live_refresh.py의 60초 인터벌 잡이 공유한다(모듈 docstring
-    "서버 측 능동 60초 갱신" 절 참고). TTL 체크·락·502 판정 등 동작은 원래
-    라우트 핸들러 본문 그대로다 — 순수 리팩토링(2026-07-20)."""
+    "서버 측 능동 60초 갱신" 절 참고).
+
+    **2026-07-20 버그 수정**: 장 마감이면(``is_market_closed``) 네이버를 아예
+    호출하지 않는다 — 예전에는 이 게이트가 없어 새벽에 탭을 열어둔 채로 폴링하면
+    계속 네이버를 두드리는 낭비가 있었다. 장 마감 시엔 ``session``이 있으면
+    market_breadth DB 확정치로 응답하고(``market_closed: true``), 세션이 없거나
+    DB에도 아직 없으면(배치 미실행) 빈 값 + ``market_closed: true``로 응답한다
+    (502가 아니다 — "소스 장애"와 "장 마감이라 아직 없음"은 다른 상태)."""
     now = time.monotonic()
     async with _live_cache_lock:
         cached = _live_cache["data"]
         if cached is not None and (now - _live_cache["ts"]) < _LIVE_CACHE_TTL_SECONDS:
             return cached
+
+        now_kst = dt.datetime.now(KST)
+        if _market_closed_kst(now_kst):
+            result: dict[str, object] = {}
+            if session is not None:
+                for market in ("kospi", "kosdaq"):
+                    result[market] = await _fetch_breadth_confirmed_for_market(session, market)
+            payload = {
+                "kospi": result.get("kospi"),
+                "kosdaq": result.get("kosdaq"),
+                "market_closed": True,
+                "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            }
+            _live_cache["data"] = payload
+            _live_cache["ts"] = now
+            return payload
 
         result: dict[str, object] = {}
         for market in ("kospi", "kosdaq"):
@@ -219,6 +278,7 @@ async def _warm_breadth_live() -> dict:
         payload = {
             "kospi": result.get("kospi"),
             "kosdaq": result.get("kosdaq"),
+            "market_closed": False,
             "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         }
         _live_cache["data"] = payload
@@ -227,18 +287,20 @@ async def _warm_breadth_live() -> dict:
 
 
 @router.get("/api/markets/breadth/live")
-async def market_breadth_live():
+async def market_breadth_live(session: AsyncSession = Depends(get_session)):
     """장중 온디맨드 등락 종목수 — 코스피/코스닥을 소스(네이버)에서 직접 조회하고
     60초 메모리 캐시로 감싼다. **market_breadth 테이블에는 절대 쓰지 않는다**
-    (§3.5 "장중 값은 DB에 쌓지 않는다" 원칙 — 캐시는 프로세스 메모리에만 존재).
-    실제 캐시 채우기는 `_warm_breadth_live()`가 담당한다(live_refresh 스케줄러와
-    공유).
+    (§3.5 "장중 값은 DB에 쌓지 않는다" 원칙 — 캐시는 프로세스 메모리에만 존재,
+    읽기 전용 DB 폴백은 예외). 실제 캐시 채우기는 `_warm_breadth_live(session)`가
+    담당한다(live_refresh 스케줄러와 공유) — 장 마감이면 DB 확정치로 폴백하고
+    네이버는 호출하지 않는다(2026-07-20 버그 수정, 함수 docstring 참고).
 
-    Returns ``{"kospi": {...} | None, "kosdaq": {...} | None, "cached_at": iso8601}``.
-    한 시장 조회가 실패하면 그 시장만 None, 다른 시장은 정상 반환(소스 일시 장애가
-    전체를 막지 않도록) — 둘 다 실패하면 502.
+    Returns ``{"kospi": {...} | None, "kosdaq": {...} | None, "market_closed": bool,
+    "cached_at": iso8601}``. 한 시장 조회가 실패하면 그 시장만 None, 다른 시장은
+    정상 반환(소스 일시 장애가 전체를 막지 않도록) — 장중에 둘 다 실패하면 502
+    (장 마감 폴백 경로는 502를 던지지 않는다).
     """
-    return await _warm_breadth_live()
+    return await _warm_breadth_live(session)
 
 
 # GET /api/markets/flow/live 60초 메모리 캐시 — breadth/live와 동일한 이유
@@ -288,8 +350,13 @@ async def _warm_flow_live(session: AsyncSession) -> dict:
     collectors/live_refresh.py가 공유한다(모듈 docstring 참고). DB 폴백
     (`_fetch_flow_confirmed_for_market`)에 세션이 필요하므로 호출자가 세션을
     넘긴다 — 라우트는 요청 스코프 세션(Depends(get_session))을, live_refresh는
-    자체적으로 연 세션을 전달한다. 동작은 원래 라우트 핸들러 본문 그대로다
-    (순수 리팩토링, 2026-07-20)."""
+    자체적으로 연 세션을 전달한다.
+
+    **2026-07-20 버그 수정**: 장 마감이면(``market_closed``) 키움 라이브 호출을
+    아예 시도하지 않고 곧바로 DB 확정치 폴백으로 진행한다 — 예전에는
+    ``market_closed``를 응답 메타데이터로만 쓰고 실제로는 장 마감 여부와 무관하게
+    항상 키움을 먼저 호출했다(새벽에 탭을 열어두면 계속 키움을 두드리는 낭비/리스크).
+    장중이면 기존 동작 그대로(회귀 없음)."""
     now = time.monotonic()
     async with _flow_live_cache_lock:
         cached = _flow_live_cache["data"]
@@ -302,22 +369,40 @@ async def _warm_flow_live(session: AsyncSession) -> dict:
 
         result: dict[str, dict | None] = {"kospi": None, "kosdaq": None}
         errors: dict[str, str] = {}
-        try:
-            async with KiwoomClient() as client:
-                for market in ("kospi", "kosdaq"):
-                    try:
-                        result[market] = await _fetch_flow_live_for_market(client, market, today_kst)
-                    except Exception as e:  # noqa: BLE001 - 한 시장 실패가 다른 시장을 막지 않도록
-                        errors[market] = str(e)[:200]
-        except Exception as e:  # noqa: BLE001 - 클라이언트 생성/토큰 발급 자체 실패(앱키 미설정 등)
-            errors["_client"] = str(e)[:200]
-            logger.warning("market_flow_live: KiwoomClient 실패, DB 폴백으로 진행: %s", e)
+        if market_closed:
+            logger.debug(
+                "market_flow_live: 장 마감(%s KST) — 키움 라이브 호출 생략, DB 폴백으로 진행",
+                now_kst.isoformat(),
+            )
+        else:
+            try:
+                async with KiwoomClient() as client:
+                    for market in ("kospi", "kosdaq"):
+                        try:
+                            result[market] = await _fetch_flow_live_for_market(client, market, today_kst)
+                        except Exception as e:  # noqa: BLE001 - 한 시장 실패가 다른 시장을 막지 않도록
+                            errors[market] = str(e)[:200]
+            except Exception as e:  # noqa: BLE001 - 클라이언트 생성/토큰 발급 자체 실패(앱키 미설정 등)
+                errors["_client"] = str(e)[:200]
+                logger.warning("market_flow_live: KiwoomClient 실패, DB 폴백으로 진행: %s", e)
 
         for market in ("kospi", "kosdaq"):
             if result.get(market) is None:
                 result[market] = await _fetch_flow_confirmed_for_market(session, market)
 
         if result.get("kospi") is None and result.get("kosdaq") is None:
+            if market_closed:
+                # 장 마감 + DB도 아직 없음(배치 미실행)은 "소스 장애"가 아니라 "아직
+                # 없음"이므로 502가 아니다(breadth/live와 동일한 정책, 2026-07-20).
+                payload = {
+                    "kospi": None,
+                    "kosdaq": None,
+                    "market_closed": True,
+                    "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                }
+                _flow_live_cache["data"] = payload
+                _flow_live_cache["ts"] = now
+                return payload
             raise HTTPException(502, f"market flow live fetch failed: {errors}")
 
         payload = {
@@ -339,7 +424,9 @@ async def market_flow_live(session: AsyncSession = Depends(get_session)):
     캐시로 감싼다(모듈 docstring 참고 — ka10063 대신 이 TR을 쓰는 이유). 시장별로
     독립 처리해 한쪽이 실패해도 다른 쪽은 정상 반환하고, 라이브 호출이 실패한
     시장은 market_flow DB의 최신 확정치로 폴백한다(``provisional: false``).
-    두 시장 다 라이브·폴백 전부 실패하면 502. 실제 캐시 채우기는
+    두 시장 다 라이브·폴백 전부 실패하면 502. **장 마감이면 키움 호출 자체를
+    생략하고 곧바로 DB 확정치로 응답한다**(2026-07-20 버그 수정,
+    `_warm_flow_live` docstring 참고). 실제 캐시 채우기는
     `_warm_flow_live(session)`가 담당한다(live_refresh 스케줄러와 공유).
 
     Returns ``{"kospi": {...}|None, "kosdaq": {...}|None, "market_closed": bool,
@@ -376,16 +463,45 @@ def _parse_attention_row(row: dict) -> dict | None:
     }
 
 
+# attention은 DB에 절대 저장하지 않는 실시간 전용 지표라(§3.5) market_flow/market_breadth
+# 같은 DB 확정치 폴백이 없다. 대신 "마지막 성공 캐시"를 별도로 들고 있다가 장 마감
+# 시 그 내용을 재사용한다(2026-07-20 버그 수정) — `_attention_cache`(TTL 캐시)는 장
+# 마감 응답도 그대로 캐싱하므로, 장이 다시 열려도 최대 TTL만큼 갱신이 늦어질 수 있는
+# 반면, 이 last-good 캐시는 오직 키움 라이브 호출이 실제로 성공했을 때만 갱신된다.
+_attention_last_good: dict[str, object] = {"data": None}
+
+
 async def _warm_attention(session: AsyncSession) -> dict:
     """attention 캐시를 채우고 payload를 반환한다 — 라우트 핸들러와
     collectors/live_refresh.py가 공유한다(모듈 docstring 참고). `stocks` 테이블
     조인에 세션이 필요하므로 호출자가 세션을 넘긴다(flow/live와 동일한 이유).
-    동작은 원래 라우트 핸들러 본문 그대로다(순수 리팩토링, 2026-07-20)."""
+
+    **2026-07-20 버그 수정**: 장 마감이면 키움 호출을 아예 시도하지 않는다.
+    attention은 DB 저장이 없는 실시간 전용 지표라(§3.5) market_flow/market_breadth
+    같은 확정치 폴백이 없으므로, 대신 마지막으로 성공한 라이브 응답(`_attention_last_good`)을
+    재사용해 ``market_closed: true``로 표시한다 — 그마저 없으면(기동 직후 장 마감)
+    빈 rows + market_closed로 응답한다(502 아님)."""
     now = time.monotonic()
     async with _attention_cache_lock:
         cached = _attention_cache["data"]
         if cached is not None and (now - _attention_cache["ts"]) < _ATTENTION_CACHE_TTL_SECONDS:
             return cached
+
+        now_kst = dt.datetime.now(KST)
+        if _market_closed_kst(now_kst):
+            last_good = _attention_last_good["data"]
+            if last_good is not None:
+                payload = {**last_good, "market_closed": True}
+            else:
+                payload = {
+                    "rows": [],
+                    "qry_tp": "4",
+                    "queried_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "market_closed": True,
+                }
+            _attention_cache["data"] = payload
+            _attention_cache["ts"] = now
+            return payload
 
         try:
             async with KiwoomClient() as client:
@@ -425,9 +541,11 @@ async def _warm_attention(session: AsyncSession) -> dict:
             "rows": rows,
             "qry_tp": "4",
             "queried_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "market_closed": False,
         }
         _attention_cache["data"] = payload
         _attention_cache["ts"] = now
+        _attention_last_good["data"] = payload
         return payload
 
 
@@ -447,3 +565,81 @@ async def market_attention_live(session: AsyncSession = Depends(get_session)):
     (``market``은 ``"kospi"``/``"kosdaq"``/``None``, 소문자).
     """
     return await _warm_attention(session)
+
+
+# GET /api/markets/futures-flow/live 5~10분 메모리 캐시 (PLAN.md §4.7, 모듈
+# docstring 참고) — breadth/live·flow/live와 동일한 패턴이지만 독립 캐시를 쓴다.
+_FUTURES_FLOW_LIVE_TTL_SECONDS = 420  # 7분 — collectors/live_refresh.py 신규 인터벌 잡과 맞춘다
+_futures_flow_live_cache: dict[str, object] = {"ts": 0.0, "data": None}
+_futures_flow_live_cache_lock = asyncio.Lock()
+
+
+def _fetch_futures_flow_blocking(target_date: dt.date) -> dict | None:
+    return naver_futures_flow.fetch_futures_flow(target_date)
+
+
+async def _warm_futures_flow_live() -> dict:
+    """futures-flow/live 캐시를 채우고 payload를 반환한다 — 라우트 핸들러와
+    collectors/live_refresh.py의 5~10분 인터벌 잡이 공유한다. 장 마감이면
+    네이버 호출을 생략하고 마지막 캐시(있으면)를 ``market_closed: true``로
+    재사용한다 — 신규 5~10분 티어 전체의 기본 원칙(2026-07-20, breadth/flow/attention
+    라이브와 동일한 게이트)."""
+    now = time.monotonic()
+    async with _futures_flow_live_cache_lock:
+        cached = _futures_flow_live_cache["data"]
+        if cached is not None and (now - _futures_flow_live_cache["ts"]) < _FUTURES_FLOW_LIVE_TTL_SECONDS:
+            return cached
+
+        now_kst = dt.datetime.now(KST)
+        if _market_closed_kst(now_kst):
+            if cached is not None:
+                payload = {**cached, "market_closed": True}
+            else:
+                payload = {
+                    "date": now_kst.date().isoformat(),
+                    "investors": {},
+                    "market_closed": True,
+                    "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                }
+            _futures_flow_live_cache["data"] = payload
+            _futures_flow_live_cache["ts"] = now
+            return payload
+
+        today_kst = now_kst.date()
+        try:
+            result = await asyncio.to_thread(_fetch_futures_flow_blocking, today_kst)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f"futures-flow live fetch failed: {str(e)[:200]}") from e
+
+        if result is None:
+            investors: dict[str, dict] = {}
+            date = today_kst.isoformat()
+        else:
+            investors = _serialize_flow_investors(result["flows"])
+            date = result["date"].isoformat()
+
+        payload = {
+            "date": date,
+            "investors": investors,
+            "market_closed": False,
+            "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        _futures_flow_live_cache["data"] = payload
+        _futures_flow_live_cache["ts"] = now
+        return payload
+
+
+@router.get("/api/markets/futures-flow/live")
+async def futures_flow_live():
+    """K200 선물 투자자별 순매수 장중 라이브(PLAN.md §4.7, 2026-07-20 실측 편입).
+
+    네이버 모바일 트렌드 API를 온디맨드로 재조회해 7분 메모리 캐시로 감싼다
+    (market_flow DB에는 쓰지 않는다 — §3.5 원칙, EOD 확정치는 여전히
+    collectors/futures_flow.py 일별 배치가 담당). 휴장/데이터 없음이면
+    ``investors``가 빈 dict. **장 마감이면 네이버 호출을 생략**하고 마지막 캐시를
+    ``market_closed: true``로 재사용한다(`_warm_futures_flow_live` docstring 참고).
+
+    Returns ``{"date": iso8601, "investors": {투자자명: {net_value, net_volume}},
+    "market_closed": bool, "cached_at": iso8601}``.
+    """
+    return await _warm_futures_flow_live()
