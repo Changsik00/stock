@@ -278,6 +278,20 @@ inds_cd 001/101 기준, `.env` 실전 키, 총 호출 수 약 30건).
 - **09:00 개장 후 갱신 여부**: 이번 조사는 08시(개장 전)에 수행되어 즉시
   확인하지 못했다 — 라우터 구현 후 09:00 이후 재호출로 별도 검증 예정
   (아래 라우터 모듈의 실측 기록 참고).
+
+## ka20005 가격 필드 100배 스케일 버그 (2026-07-21, 대시보드 지수 타일 라이브화 작업 중 발견)
+
+`ka20005`(업종분봉차트)의 `cur_prc`/`open_pric`/`high_pric`/`low_pric`은 **개별
+종목(ka10080)과 달리 index_ohlcv/네이버 fchart 대비 100배 스케일**이다 — 지수를
+소수점 2자리까지 정수로 표현하는 것으로 보인다. 실측: 2026-07-21 09:00 첫 봉
+`open_pric="+655388"`가 같은 순간 index_ohlcv의 코스피 오늘 시가 `6553.88`
+(655388/100)과 정확히 일치. `parse_minute_chart_rows()`는 이 배율을 모른 채
+절대값만 반환한다 — `MarketPage.jsx`의 지수 분봉 캔들(`fetchMarketIntraday`)은
+그 안에서 상대적으로만 쓰여(캔들 모양 자체는 스케일과 무관) 지금까지 드러나지
+않았지만, index_ohlcv 확정 종가와 절대값으로 직접 비교해야 하는 소비처(예:
+`routers/markets.py`의 `GET /api/markets/index-tiles/live`)는 반드시 100으로
+나눠야 한다 — 해당 라우터의 `_KA20005_PRICE_SCALE` 상수 참고. 코스피/코스닥 둘 다
+동일하게 적용된다(개별 종목은 원화 정수값이라 이 배율이 없다).
 """
 
 from __future__ import annotations
@@ -1067,6 +1081,16 @@ def _parse_minute_price(raw: Any) -> int | None:
         return None
 
 
+# ka20005(업종분봉차트) 전용 가격 스케일 보정 — 모듈 docstring "ka20005 가격 필드
+# 100배 스케일 버그" 절 참고. ka10080(개별 종목 분봉)은 이 배율이 없다(정상).
+# 대시보드 지수 타일 라이브화 작업(2026-07-21) 중 발견됐는데, 처음엔 그 작업의
+# 라우터 안에서만 국소적으로(÷100) 보정했다가 시장 탭의 기존 분봉 차트(같은
+# 공용 파서를 쓰는 `/api/markets/{market}/intraday`)는 그대로 100배로 남아있던
+# 걸 뒤늦게 발견해 여기 공용 파서로 옮겼다 — 소비자가 몇 곳이든 한 곳만 고치면
+# 되도록.
+_KA20005_PRICE_SCALE = 100
+
+
 def parse_minute_chart_rows(data: dict[str, Any], api_id: str) -> list[dict[str, Any]]:
     """ka10080/ka20005 공통 응답(body) -> "오늘"(최신 날짜) 하루치 분봉,
     오름차순(과거->최신)으로 정렬해 반환한다.
@@ -1074,6 +1098,9 @@ def parse_minute_chart_rows(data: dict[str, Any], api_id: str) -> list[dict[str,
     한 콜 응답에는 여러 거래일치가 섞여 있어(모듈 docstring "하루 커버리지" 절)
     가장 최근 날짜(`cntr_tm[:8]`의 최댓값)만 남긴다. 원본 행 순서는 최신이
     먼저(내림차순)라 프론트 캔들 컨벤션(왼쪽=과거)에 맞춰 뒤집는다.
+
+    ka20005는 가격 필드가 실제 지수값의 100배로 온다(모듈 docstring 참고) —
+    api_id가 ka20005이면 여기서 ÷100 보정까지 마치고 반환한다(ka10080은 그대로).
 
     Returns ``[{"date": "YYYYMMDD", "time": "HHMM", "timestamp": iso8601(+09:00),
     "open", "high", "low", "close", "volume"}, ...]`` — 빈 응답이면 빈 리스트.
@@ -1086,6 +1113,14 @@ def parse_minute_chart_rows(data: dict[str, Any], api_id: str) -> list[dict[str,
     latest_date = max(r["cntr_tm"][:8] for r in raw_rows if r.get("cntr_tm"))
     today_rows = [r for r in raw_rows if (r.get("cntr_tm") or "").startswith(latest_date)]
     today_rows.sort(key=lambda r: r["cntr_tm"])
+
+    def _price(raw: Any) -> float | int | None:
+        value = _parse_minute_price(raw)
+        if value is None:
+            return None
+        if api_id == "ka20005":
+            return round(value / _KA20005_PRICE_SCALE, 2)
+        return value
 
     out: list[dict[str, Any]] = []
     for r in today_rows:
@@ -1104,10 +1139,10 @@ def parse_minute_chart_rows(data: dict[str, Any], api_id: str) -> list[dict[str,
                 "date": latest_date,
                 "time": time_str,
                 "timestamp": iso_ts,
-                "open": _parse_minute_price(r.get("open_pric")),
-                "high": _parse_minute_price(r.get("high_pric")),
-                "low": _parse_minute_price(r.get("low_pric")),
-                "close": _parse_minute_price(r.get("cur_prc")),
+                "open": _price(r.get("open_pric")),
+                "high": _price(r.get("high_pric")),
+                "low": _price(r.get("low_pric")),
+                "close": _price(r.get("cur_prc")),
                 "volume": volume,
             }
         )

@@ -70,12 +70,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..clients import naver_breadth, naver_futures_flow
+from ..clients import naver_breadth, naver_futures_flow, naver_index
 from ..clients.kiwoom import MINUTE_CHART_INTERVALS, KiwoomClient, parse_minute_chart_rows
 from ..collectors.market_flow import fetch_live_flow
 from ..db import get_session
 from ..market_hours import KST, is_market_closed as _market_closed_kst
-from ..models import MarketBreadth, MarketFlow, Stock
+from ..models import IndexOhlcv, MarketBreadth, MarketFlow, Stock
 from ..services import DB_MARKET, get_market_series_from_db
 
 logger = logging.getLogger(__name__)
@@ -734,3 +734,193 @@ async def market_intraday(market: str, interval: int = Query(..., description="�
     if market not in INTRADAY_INDEX_CD:
         raise HTTPException(400, f"market must be one of {sorted(INTRADAY_INDEX_CD)} + ['futures'(501)]")
     return await _warm_market_intraday(market, interval)
+
+
+# GET /api/markets/index-tiles/live (2026-07-21, 대시보드 지수 타일 1D 실시간화) — 대시보드
+# 상단 "지수" 타일(코스피/코스닥/선물) 전용, 60초 메모리 캐시. 기존 문제: DashboardPage의
+# 지수 타일이 fetchMarketSeries(3M EOD, index_ohlcv 일별 배치)의 마지막 봉을 값으로 썼다
+# — 갱신 자체가 없었고(setInterval 없음), 갱신되더라도 하루 1회 확정치 기준이었다.
+#
+# 코스피/코스닥은 위 `_warm_market_intraday(market, 1)`(ka20005 1분봉)을 그대로
+# 재사용한다 — 별도 키움 호출을 새로 만들지 않고 캐시도 공유한다. 마지막 봉의 종가를
+# 현재가로 쓴다. 선물(K200)은 분봉 소스가 없어(위 모듈 주석 "futures는 501" 절)
+# routers/basis.py의 basis/live와 동일한 방식으로 clients/naver_index.py의 "오늘" 일봉을
+# 온디맨드 재조회한다 — 2026-07-20 실측(basis.py 모듈 docstring)에서 이 봉이 체결마다
+# 갱신되는 진짜 장중 캔들임을 이미 확인했다.
+#
+# 전일종가 대비 등락률은 세 시장 모두 `get_market_series_from_db(session, market, 1)`
+# (index_ohlcv 확정치, DB_MARKET 매핑 재사용)의 최신 확정 종가를 prev_close로 써서
+# 계산한다 — 장중에는 아직 오늘자 배치가 안 돌았으므로 이 값이 정확히 "어제 종가"다.
+#
+# 장 마감 게이트(breadth/live·flow/live·attention과 동일한 2026-07-20 원칙): 장
+# 마감이면 키움/네이버를 아예 호출하지 않고, 세 시장 모두 `get_market_series_from_db`의
+# 최신 확정치(EOD close+changeRate)로 즉시 응답한다.
+_INDEX_TILES_CACHE_TTL_SECONDS = 60
+_index_tiles_cache: dict[str, object] = {"ts": 0.0, "data": None}
+_index_tiles_cache_lock = asyncio.Lock()
+
+
+# ka20005(업종분봉차트요청) 가격 필드 스케일 버그(2026-07-21 실측, 이 작업 중 발견,
+# clients/kiwoom.py의 "가격 필드 부호 인코딩 주의" 절에는 없던 사실) — cur_prc 등
+# 가격 필드가 index_ohlcv(및 네이버 fchart) 대비 **100배** 스케일이다(예: 09:00
+# 첫 봉 open_pric="+655388" vs 같은 순간 index_ohlcv 오늘 시가 6553.88). 개별
+# 종목(ka10080)은 이 배율이 없고 지수(ka20005)만 해당한다.
+#
+# **2026-07-21 수정**: 처음엔 이 라우터 안에서만(÷100) 국소적으로 보정했는데,
+# 같은 원본 파서(`parse_minute_chart_rows`)를 쓰는 시장 탭의 기존 분봉 차트
+# (`/api/markets/{market}/intraday`, MarketPage.jsx)는 그대로 100배 값을 내려주고
+# 있던 걸 뒤늦게 발견했다 — 캔들 "모양"은 스케일과 무관해 안 보였지만, Y축 눈금·
+# 크로스헤어 범례(시/고/저/종 절대값)에는 655,388.00처럼 그대로 노출되는 실제
+# 버그였다. `clients/kiwoom.py`의 `parse_minute_chart_rows`(공용 파서)로 보정을
+# 옮겨 소비처가 몇 곳이든 한 곳만 고치면 되게 했다 — 이 아래 함수는 이미 보정된
+# 값을 받으므로 여기서 다시 나누면 안 된다(이중 보정 버그 방지).
+
+
+async def _index_tile_confirmed(session: AsyncSession, market: str) -> dict | None:
+    """index_ohlcv 최신 확정치(EOD) — 장 마감 폴백 전용(그날 배치가 끝난 뒤엔 오늘
+    날짜가 "확정치"이므로 날짜 제한 없이 최신 행을 그대로 쓴다)."""
+    rows = await get_market_series_from_db(session, market, 1)
+    if not rows:
+        return None
+    row = rows[-1]
+    if row["close"] is None:
+        return None
+    return {
+        "close": row["close"],
+        "change_rate": row["changeRate"],
+        "date": row["date"],
+        "prev_close": None,
+        "source": "index_ohlcv_confirmed",
+    }
+
+
+async def _index_tile_prev_close(session: AsyncSession, market: str) -> float | None:
+    """라이브 등락률 계산용 "어제" 확정 종가 — index_ohlcv에서 **오늘 날짜보다 이전**
+    최신 행만 본다. `_index_tile_confirmed`(get_market_series_from_db)는 오늘 날짜
+    행이 이미 있으면(배치가 당겨 돌았거나 개발/시드 데이터 등) 그 행을 그대로
+    반환해 버려 "오늘 대 오늘"을 비교하게 되는 함정이 있다 — 여기서는 명시적으로
+    오늘을 제외해 반드시 전일 종가만 prev_close로 쓴다."""
+    db_market = DB_MARKET.get(market, market)
+    today = dt.date.today()
+    stmt = (
+        select(IndexOhlcv)
+        .where(IndexOhlcv.market == db_market, IndexOhlcv.date < today)
+        .order_by(IndexOhlcv.date.desc())
+        .limit(1)
+    )
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    if row is None or row.close is None:
+        return None
+    return float(row.close)
+
+
+async def _index_tile_from_intraday(session: AsyncSession, market: str) -> dict | None:
+    """kospi/kosdaq 지수 타일 라이브 값 — ka20005 1분봉(캐시 공유) 마지막 봉 종가
+    (parse_minute_chart_rows가 이미 100배 스케일을 보정해 반환함, 위 주석 참고) +
+    index_ohlcv 전일 확정 종가 대비 등락률. 실패하면 None(호출자가 DB 확정치로 폴백)."""
+    try:
+        payload = await _warm_market_intraday(market, 1)
+    except Exception as e:  # noqa: BLE001 - 라이브 실패가 다른 시장/폴백을 막지 않도록
+        logger.warning("index-tiles live: %s intraday fetch failed: %s", market, e)
+        return None
+    bars = payload.get("bars") or []
+    if not bars:
+        return None
+    close = bars[-1].get("close")
+    if close is None:
+        return None
+    prev_close = await _index_tile_prev_close(session, market)
+    change_rate = round((close - prev_close) / prev_close * 100, 4) if prev_close else None
+    return {
+        "close": close,
+        "change_rate": change_rate,
+        "date": payload.get("date"),
+        "time": bars[-1].get("time"),
+        "prev_close": prev_close,
+        "source": "kiwoom_ka20005_1m",
+    }
+
+
+def _fetch_futures_today_blocking(start: dt.date, end: dt.date) -> list[dict]:
+    return naver_index.fetch_index_series("k200_futures", start, end)
+
+
+async def _index_tile_futures_live(session: AsyncSession) -> dict | None:
+    """선물(K200) 지수 타일 라이브 값 — clients/naver_index.py "오늘" 일봉(basis/live와
+    같은 소스, 스케일 문제 없음) 마지막 행 종가 + index_ohlcv 전일 확정 종가 대비
+    등락률."""
+    today = dt.date.today()
+    start = today - dt.timedelta(days=5)
+    try:
+        rows = await asyncio.to_thread(_fetch_futures_today_blocking, start, today)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("index-tiles live: futures fetch failed: %s", e)
+        return None
+    if not rows:
+        return None
+    last = rows[-1]
+    prev_close = await _index_tile_prev_close(session, "futures")
+    close = last["close"]
+    change_rate = round((close - prev_close) / prev_close * 100, 4) if prev_close else None
+    return {
+        "close": close,
+        "change_rate": change_rate,
+        "date": last["date"].isoformat(),
+        "time": None,
+        "prev_close": prev_close,
+        "source": "naver_fchart_today_bar",
+    }
+
+
+async def _warm_index_tiles_live(session: AsyncSession) -> dict:
+    """index-tiles/live 캐시를 채우고 payload를 반환한다 — 라우트 핸들러와
+    collectors/live_refresh.py의 60초 인터벌 잡이 공유한다(이 파일의 다른 라이브
+    엔드포인트와 동일한 warm 함수 + TTL + Lock 패턴)."""
+    now = time.monotonic()
+    async with _index_tiles_cache_lock:
+        cached = _index_tiles_cache["data"]
+        if cached is not None and (now - _index_tiles_cache["ts"]) < _INDEX_TILES_CACHE_TTL_SECONDS:
+            return cached
+
+        now_kst = dt.datetime.now(KST)
+        market_closed = _market_closed_kst(now_kst)
+
+        result: dict[str, dict | None] = {"kospi": None, "kosdaq": None, "futures": None}
+        if not market_closed:
+            for market in ("kospi", "kosdaq"):
+                result[market] = await _index_tile_from_intraday(session, market)
+            result["futures"] = await _index_tile_futures_live(session)
+
+        # 장 마감이거나 라이브 호출이 실패한 시장만 DB 확정치로 채운다.
+        for market in ("kospi", "kosdaq", "futures"):
+            if result.get(market) is None:
+                result[market] = await _index_tile_confirmed(session, market)
+
+        payload = {
+            "kospi": result.get("kospi"),
+            "kosdaq": result.get("kosdaq"),
+            "futures": result.get("futures"),
+            "market_closed": market_closed,
+            "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        _index_tiles_cache["data"] = payload
+        _index_tiles_cache["ts"] = now
+        return payload
+
+
+@router.get("/api/markets/index-tiles/live")
+async def index_tiles_live(session: AsyncSession = Depends(get_session)):
+    """대시보드 상단 "지수" 타일(코스피/코스닥/선물) 전용 라이브 — 60초 메모리 캐시
+    (모듈 주석 "대시보드 지수 타일 1D 실시간화" 절 참고).
+
+    코스피/코스닥은 `/api/markets/{market}/intraday?interval=1`과 캐시를 공유하는
+    ka20005 1분봉의 마지막 종가, 선물은 clients/naver_index.py의 "오늘" 일봉(체결마다
+    갱신, basis/live와 동일 소스) 마지막 종가를 쓴다. 등락률은 세 시장 모두
+    index_ohlcv 최신 확정 종가(prev_close) 대비. **장 마감이면 키움/네이버 호출을
+    생략**하고 세 시장 모두 index_ohlcv 확정치(EOD)로 즉시 응답한다.
+
+    Returns ``{"kospi": {close, change_rate, date, time, prev_close, source}|None,
+    "kosdaq": {...}|None, "futures": {...}|None, "market_closed": bool,
+    "cached_at": iso8601}``.
+    """
+    return await _warm_index_tiles_live(session)

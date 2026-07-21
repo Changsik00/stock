@@ -462,10 +462,21 @@ def test_parse_minute_chart_rows_keeps_only_latest_date_ascending():
 
 
 def test_parse_minute_chart_rows_sector_uses_inds_key():
+    # ka20005는 가격이 실제 지수값의 100배로 온다(2026-07-21 실측 확정,
+    # parse_minute_chart_rows 모듈 docstring "ka20005 가격 필드 100배 스케일
+    # 버그" 절 참고) — 651627 -> 6516.27로 보정돼 나와야 한다.
     data = {"inds_min_pole_qry": [{"cur_prc": "+651627", "trde_qty": "16249", "cntr_tm": "20260720153000"}]}
     bars = parse_minute_chart_rows(data, "ka20005")
     assert len(bars) == 1
-    assert bars[0]["close"] == 651627
+    assert bars[0]["close"] == 6516.27
+
+
+def test_parse_minute_chart_rows_stock_no_scale_correction():
+    # ka10080(개별 종목)은 100배 스케일이 없다 — 원화 정수 그대로 나와야 한다.
+    data = {"stk_min_pole_chart_qry": [{"cur_prc": "+255000", "trde_qty": "1000", "cntr_tm": "20260720153000"}]}
+    bars = parse_minute_chart_rows(data, "ka10080")
+    assert len(bars) == 1
+    assert bars[0]["close"] == 255000
 
 
 def test_parse_minute_chart_rows_handles_missing_array():
