@@ -95,6 +95,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import logging
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -107,6 +108,8 @@ from ..market_hours import KST, is_nxt_closed
 from ..models import EtfStat, FlowPath, FlowRank, MarketBreadth, Stock, ValueRank
 from ..sentiment import breadth_score, compute_sentiment, etf_score, flow_score
 from .markets import _warm_breadth_live
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["markets"])
 
@@ -557,7 +560,16 @@ async def _warm_value_rank_live() -> dict:
     NXT에서 개별 종목이 계속 거래되므로 이 라우트도 20:00까지 계속 조회한다.
     그 시간대까지도 마감이면 네이버를 아예 호출하지 않는다 — DB 폴백이 없으므로
     마지막 캐시(있으면)를 ``market_closed: true``로 재사용하고, 캐시조차 없으면
-    빈 값으로 응답한다."""
+    빈 값으로 응답한다.
+
+    **2026-07-22 추가 수정(NXT 프리마켓 공백)**: 08:00~08:50 NXT 프리마켓은
+    ``is_nxt_closed`` 기준 "장중"이라 위 조기 반환을 안 타는데, 이 소스(네이버
+    거래대금 순위)는 정규장(09:00) 거래량 기반이라 정규장 시작 전엔 늘
+    빈 응답(totalCount=0)이다 — 사용자가 매일 아침 이 카드가 502로 깨져
+    보인다고 지적해 발견했다. 소스가 빈 응답이면(양쪽 시장 다 실패) 더는
+    502를 던지지 않고, 위와 동일한 "마지막 캐시 재사용, 없으면 빈 값" 폴백을
+    쓴다(아래 ``if not rows_all`` 분기 참고) — "장 마감"과 "정규장 아직 안 열림"을
+    프런트 입장에서 구분할 필요가 없어 같은 ``market_closed`` 플래그로 충분하다."""
     now = time.monotonic()
     async with _value_rank_live_cache_lock:
         cached = _value_rank_live_cache["data"]
@@ -611,7 +623,31 @@ async def _warm_value_rank_live() -> dict:
                 )
 
         if not rows_all:
-            raise HTTPException(502, f"value-rank live fetch failed: {errors}")
+            # 2026-07-22 수정 — NXT 프리마켓(08:00~08:50)은 is_nxt_closed 기준
+            # "장중"이라 위 조기 반환을 안 타는데, 이 소스(네이버 거래대금 순위)는
+            # 정규장(09:00) 거래량 기반이라 정규장 시작 전엔 totalCount=0으로
+            # 아무 것도 안 준다 — 사용자 실측 지적("NXT 프리장을 소화 못 한다,
+            # 502로 카드가 아예 깨짐"). 캐시가 있으면 어제 마지막 값을
+            # market_closed=True로 재사용(위 is_nxt_closed 분기와 동일한 폴백),
+            # 캐시조차 없으면(기동 직후) 빈 값으로 응답한다 — 정규장이 열리는
+            # 순간 다음 폴링에서 자동으로 정상 데이터로 갱신된다. 소스가 진짜
+            # 죽었을 때(양쪽 다 실패)와 "아직 정규장 전이라 없음"을 여기서는
+            # 구분하지 않는다 — 둘 다 "지금은 신선한 값이 없다"는 같은 사용자
+            # 경험이라 프런트가 이미 아는 market_closed 플래그 하나로 충분하다.
+            logger.warning("value-rank live: 소스 빈 응답(정규장 전일 가능성) — %s", errors)
+            cached = _value_rank_live_cache["data"]
+            if cached is not None:
+                payload = {**cached, "market_closed": True}
+            else:
+                payload = {
+                    "date": None,
+                    "rows": [],
+                    "market_closed": True,
+                    "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                }
+            _value_rank_live_cache["data"] = payload
+            _value_rank_live_cache["ts"] = now
+            return payload
 
         rows_all.sort(key=lambda r: r["value"] if r["value"] is not None else -1, reverse=True)
         for i, row in enumerate(rows_all, start=1):
