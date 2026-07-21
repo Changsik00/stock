@@ -7,9 +7,11 @@ import {
   fetchBreadth,
   fetchBreadthLive,
   fetchDerivativeFlow,
+  fetchFlowIntradayAccumulated,
   fetchFlowLive,
   fetchFlowPath,
   fetchFlowRank,
+  fetchForeignPositionIntradayAccumulated,
   fetchFuturesFlowLive,
   fetchGroups,
   fetchGroupsLive,
@@ -30,6 +32,7 @@ import FlowChart from '../components/FlowChart'
 import FlowPathTable from '../components/FlowPathTable'
 import FlowRankTable from '../components/FlowRankTable'
 import GroupTreemap from '../components/GroupTreemap'
+import IntradayFlowChart from '../components/IntradayFlowChart'
 import MacroChart from '../components/MacroChart'
 import MarketFundChart from '../components/MarketFundChart'
 import Modal from '../components/Modal'
@@ -79,6 +82,15 @@ const DEFAULT_FLOW_DAYS = 90
 // 시장 탭과 동일하게 90일 기본으로 시작한다.
 const FOREIGN_POSITION_TILE_DAYS = 10
 const DEFAULT_FOREIGN_POSITION_DAYS = 90
+// 투자자별 수급 요약·외인 양손 상세 모달의 3M(EOD)/1D(오늘 장중 누적) 토글
+// (PLAN.md §5.4-4) — StockDetailModal.jsx의 INTRADAY_OPTIONS 토글과 같은
+// toggle-row/toggle-chip 패턴을 재사용한다. 기본값은 '1D'다(2026-07-21 요구사항
+// 갱신 — 모달을 열면 오늘 장중 누적을 먼저 보여주고, 3M은 사용자가 명시적으로
+// 전환해야 보인다).
+const CHART_MODE_OPTIONS = [
+  { key: '1D', label: '1D' },
+  { key: '3M', label: '3M' },
+]
 // 프로그램매매 차익 순매수(macro_series prog_arb_*, PLAN.md §4.5-4) — 코스피+코스닥
 // 합산해서 "프로그램 차익 순매수" 타일 하나로 보여준다(신용융자 타일의 creditLoanSum과
 // 동일한 관례).
@@ -548,12 +560,18 @@ function MacroModal() {
 }
 
 function FlowSummaryModal() {
+  const [chartMode, setChartMode] = useState(STATIC_DATA ? '3M' : '1D')
   const [days, setDays] = useState(DEFAULT_FLOW_DAYS)
   const [flows, setFlows] = useState({})
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
+  const [intraday, setIntraday] = useState(null)
+  const [intradayLoading, setIntradayLoading] = useState(false)
+  const [intradayError, setIntradayError] = useState(null)
+
   useEffect(() => {
+    if (chartMode !== '3M') return undefined
     let cancelled = false
     setLoading(true)
     setError(null)
@@ -570,20 +588,81 @@ function FlowSummaryModal() {
     return () => {
       cancelled = true
     }
-  }, [days])
+  }, [chartMode, days])
+
+  // 1D(오늘 장중 누적) — PLAN.md §5.4-3/4. STATIC_DATA(GH Pages 정적 배포)에는
+  // 로컬 전용 라이브 폴링이 없어 이 탭 자체를 숨기므로(아래 렌더 분기) 여기서도
+  // 요청하지 않는다. 모달이 열려 있는 동안 재폴링은 하지 않는다(스펙: "모달이
+  // 열릴 때마다 최신 적립분을 한 번 더 fetch"로 충분, setInterval 불필요).
+  useEffect(() => {
+    if (STATIC_DATA || chartMode !== '1D') return undefined
+    let cancelled = false
+    setIntradayLoading(true)
+    setIntradayError(null)
+    fetchFlowIntradayAccumulated()
+      .then((body) => {
+        if (!cancelled) setIntraday(body)
+      })
+      .catch((e) => {
+        if (!cancelled) setIntradayError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setIntradayLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [chartMode])
 
   const hasFlows = Object.keys(flows || {}).length > 0
+
+  // net_value는 백만원 단위(market_flow와 동일) — FlowChart.jsx eok() 관례와
+  // 통일해 억원으로 변환한 뒤 IntradayFlowChart에 넘긴다.
+  const intradaySeries = {}
+  for (const name of ['개인', '외국인', '기관계']) {
+    intradaySeries[name] = (intraday?.series?.[name] || []).map((p) => ({ time: p.time, value: p.value / 100 }))
+  }
 
   return (
     <div>
       <div className="toggle-hint" style={{ marginBottom: 8 }}>
         코스피+코스닥 합계 (선물 제외 — 투자자별 수급 미수집)
       </div>
-      <PeriodPicker value={days} onChange={setDays} />
-      {loading && <div className="state">불러오는 중…</div>}
-      {error && <div className="state error">{error}</div>}
-      {!loading && !error && hasFlows && <FlowChart flows={flows} />}
-      {!loading && !error && !hasFlows && <div className="state">표시할 데이터가 없습니다.</div>}
+      {!STATIC_DATA && (
+        <div className="toggle-row">
+          {CHART_MODE_OPTIONS.map((opt) => (
+            <button
+              key={opt.key}
+              type="button"
+              className={`toggle-chip ${chartMode === opt.key ? 'active' : ''}`}
+              onClick={() => setChartMode(opt.key)}
+            >
+              {opt.label}
+            </button>
+          ))}
+          <span className="toggle-hint">
+            {chartMode === '1D' ? '오늘 장중 누적(참고용) · 개인/외국인/기관계 60초 틱' : '일별 히스토리'}
+          </span>
+        </div>
+      )}
+
+      {chartMode === '3M' && (
+        <>
+          <PeriodPicker value={days} onChange={setDays} />
+          {loading && <div className="state">불러오는 중…</div>}
+          {error && <div className="state error">{error}</div>}
+          {!loading && !error && hasFlows && <FlowChart flows={flows} />}
+          {!loading && !error && !hasFlows && <div className="state">표시할 데이터가 없습니다.</div>}
+        </>
+      )}
+
+      {chartMode === '1D' && (
+        <>
+          {intradayLoading && !intraday && <div className="state">불러오는 중…</div>}
+          {intradayError && <div className="state error">{intradayError}</div>}
+          {!intradayError && intraday && <IntradayFlowChart series={intradaySeries} />}
+        </>
+      )}
     </div>
   )
 }
@@ -593,12 +672,18 @@ function FlowSummaryModal() {
 // 날짜 기준으로 병합한다 — CreditLoanChart(MarketFundChart.jsx)와 동일한 "여러 시리즈를
 // Map으로 합친 뒤 라인 여러 개를 겹쳐 그리는" 패턴.
 function ForeignPositionModal() {
+  const [chartMode, setChartMode] = useState(STATIC_DATA ? '3M' : '1D')
   const [days, setDays] = useState(DEFAULT_FOREIGN_POSITION_DAYS)
   const [rows, setRows] = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
+  const [intraday, setIntraday] = useState(null)
+  const [intradayLoading, setIntradayLoading] = useState(false)
+  const [intradayError, setIntradayError] = useState(null)
+
   useEffect(() => {
+    if (chartMode !== '3M') return undefined
     let cancelled = false
     setLoading(true)
     setError(null)
@@ -634,17 +719,81 @@ function ForeignPositionModal() {
     return () => {
       cancelled = true
     }
-  }, [days])
+  }, [chartMode, days])
+
+  // 1D(오늘 장중 누적) — PLAN.md §5.4-3/4, FlowSummaryModal과 동일한 패턴.
+  useEffect(() => {
+    if (STATIC_DATA || chartMode !== '1D') return undefined
+    let cancelled = false
+    setIntradayLoading(true)
+    setIntradayError(null)
+    fetchForeignPositionIntradayAccumulated()
+      .then((body) => {
+        if (!cancelled) setIntraday(body)
+      })
+      .catch((e) => {
+        if (!cancelled) setIntradayError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setIntradayLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [chartMode])
+
+  // net_value는 백만원 단위 — ForeignPositionChart.jsx가 이미 하던 /100 변환과
+  // 동일하게 억원으로 바꿔서 IntradayFlowChart에 넘긴다. 키를 "외국인"(현물)/
+  // "외인선물"로 두는 이유: IntradayFlowChart는 시리즈 이름을 INVESTOR_COLOR_VAR
+  // 조회 키로도 쓰므로, "외국인"으로 두면 3M 차트(ForeignPositionChart.jsx의
+  // SPOT_COLOR = INVESTOR_COLOR_VAR['외국인'])와 동일한 색이 자동으로 나오고,
+  // "외인선물"은 알 수 없는 키라 기본 색(var(--investor-6))으로 떨어져 3M
+  // 차트의 FUTURES_COLOR와 같은 색이 된다 — 두 임의 라벨을 썼다면 둘 다 기본색으로
+  // 겹쳐 구분이 안 됐을 것.
+  const intradaySeries = {
+    외국인: (intraday?.spot || []).map((p) => ({ time: p.time, value: p.value / 100 })),
+    외인선물: (intraday?.futures || []).map((p) => ({ time: p.time, value: p.value / 100 })),
+  }
 
   return (
     <div>
       <div className="toggle-hint" style={{ marginBottom: 8 }}>
         외인 현물(코스피+코스닥) · 선물(K200) 순매수 + 베이시스 — 참고 지표(중립 계기판, 함정 탐지기 아님)
       </div>
-      <PeriodPicker value={days} onChange={setDays} />
-      {loading && <div className="state">불러오는 중…</div>}
-      {error && <div className="state error">{error}</div>}
-      {!loading && !error && <ForeignPositionChart data={rows} />}
+      {!STATIC_DATA && (
+        <div className="toggle-row">
+          {CHART_MODE_OPTIONS.map((opt) => (
+            <button
+              key={opt.key}
+              type="button"
+              className={`toggle-chip ${chartMode === opt.key ? 'active' : ''}`}
+              onClick={() => setChartMode(opt.key)}
+            >
+              {opt.label}
+            </button>
+          ))}
+          <span className="toggle-hint">
+            {chartMode === '1D' ? '오늘 장중 누적(참고용) · 현물 60초, 선물 7분 틱' : '일별 히스토리 + 베이시스'}
+          </span>
+        </div>
+      )}
+
+      {chartMode === '3M' && (
+        <>
+          <PeriodPicker value={days} onChange={setDays} />
+          {loading && <div className="state">불러오는 중…</div>}
+          {error && <div className="state error">{error}</div>}
+          {!loading && !error && <ForeignPositionChart data={rows} />}
+        </>
+      )}
+
+      {chartMode === '1D' && (
+        <>
+          {intradayLoading && !intraday && <div className="state">불러오는 중…</div>}
+          {intradayError && <div className="state error">{intradayError}</div>}
+          {!intradayError && intraday && <IntradayFlowChart series={intradaySeries} />}
+        </>
+      )}
     </div>
   )
 }

@@ -252,6 +252,25 @@ export async function fetchFuturesFlowLive() {
   return getJson('/api/markets/futures-flow/live')
 }
 
+// GET /api/markets/flow/intraday-accumulated -> { date, series: {개인, 외국인,
+// 기관계: [{time: "HH:MM", value}]}, market_closed } (PLAN.md §5.4-2/3) — 새 외부
+// 호출 없이 서버가 이미 60초마다 flow/live를 워밍하는 김에 그 결과를 그날 메모리
+// 버퍼에 적립해 둔 "오늘 장중 누적" 시계열. 투자자별 수급 요약 모달의 1D 탭 전용.
+// 로컬 전용 기능(flowLive와 동일한 이유 — "오늘 장중" 자체가 정적 스냅샷으로 남길
+// 개념이 아니다), STATIC_DATA 대상 아님.
+export async function fetchFlowIntradayAccumulated() {
+  return getJson('/api/markets/flow/intraday-accumulated')
+}
+
+// GET /api/markets/foreign-position/intraday-accumulated -> { date, spot: [{time,
+// value}], futures: [{time, value}], market_closed } (PLAN.md §5.4-2/3) — 외인
+// 현물(flow/live의 "외국인" 시리즈 재사용)·선물(futures-flow/live, 7분 틱) 순매수
+// 오늘 장중 누적. 외인 양손 상세 모달의 1D 탭 전용. 로컬 전용 기능, STATIC_DATA
+// 대상 아님(위 fetchFlowIntradayAccumulated와 동일한 이유).
+export async function fetchForeignPositionIntradayAccumulated() {
+  return getJson('/api/markets/foreign-position/intraday-accumulated')
+}
+
 // GET /api/markets/basis?days=N -> { days, series: [{date, futures_close, kospi200_close,
 // basis, basis_pct}], latest: {date, backwardation, basis, basis_pct}, expiry: {date, d_day,
 // quadruple} } (PLAN.md §4.5-3/4.5-5) — K200 선물-현물 베이시스 + 다음 만기. latest/expiry는
