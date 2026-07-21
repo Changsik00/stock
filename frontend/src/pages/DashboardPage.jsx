@@ -2047,10 +2047,16 @@ export default function DashboardPage() {
         {/* 스켈핑 후보(PLAN.md §5.2) — 거래대금 상위(value-rank/live) + 실시간 관심순위
             (attention) 조합 스코어 상위. 참고용 스크리닝이지 매매 신호가 아니라는
             문구를 hint에 항상 노출한다(§5 전체 원칙). 행 클릭은 실시간 관심 TOP5와
-            동일하게 바로 종목 상세 모달로 이어진다. */}
+            동일하게 바로 종목 상세 모달로 이어진다.
+            2026-07-21 정직화: 후보군·점수·등락률·회전율은 전부 value-rank/live
+            (7분 캐시, routers/scalp.py 참고)에서 오므로 실제로는 7분 단위로만
+            바뀐다 — "관심 TOP" 배지(attention, 60초 캐시)만 1분 단위다. 예전
+            "1분 갱신"은 배지 하나의 주기를 리스트 전체의 주기인 것처럼 표시해
+            거짓이었다(실측: cached_at이 60~90초 간격 폴링에도 7분 동안
+            그대로였다가 7분 경계에서만 바뀜, 코드 리뷰 결과와도 일치). */}
         <Top5Card
           title="스켈핑 후보"
-          hint="참고용 스크리닝 — 매매 신호 아님 · 1분 갱신"
+          hint="참고용 스크리닝 — 매매 신호 아님 · 7분 갱신(관심 TOP 배지만 1분)"
           rows={scalpCandidates?.rows}
           onMore={() => setModal({ type: 'scalp', title: '스켈핑 후보 — 전체' })}
           renderRow={(row, i) => (
