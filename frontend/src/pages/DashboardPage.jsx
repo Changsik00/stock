@@ -2402,9 +2402,14 @@ export default function DashboardPage() {
           // MM-DD"로 항상 노출한다(수급 상위와 동일한 문구, staleHintLabel처럼
           // baseDate 대비 뒤처졌을 때만 표시하는 조건은 걸지 않는다 — 이 카드는
           // 배치 스냅샷이라 "언제 확정된 값인지"가 항상 의미 있는 정보이기 때문).
+          // 2026-07-21 추가: "확정 07-21"(오늘 날짜)이 뜨니 다른 라이브 카드처럼
+          // 계속 갱신될 거라고 오해하기 쉬웠다(사용자 지적: "몇 시간째 같았다") —
+          // 이 값의 재료(etf_holdings/etf_stats/flow_rank)가 전부 하루 1회
+          // 배치 산출물이라 원천적으로 하루 중 더 자주 바뀔 수 없다는 걸
+          // "일 1회"로 명시한다.
           hint={
-            <span title="기여 ETF마다 날짜가 다를 수 있습니다 — 배지에 마우스를 올려 확인">
-              유입
+            <span title="구성 ETF 보유내역·순유입 통계 자체가 하루 1회만 갱신되는 배치 산출물입니다 — 장중에는 더 자주 바뀌지 않습니다. 기여 ETF마다 기준 날짜가 다를 수 있으니 배지에 마우스를 올려 확인하세요.">
+              유입 · 일 1회 배치
               {flowPathTop?.date && (
                 <span className="stale-date"> · 확정 {mmdd(flowPathTop.date)}</span>
               )}
@@ -2471,13 +2476,16 @@ export default function DashboardPage() {
               clickable
               onClick={() => openStockModal(row.code, row.name, { market: row.market })}
             >
+              {/* 사용자 지적(2026-07-21): 카드 폭이 좁아 배지 4개(시장·회전율·스코어·
+                  관심TOP)가 이름칸을 다 밀어내 종목명이 안 보였다 — 회전율/스코어
+                  배지는 정보 밀도가 낮은 보조 정보라 "전체 보기" 모달(위 ScalpFullModal,
+                  가로 폭이 훨씬 넓음)에서만 유지하고, 압축 카드에서는 다른 3개 랭킹
+                  카드와 동일하게 배지 최대 2개(시장·관심TOP)만 남긴다. */}
               <span className="top5-row-name">
                 <span className="top5-row-label">
                   {i + 1}. {row.name || row.code}
                 </span>
                 {row.market && <Badge kind={row.market} />}
-                {turnoverBadgeLabel(row.turnover) && <Badge kind="info">{turnoverBadgeLabel(row.turnover)}</Badge>}
-                {scalpScoreBadgeLabel(row.score) && <Badge kind="info">{scalpScoreBadgeLabel(row.score)}</Badge>}
                 {row.in_attention_top && <Badge kind="live">관심 TOP</Badge>}
               </span>
               <span className={`top5-row-value ${rateClass(row.change_rate)}`}>{rateLabel(row.change_rate)}</span>
