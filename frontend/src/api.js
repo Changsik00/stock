@@ -313,6 +313,16 @@ export async function fetchMarketIntraday(market, interval) {
   return getJson(`/api/markets/${market}/intraday?interval=${interval}`)
 }
 
+// GET /api/markets/index-tiles/live -> { kospi: {close, change_rate, date, time,
+// prev_close, source}|null, kosdaq: {...}|null, futures: {...}|null, market_closed,
+// cached_at } — 대시보드 상단 "지수" 타일(코스피/코스닥/선물) 1D 실시간(60초 서버
+// 캐시, 2026-07-21). 코스피/코스닥은 ka20005 1분봉 마지막 종가, 선물은 네이버
+// fchart "오늘" 봉 마지막 종가 — 등락률은 셋 다 index_ohlcv 전일 확정 종가 대비.
+// 로컬 전용 기능(다른 라이브 엔드포인트와 동일한 이유), STATIC_DATA 대상 아님.
+export async function fetchIndexTilesLive() {
+  return getJson('/api/markets/index-tiles/live')
+}
+
 // GET /api/markets/scalp-candidates?limit=N -> { date, market_closed, cached_at,
 // rows: [{code, name, market, score, change_rate, turnover, in_attention_top,
 // value_rank_position}] } (PLAN.md §5.2) — 스켈핑 후보 스크리닝(참고용, 매매

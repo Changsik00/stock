@@ -13,6 +13,7 @@ import {
   fetchFuturesFlowLive,
   fetchGroups,
   fetchGroupsLive,
+  fetchIndexTilesLive,
   fetchMacroSeries,
   fetchMarketSeries,
   fetchScalpCandidates,
@@ -977,6 +978,12 @@ export default function DashboardPage() {
   // 지수 3종(코스피/코스닥/선물) — 타일 표시용 + 캔들 모달 기본 데이터를 겸한다.
   const [marketData, setMarketData] = useState({})
   const [marketLoading, setMarketLoading] = useState(true)
+  // 지수 3종 타일 1D 실시간(GET /api/markets/index-tiles/live, 60초 서버 캐시,
+  // 2026-07-21) — { kospi: {close, change_rate, date, time, prev_close, source}|null,
+  // kosdaq, futures, market_closed, cached_at }. marketData(3M EOD, 캔들 모달 기본
+  // 데이터)는 그대로 유지하고 타일 표시값만 이걸로 오버레이한다(아래 1분 티어 폴링에
+  // 편입, 별도 setInterval 신설 금지).
+  const [indexTilesLive, setIndexTilesLive] = useState(null)
 
   const [sentiment, setSentiment] = useState(null)
   const [breadth, setBreadth] = useState(null)
@@ -1144,10 +1151,23 @@ export default function DashboardPage() {
         })
     }
 
+    // 지수 3종 타일 1D 실시간(PLAN.md 작업 지시, 2026-07-21) — 기존 1분 티어에
+    // 편입(별도 setInterval 신설 금지). 실패 시 null로 두면 렌더 쪽이 자동으로
+    // marketData(3M EOD)의 마지막 봉으로 폴백한다(아래 렌더부 indexTileOf 참고).
+    function loadIndexTilesLive() {
+      return fetchIndexTilesLive()
+        .then((body) => {
+          if (!cancelled) setIndexTilesLive(body)
+        })
+        .catch(() => {
+          if (!cancelled) setIndexTilesLive(null)
+        })
+    }
+
     function load() {
       const tasks = [loadBreadth()]
       if (!STATIC_DATA) {
-        tasks.push(loadFlowLive(), loadAttentionTop(), loadScalpCandidates())
+        tasks.push(loadFlowLive(), loadAttentionTop(), loadScalpCandidates(), loadIndexTilesLive())
       }
       return Promise.all(tasks)
     }
@@ -1363,10 +1383,27 @@ export default function DashboardPage() {
       stock: { code, name, ...extra },
     })
 
-  // 지수 타일 + baseDate 계산이 공유하는 헬퍼 — marketData[key].prices의 마지막 값.
+  // 지수 타일 + baseDate 계산이 공유하는 헬퍼 — marketData[key].prices의 마지막 값
+  // (3M EOD, 캔들 모달 기본 데이터와 동일한 소스).
   const latestPriceOf = (key) => {
     const data = marketData[key]
     return data?.prices?.length ? data.prices[data.prices.length - 1] : null
+  }
+
+  // 지수 타일 표시값(PLAN.md 작업 지시, 2026-07-21) — indexTilesLive가 있고 장중이며
+  // 해당 시장 값이 있으면 그 라이브 값(1D 기준, 60초 갱신)을 쓰고, 아니면(정적
+  // 배포·라이브 실패·장 마감) latestPriceOf(3M EOD 마지막 봉)로 자동 폴백한다.
+  // 반환 모양을 latestPriceOf와 맞춰(close/changeRate/date) 렌더 쪽 분기를 최소화
+  // 하고, isLive만 추가로 얹어 "장중" 배지 여부를 결정한다. 모달(캔들차트)은 이
+  // 헬퍼를 쓰지 않고 marketData를 그대로 쓴다(모달·차트는 기존 로직 유지 — 작업 지시).
+  const indexTilesLiveOpen = indexTilesLive?.market_closed === false
+  const indexTileOf = (key) => {
+    const row = indexTilesLiveOpen ? indexTilesLive?.[key] : null
+    if (row) {
+      return { close: row.close, changeRate: row.change_rate, date: row.date, time: row.time, isLive: true }
+    }
+    const fallback = latestPriceOf(key)
+    return fallback ? { ...fallback, isLive: false } : null
   }
 
   // 등락 종목수 압축 칩 — 코스피+코스닥 합계 (BreadthBadge.splitTotals와 동일 규칙:
@@ -1533,6 +1570,10 @@ export default function DashboardPage() {
   // 개념이라 섞으면 오히려 baseDate 해석이 혼란스러워진다.
   const baseDate = latestOf(
     ...MARKETS.map((m) => latestPriceOf(m.key)?.date),
+    // indexTilesLive.date도 flowLive와 동일한 이유로 장중(market_closed===false)일
+    // 때만 섞는다 — 장 마감 후 market_closed:true로 오늘 날짜가 오면 baseDate가
+    // 실제 마지막 거래일보다 앞으로 부풀어 다른 타일에 잘못된 StaleDate가 붙는다.
+    ...MARKETS.map((m) => (indexTilesLiveOpen ? indexTilesLive?.[m.key]?.date : null)),
     etfComponent?.date,
     ...investorDates,
     flowLiveOpen ? flowLive?.kospi?.date : null,
@@ -1602,7 +1643,11 @@ export default function DashboardPage() {
       </div>
       <div className="kpi-grid">
         {MARKETS.map((m) => {
-          const latest = latestPriceOf(m.key)
+          const latest = indexTileOf(m.key)
+          const liveTime =
+            latest?.isLive && latest.time && latest.time.length === 4
+              ? `${latest.time.slice(0, 2)}:${latest.time.slice(2)}`
+              : null
           return (
             <KpiTile
               key={m.key}
@@ -1613,11 +1658,24 @@ export default function DashboardPage() {
                 latest && (
                   <span className={`kpi-tile-sub ${rateClass(latest.changeRate)}`}>
                     {rateLabel(latest.changeRate)}
-                    <StaleDate date={latest.date} baseDate={baseDate} prefix=" · " />
+                    {latest.isLive ? (
+                      <>
+                        {' · '}
+                        <Badge kind="live">장중</Badge>
+                      </>
+                    ) : (
+                      <StaleDate date={latest.date} baseDate={baseDate} prefix=" · " />
+                    )}
                   </span>
                 )
               }
-              title={latest?.date ? formatDate(latest.date) : undefined}
+              title={
+                latest?.isLive
+                  ? `${formatDate(latest.date)}${liveTime ? ` ${liveTime}` : ''} · 60초 갱신`
+                  : latest?.date
+                    ? formatDate(latest.date)
+                    : undefined
+              }
               onClick={() => setModal({ type: 'candle', market: m.key, title: `${m.label} · 캔들차트` })}
             />
           )
