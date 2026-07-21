@@ -6,10 +6,18 @@
 
 신규 수집을 하지 않는다(§5.2 지시) — 이미 다른 라이브 캐시가 채워둔 데이터를
 그대로 재사용한다:
-- 후보군·거래대금 순위·등락률·회전율: ``routers.flow_rank._warm_value_rank_live()``
+- 후보군·거래대금 순위·회전율: ``routers.flow_rank._warm_value_rank_live()``
   (§4.7 value-rank/live, 7분 캐시) — 코스피+코스닥 상위 각 100개(최대 200개)
   스냅샷에서 ETF를 뺀 개별주만 후보로 쓴다(§5.2 "ETF는 제외").
-- 관심순위 편입 여부: ``routers.markets._warm_attention(session)``(60초 캐시).
+- 관심순위 편입 여부·등락률: ``routers.markets._warm_attention(session)``(60초 캐시).
+
+**change_rate 소스 우선순위(2026-07-21, §5.4-1)**: attention에 그 종목이 있으면
+attention의 change_rate(60초 캐시, 더 신선함)를 쓰고, 없으면 value-rank의
+change_rate(최대 7분 캐시)로 폴백한다. 처음엔 무조건 value-rank만 썼는데,
+"실시간 관심 TOP5"(attention 소스)와 스켈핑 후보에 같은 종목이 겹칠 때 등락률이
+서로 다르게 보이는 문제가 있었다 — 캐시 타이밍이 아니라 두 카드가 애초에 다른
+소스를 참조하고 있었던 것. 완전한 해법(종목코드별 단일 시세 캐시)은 지금 규모에선
+과해 이 우선순위 절충안을 택했다.
 
 이 라우터 자체는 별도 캐시를 두지 않는다 — 두 소스 모두 이미 자체 TTL+락
 캐시를 갖고 있어(warm 함수가 캐시 히트면 즉시 반환) 매 요청마다 다시 불러도
@@ -48,14 +56,27 @@ async def scalp_candidates(
     value_payload = await _warm_value_rank_live()
     attention_payload = await _warm_attention(session)
 
-    attention_codes = {row["code"] for row in (attention_payload.get("rows") or []) if row.get("code")}
+    attention_rows = attention_payload.get("rows") or []
+    attention_codes = {row["code"] for row in attention_rows if row.get("code")}
+    # 2026-07-21 수정: change_rate를 attention(키움, 60초 캐시)에서 우선 가져온다 —
+    # value-rank(네이버, 7분 캐시)만 쓰면 "실시간 관심 TOP5"와 같은 종목이 스켈핑
+    # 후보에도 뜰 때 등락률이 서로 다르게 보이는 문제가 있었다(사용자 지적 — 두
+    # 카드가 같은 종목을 "서로 다른 우물"에서 긷고 있었음). attention에 없는
+    # 종목만 value-rank의 (최대 7분 묵은) change_rate로 폴백한다.
+    attention_change_rate = {
+        row["code"]: row.get("change_rate") for row in attention_rows if row.get("code")
+    }
 
     candidates = [
         {
             "code": row["code"],
             "name": row.get("name") or row["code"],
             "market": row.get("market"),
-            "change_rate": row.get("change_rate"),
+            "change_rate": (
+                attention_change_rate[row["code"]]
+                if attention_change_rate.get(row["code"]) is not None
+                else row.get("change_rate")
+            ),
             "turnover": row.get("turnover"),
             "value_rank": row["rank"],
         }
