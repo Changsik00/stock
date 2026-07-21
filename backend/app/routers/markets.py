@@ -87,7 +87,7 @@ from ..clients.kiwoom import MINUTE_CHART_INTERVALS, KiwoomClient, parse_minute_
 from ..collectors import intraday_snapshot
 from ..collectors.market_flow import fetch_live_flow
 from ..db import get_session
-from ..market_hours import KST, is_market_closed as _market_closed_kst
+from ..market_hours import KST, is_market_closed as _market_closed_kst, is_nxt_closed
 from ..models import IndexOhlcv, MacroSeries, MarketBreadth, MarketFlow, Stock
 from ..services import DB_MARKET, get_market_series_from_db
 
@@ -495,7 +495,12 @@ async def _warm_attention(session: AsyncSession) -> dict:
     attention은 DB 저장이 없는 실시간 전용 지표라(§3.5) market_flow/market_breadth
     같은 확정치 폴백이 없으므로, 대신 마지막으로 성공한 라이브 응답(`_attention_last_good`)을
     재사용해 ``market_closed: true``로 표시한다 — 그마저 없으면(기동 직후 장 마감)
-    빈 rows + market_closed로 응답한다(502 아님)."""
+    빈 rows + market_closed로 응답한다(502 아님).
+
+    **2026-07-21 추가 수정(NXT)**: 개별 종목 관심순위(ka00198)라 장 마감 판정은
+    ``is_market_closed``(KRX 정규장)가 아니라 ``is_nxt_closed``(NXT 확장세션
+    08:00~20:00)를 쓴다 — 실측(18:36 KST)으로 정규장 마감 후에도 이 TR이 계속
+    갱신됨을 확인했다. market_hours.py 모듈 docstring 참고."""
     now = time.monotonic()
     async with _attention_cache_lock:
         cached = _attention_cache["data"]
@@ -503,7 +508,7 @@ async def _warm_attention(session: AsyncSession) -> dict:
             return cached
 
         now_kst = dt.datetime.now(KST)
-        if _market_closed_kst(now_kst):
+        if is_nxt_closed(now_kst):
             last_good = _attention_last_good["data"]
             if last_good is not None:
                 payload = {**last_good, "market_closed": True}

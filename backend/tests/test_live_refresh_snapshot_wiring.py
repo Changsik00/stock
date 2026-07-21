@@ -24,7 +24,7 @@ FUTURES_PAYLOAD = {"date": "2026-07-21", "investors": {}, "market_closed": False
 
 @pytest.fixture(autouse=True)
 def _force_market_open(monkeypatch):
-    monkeypatch.setattr(live_refresh, "is_market_closed", lambda now_kst: False)
+    monkeypatch.setattr(live_refresh, "is_nxt_closed", lambda now_kst: False)
 
 
 async def test_run_live_refresh_feeds_flow_payload_into_recorder(monkeypatch):

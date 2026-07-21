@@ -223,7 +223,7 @@ async def test_series_first_request_fetches_and_caches_then_second_hits_cache(
     # (아래 test_series_market_open_still_refetches_even_with_todays_row_cached가
     # 장중 분기를 검증한다). 이 테스트는 실제 벽시계와 무관하게 "마감" 경로를
     # 고정해서 검증해야 하므로 명시적으로 monkeypatch한다.
-    monkeypatch.setattr(stocks, "is_market_closed", lambda now_kst: True)
+    monkeypatch.setattr(stocks, "is_nxt_closed", lambda now_kst: True)
 
     target_end = stocks._latest_trading_day()
     prev_day = target_end - dt.timedelta(days=1)
@@ -312,7 +312,7 @@ async def test_series_market_open_still_refetches_even_with_todays_row_cached(
     있어 같은 종목인데 카드와 모달이 다른 값을 보여줬다. 장중에는 오늘 행이 이미
     있어도(쿨다운만 지났으면) 다시 외부를 호출해야 한다 — 장 마감일 때만
     캐시 히트가 되는 위 테스트와 대조."""
-    monkeypatch.setattr(stocks, "is_market_closed", lambda now_kst: False)
+    monkeypatch.setattr(stocks, "is_nxt_closed", lambda now_kst: False)
 
     target_end = stocks._latest_trading_day()
     prev_day = target_end - dt.timedelta(days=1)

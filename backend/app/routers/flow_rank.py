@@ -103,7 +103,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..clients import naver_rank, naver_value_rank
 from ..db import get_session
-from ..market_hours import KST, is_market_closed
+from ..market_hours import KST, is_nxt_closed
 from ..models import EtfStat, FlowPath, FlowRank, MarketBreadth, Stock, ValueRank
 from ..sentiment import breadth_score, compute_sentiment, etf_score, flow_score
 from .markets import _warm_breadth_live
@@ -551,9 +551,13 @@ async def _warm_value_rank_live() -> dict:
     합쳐 거래대금 내림차순으로 재정렬한다(EOD `/value-rank?market=all`과 동일한
     관례, collectors/value_rank.py TOP_N=100과 맞춰 시장당 상위 100개만 담는다).
 
-    장 마감이면(``is_market_closed``) 네이버를 아예 호출하지 않는다(2026-07-20,
-    신규 5~10분 티어 전체의 기본 원칙) — DB 폴백이 없으므로 마지막 캐시(있으면)를
-    ``market_closed: true``로 재사용하고, 캐시조차 없으면 빈 값으로 응답한다."""
+    개별 종목 거래대금 목록이라(§4.7-3 원칙, 2026-07-21 NXT 실측 — market_hours.py
+    모듈 docstring 참고) 장 마감 판정은 ``is_market_closed``(KRX 정규장 09:00~15:30)가
+    아니라 ``is_nxt_closed``(NXT 확장세션 08:00~20:00)를 쓴다 — 정규장 마감 후에도
+    NXT에서 개별 종목이 계속 거래되므로 이 라우트도 20:00까지 계속 조회한다.
+    그 시간대까지도 마감이면 네이버를 아예 호출하지 않는다 — DB 폴백이 없으므로
+    마지막 캐시(있으면)를 ``market_closed: true``로 재사용하고, 캐시조차 없으면
+    빈 값으로 응답한다."""
     now = time.monotonic()
     async with _value_rank_live_cache_lock:
         cached = _value_rank_live_cache["data"]
@@ -561,7 +565,7 @@ async def _warm_value_rank_live() -> dict:
             return cached
 
         now_kst = dt.datetime.now(KST)
-        if is_market_closed(now_kst):
+        if is_nxt_closed(now_kst):
             if cached is not None:
                 payload = {**cached, "market_closed": True}
             else:

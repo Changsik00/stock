@@ -49,7 +49,7 @@ from ..clients.kiwoom import (
     parse_minute_chart_rows,
 )
 from ..db import get_session
-from ..market_hours import KST, is_market_closed
+from ..market_hours import KST, is_nxt_closed
 from ..models import Stock, StockFlow, StockOhlcv
 from ..quant.signals import (
     compute_vwap,
@@ -175,16 +175,23 @@ async def _ensure_candles_cached(session: AsyncSession, code: str, days: int) ->
     있음=끝"으로 하루 종일 얼어붙어 있었다). 장중에는 오늘 행이 있어도 여전히
     쿨다운(60초)마다 재조회해 index-tiles/live와 같은 성격의 "장중엔 계속 새로
     받는다" 원칙을 맞춘다 — 장 마감 후에만 진짜로 캐시 히트로 취급한다.
+
+    **2026-07-21 추가 수정(NXT)**: "장중" 판정은 KRX 정규장(09:00~15:30)이 아니라
+    ``market_hours.is_nxt_closed``(NXT 확장세션 08:00~20:00)를 쓴다 — 사용자 확인 +
+    실측(18:36에도 개별 종목 시세가 계속 바뀜)으로, 개별 종목은 정규장 마감 이후
+    NXT에서 20:00까지 계속 거래된다. 지수/집계 통계(index-tiles/basis/groups 등)는
+    정규장에서 그대로 고정되는 게 실측으로 확인돼(``is_market_closed`` 그대로 유지)
+    이 함수만 더 넓은 창을 쓴다 — market_hours.py 모듈 docstring 참고.
     """
     target_end = _latest_trading_day()
     existing_max = (
         await session.execute(select(func.max(StockOhlcv.date)).where(StockOhlcv.code == code))
     ).scalar_one_or_none()
 
-    market_open = not is_market_closed(dt.datetime.now(KST))
+    market_open = not is_nxt_closed(dt.datetime.now(KST))
 
     if existing_max is not None and existing_max >= target_end and not market_open:
-        return  # 장 마감 확정치 — 캐시 히트
+        return  # NXT까지 마감 — 확정치, 캐시 히트
 
     if existing_max is None:
         calendar_days = (
@@ -357,7 +364,7 @@ async def _ensure_flows_cached(session: AsyncSession, code: str) -> None:
         await session.execute(select(func.max(StockFlow.date)).where(StockFlow.code == code))
     ).scalar_one_or_none()
 
-    market_open = not is_market_closed(dt.datetime.now(KST))
+    market_open = not is_nxt_closed(dt.datetime.now(KST))
 
     if existing_max is not None and existing_max >= target_end and not market_open:
         return  # 장 마감 확정치 — 캐시 히트

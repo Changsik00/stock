@@ -51,12 +51,17 @@ _warm_value_rank_live 1개만 7분 잡)를 IntervalTrigger로 순차 호출해, 
 토글이다 — main.py의 lifespan이 ``ENABLE_LIVE_REFRESH=1``일 때만 이 스케줄러를
 켠다. 둘 다 켜도 무해하다(서로 다른 캐시/테이블을 건드림).
 
-장중(평일 09:00~15:30 KST)에만 실제로 소스를 호출한다 — 장 마감/주말에 불필요한
-키움·네이버 API 호출을 막기 위해서다(market_hours.is_market_closed 재사용,
-routers/markets.py의 옛 ``_market_closed_kst``와 동일 로직을 공유 위치로 추출한
-것 — PLAN.md 서버 측 능동 60초 갱신 작업, 2026-07-20). **이 스케줄러 잡 레벨
-게이트와 별개로, 각 warm 함수 자체도 내부에서 다시 market_closed를 확인해
-외부 API 호출을 막는다**(2026-07-20 버그 수정 — 예전에는 routers.markets의
+장중에만 실제로 소스를 호출한다 — 장 마감/주말에 불필요한 키움·네이버 API 호출을
+막기 위해서다. **2026-07-21(NXT) 수정**: "장중"이 더 이상 단일 창이 아니다 —
+지수/집계 통계(breadth/flow/index-tiles/fx/basis/groups/futures-flow)는 KRX
+정규장(평일 09:00~15:30 KST, ``market_hours.is_market_closed``)에서 그대로
+고정되지만, 개별 종목 시세(attention·value-rank)는 NXT 확장세션(08:00~20:00,
+``market_hours.is_nxt_closed``)까지 계속 움직인다(실측 근거는
+market_hours.py 모듈 docstring 참고). 두 잡의 **잡 레벨** 게이트는 더 넓은
+NXT 창을 써서 15:30~20:00에도 잡 자체는 계속 돌게 하고, 정규장 전용 소스는
+각자 내부에서 다시 좁은 창을 확인해 스스로 건너뛴다. **이 스케줄러 잡 레벨
+게이트와 별개로, 각 warm 함수 자체도 내부에서 다시 (자신에게 맞는) 장 마감을
+확인해 외부 API 호출을 막는다**(2026-07-20 버그 수정 — 예전에는 routers.markets의
 `GET /api/markets/flow/live` 라우트가 이 스케줄러를 거치지 않고 직접 호출돼도
 게이트가 없어, 새벽에 프런트 탭을 열어 둔 채로 폴링하면 계속 키움/네이버를
 두드리는 낭비/리스크가 있었다 — 지금은 warm 함수 자체가 이중으로 막는다).
@@ -79,7 +84,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from ..db import async_session_factory
-from ..market_hours import KST, is_market_closed
+from ..market_hours import KST, is_nxt_closed
 
 logger = logging.getLogger(__name__)
 
@@ -92,9 +97,15 @@ EXTRA_REFRESH_INTERVAL_SECONDS = 420
 
 
 async def _run_live_refresh() -> None:
+    # 2026-07-21(NXT) — 이 잡은 attention(개별 종목, NXT 08:00~20:00 필요)과
+    # breadth/flow/index-tiles/fx(지수·집계, KRX 정규장 09:00~15:30) 워밍이 섞여
+    # 있다. 잡 레벨 게이트는 더 넓은 쪽(NXT)을 써서 15:30~20:00에도 잡 자체는
+    # 계속 돌게 하고, 정규장 전용 소스는 각자 내부의 is_market_closed로 알아서
+    # 스스로 건너뛴다(모듈 docstring "장 마감 게이트" 문단 참고). market_hours.py
+    # 모듈 docstring도 참고.
     now_kst = dt.datetime.now(KST)
-    if is_market_closed(now_kst):
-        logger.debug("live-refresh: market closed (%s KST), skipping", now_kst.isoformat())
+    if is_nxt_closed(now_kst):
+        logger.debug("live-refresh: NXT closed (%s KST), skipping", now_kst.isoformat())
         return
 
     # 지연 임포트 — routers.markets는 FastAPI 라우터 모듈이라 main.py의 다른 라우터들과
@@ -165,13 +176,15 @@ async def _run_live_refresh() -> None:
 async def _run_live_refresh_extra() -> None:
     """7분 티어(PLAN.md §4.7-2) — value-rank/live 1개 캐시만 선제적으로 채운다
     (§5.6 회귀 수정으로 basis/groups/futures-flow는 위 60초 잡으로 옮겼다 —
-    모듈 docstring "§5.6 회귀" 문단 참고). 장 마감이면(잡 레벨 게이트) 아예
-    아무 것도 호출하지 않는다 — warm 함수도 내부에서 다시 market_closed를
-    확인하므로(모듈 docstring 참고) 이 잡이 죽어 있어도 라우트 핸들러 쪽에서
-    이중으로 안전하다."""
+    모듈 docstring "§5.6 회귀" 문단 참고). value-rank는 개별 종목 거래대금
+    목록이라 2026-07-21(NXT)부터 잡 레벨 게이트도 ``is_nxt_closed``(NXT
+    확장세션 08:00~20:00)를 쓴다 — market_hours.py 모듈 docstring 참고. 그
+    시간대까지도 마감이면 아예 아무 것도 호출하지 않는다 — warm 함수도 내부에서
+    다시 확인하므로(모듈 docstring 참고) 이 잡이 죽어 있어도 라우트 핸들러
+    쪽에서 이중으로 안전하다."""
     now_kst = dt.datetime.now(KST)
-    if is_market_closed(now_kst):
-        logger.debug("live-refresh-extra: market closed (%s KST), skipping", now_kst.isoformat())
+    if is_nxt_closed(now_kst):
+        logger.debug("live-refresh-extra: NXT closed (%s KST), skipping", now_kst.isoformat())
         return
 
     from ..routers import flow_rank as flow_rank_router

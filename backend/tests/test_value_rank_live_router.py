@@ -56,7 +56,7 @@ def _reset_cache():
 
 @pytest.fixture(autouse=True)
 def _force_market_open(monkeypatch):
-    monkeypatch.setattr(flow_rank, "is_market_closed", lambda now_kst: False)
+    monkeypatch.setattr(flow_rank, "is_nxt_closed", lambda now_kst: False)
     monkeypatch.setattr(flow_rank, "_fetch_etf_codes_blocking", lambda: set())
 
 
@@ -109,7 +109,7 @@ async def test_value_rank_live_502_when_both_markets_fail(monkeypatch):
 
 
 async def test_value_rank_live_market_closed_skips_fetch_no_cache(monkeypatch):
-    monkeypatch.setattr(flow_rank, "is_market_closed", lambda now_kst: True)
+    monkeypatch.setattr(flow_rank, "is_nxt_closed", lambda now_kst: True)
 
     def _raise(market):  # pragma: no cover - 불리면 안 됨
         raise AssertionError("naver_value_rank should not be called when market is closed")

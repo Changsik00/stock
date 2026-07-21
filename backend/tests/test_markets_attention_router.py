@@ -107,7 +107,7 @@ def _clear_overrides():
 # 호출을 게이트하므로) — 장 마감 케이스는 아래 별도 절이 명시적으로 다룬다.
 @pytest.fixture(autouse=True)
 def _force_market_open(monkeypatch):
-    monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: False)
+    monkeypatch.setattr(markets, "is_nxt_closed", lambda now_kst: False)
 
 
 async def test_attention_live_happy_path_with_stock_join():
@@ -202,7 +202,7 @@ async def test_attention_live_caches_within_ttl():
 
 
 async def test_attention_market_closed_skips_kiwoom_and_returns_empty(monkeypatch):
-    monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: True)
+    monkeypatch.setattr(markets, "is_nxt_closed", lambda now_kst: True)
 
     def _raise(*args, **kwargs):  # pragma: no cover - 불리면 안 됨
         raise AssertionError("KiwoomClient should not be constructed when market is closed")
@@ -221,7 +221,7 @@ async def test_attention_market_closed_skips_kiwoom_and_returns_empty(monkeypatc
 
 async def test_attention_market_closed_reuses_last_good_cache(monkeypatch):
     # 1) 장중에 한 번 성공시켜 last-good 캐시를 채운다.
-    monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: False)
+    monkeypatch.setattr(markets, "is_nxt_closed", lambda now_kst: False)
     rows = [{"stk_nm": "삼성전자", "bigd_rank": "1", "stk_cd": "005930", "base_comp_chgr": "-9.30"}]
     markets.KiwoomClient = _make_fake_kiwoom_client(item_inq_rank=rows)
     stock_rows = [("005930", "삼성전자", "KOSPI", False)]
@@ -242,7 +242,7 @@ async def test_attention_market_closed_reuses_last_good_cache(monkeypatch):
         raise AssertionError("KiwoomClient should not be constructed when market is closed")
 
     markets.KiwoomClient = _raise
-    monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: True)
+    monkeypatch.setattr(markets, "is_nxt_closed", lambda now_kst: True)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         r2 = await client.get("/api/markets/attention")
