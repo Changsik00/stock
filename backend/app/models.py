@@ -288,6 +288,43 @@ class MarketBreadth(Base):
     limit_down: Mapped[int | None] = mapped_column(SmallInteger)
 
 
+class ScalpPick(Base):
+    """스켈핑 후보 추적 기록 — 관찰 로그, 매매 신호 아님 (PLAN.md §5.7).
+
+    그날 스켈핑 후보 스코어(quant/screener.py::compute_scalp_scores) 상위
+    N위(collectors/scalp_tracker.py TOP_N, 현재 10)에 "처음" 등장한 종목만
+    1일 1종목 1회 기록한다(PK: date+code — 같은 날 재등장은 자기상관을
+    피하려고 중복 기록하지 않는다). 이후 진입 시각 기준 고정 호라이즌
+    (5/15/30/60분·당일 마감) 시점의 change_rate를 다시 조회해 채워 넣는다.
+    score가 실제로 유효한지(추이와 상관관계가 있는지) 사후 검증할 근거
+    자료를 쌓는 목적이며, 실제 매매를 시뮬레이션하지 않는다 — 진입/청산가,
+    매매 수수료·슬리피지 등은 반영하지 않는다(§5.7 원칙).
+
+    change_rate_5m/15m/30m/60m/eod는 NULL이면 "아직 그 호라이즌 시각이 안
+    됐거나 아직 못 채움", NULL이 아니면 "채워짐"이라는 뜻으로 쓴다(값 자체가
+    이론상 0%일 수 있어도 문제없음 — 그래서 별도의 "sampled_at" 컬럼을 두지
+    않는다, collectors/scalp_tracker.py 참고).
+    """
+
+    __tablename__ = "scalp_pick"
+
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    market: Mapped[str | None] = mapped_column(String(10))
+    entry_time: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    entry_rank: Mapped[int | None] = mapped_column(SmallInteger)
+    entry_score: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    entry_change_rate: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    entry_turnover: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    in_attention_top_at_entry: Mapped[bool] = mapped_column(nullable=False, default=False)
+    change_rate_5m: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    change_rate_15m: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    change_rate_30m: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    change_rate_60m: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    change_rate_eod: Mapped[float | None] = mapped_column(Numeric(8, 4))
+
+
 class CollectLog(Base):
     """배치 수집 로그 (모니터링·중복 방지)."""
 

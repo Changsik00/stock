@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.collectors import intraday_snapshot, live_refresh
+from app.collectors import intraday_snapshot, live_refresh, scalp_tracker
 from app.routers import markets
 
 FLOW_PAYLOAD = {"kospi": None, "kosdaq": None, "market_closed": False, "cached_at": "x"}
@@ -25,6 +25,15 @@ FUTURES_PAYLOAD = {"date": "2026-07-21", "investors": {}, "market_closed": False
 @pytest.fixture(autouse=True)
 def _force_market_open(monkeypatch):
     monkeypatch.setattr(live_refresh, "is_nxt_closed", lambda now_kst: False)
+    # §5.7 scalp-tracker는 이 파일이 다루는 "워밍 결과가 intraday_snapshot recorder로
+    # 그대로 흘러가는지"와 무관하다 — 실제 scalp_tracker 동작은
+    # test_scalp_tracker.py가 전담하므로, 여기서는 no-op으로 막아 이 파일의
+    # 단언들이 scalp-tracker의 부수효과(추가 DB 쿼리 등)에 영향받지 않게 한다.
+    monkeypatch.setattr(scalp_tracker, "track_scalp_picks", _async_return_dict)
+
+
+async def _async_return_dict(*_args, **_kwargs):
+    return {"entries": 0, "horizons": 0, "eod": 0}
 
 
 async def test_run_live_refresh_feeds_flow_payload_into_recorder(monkeypatch):

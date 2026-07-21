@@ -13,6 +13,11 @@
    실패해도 flow 워밍 자체의 try/except 안에 있어 캐시 워밍을 막지 않는다.
    futures-flow/live도 같은 이유로 워밍 직후
    `collectors/intraday_snapshot.record_futures_flow_snapshot`에 적립한다.
+   **2026-07-21 추가(PLAN.md §5.7)**: 위 워밍(또는 NXT 마감으로 워밍 스킵)이
+   끝난 뒤 항상 `collectors/scalp_tracker.track_scalp_picks`를 호출해 스켈핑
+   후보 추적 기록(신규 진입 + 호라이즌/EOD change_rate 채우기)을 DB(scalp_pick
+   테이블)에 남긴다 — 새 외부 호출 없이 이미 워밍된 attention/value-rank
+   캐시만 재사용한다(collectors/scalp_tracker.py 모듈 docstring 참고).
 2. ``live_refresh_extra``(7분, PLAN.md §4.7 3단 갱신 주기): value-rank/live
    1개만 채운다 — 코스피+코스닥 전 종목 페이지네이션(~44콜, 15~30초 소요)이라
    진짜로 비싼 유일한 소스다(수급 상위/flow-rank는 장중 실측 결과 소스 자체가
@@ -104,9 +109,7 @@ async def _run_live_refresh() -> None:
     # 스스로 건너뛴다(모듈 docstring "장 마감 게이트" 문단 참고). market_hours.py
     # 모듈 docstring도 참고.
     now_kst = dt.datetime.now(KST)
-    if is_nxt_closed(now_kst):
-        logger.debug("live-refresh: NXT closed (%s KST), skipping", now_kst.isoformat())
-        return
+    nxt_closed = is_nxt_closed(now_kst)
 
     # 지연 임포트 — routers.markets는 FastAPI 라우터 모듈이라 main.py의 다른 라우터들과
     # 함께 임포트 순서에 얽히기 쉽다. 이 모듈은 collectors 패키지라 main.py의 lifespan이
@@ -115,62 +118,83 @@ async def _run_live_refresh() -> None:
     from ..routers import basis as basis_router
     from ..routers import groups as groups_router
     from ..routers import markets
-    from . import intraday_snapshot
+    from . import intraday_snapshot, scalp_tracker
 
+    if nxt_closed:
+        logger.debug(
+            "live-refresh: NXT closed (%s KST), skipping external warms (scalp-tracker 제외)",
+            now_kst.isoformat(),
+        )
+    else:
+        async with async_session_factory() as session:
+            # breadth도 2026-07-20부터 장 마감 시 DB 폴백을 위해 세션이 필요해졌다(버그
+            # 수정 — routers/markets.py `_warm_breadth_live` docstring 참고) — flow/attention과
+            # 같은 세션 블록 안으로 옮겼다(예전엔 세션 없이 별도로 호출했다).
+            try:
+                await markets._warm_breadth_live(session)
+            except Exception as e:  # noqa: BLE001 - 한 캐시 실패가 나머지 워밍을 막지 않도록
+                logger.warning("live-refresh: breadth 워밍 실패: %s", e)
+
+            try:
+                flow_payload = await markets._warm_flow_live(session)
+                # 2026-07-21(PLAN.md §5.4-2): 방금 fetch한 값을 그대로 장중 누적
+                # 스냅샷 버퍼에 적립한다 — 새 외부 호출 없음. 같은 try 블록 안에 둬서
+                # 적립 실패가 flow 워밍 자체의 성공을 되돌리지 않는다(이미 캐시에는
+                # 반영된 뒤이므로 여기서 예외가 나도 무해하게 로깅만 하면 된다).
+                intraday_snapshot.record_flow_snapshot(flow_payload)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("live-refresh: flow 워밍/스냅샷 적립 실패: %s", e)
+
+            try:
+                await markets._warm_attention(session)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("live-refresh: attention 워밍 실패: %s", e)
+
+            try:
+                await markets._warm_index_tiles_live(session)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("live-refresh: index-tiles 워밍 실패: %s", e)
+
+            try:
+                await markets._warm_fx_live(session)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("live-refresh: fx 워밍 실패: %s", e)
+
+        # §5.6 회귀 수정으로 7분 잡에서 옮겨왔다 — DB 세션이 필요 없는 3개라
+        # 위 session 블록 밖에서 호출한다(basis/groups/futures-flow 모두 세션 미사용).
+        try:
+            await basis_router._warm_basis_live()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("live-refresh: basis 워밍 실패: %s", e)
+
+        for group_type in ("upjong", "theme"):
+            try:
+                await groups_router._warm_groups_live(group_type)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("live-refresh: groups(%s) 워밍 실패: %s", group_type, e)
+
+        try:
+            futures_flow_payload = await markets._warm_futures_flow_live()
+            intraday_snapshot.record_futures_flow_snapshot(futures_flow_payload)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("live-refresh: futures-flow 워밍/스냅샷 적립 실패: %s", e)
+
+        logger.info("live-refresh: cache warmed at %s KST", now_kst.isoformat())
+
+    # PLAN.md §5.7 — 스켈핑 후보 추적 기록(신규 진입 기록 + 호라이즌/EOD 채우기).
+    # 위 nxt_closed 분기 **밖에서** 호출한다 — 이 함수는 새 외부 API 호출이
+    # 전혀 없어(이미 워밍된 attention/value-rank 캐시만 재사용) 마감 중에
+    # 호출해도 비용이 없고, "당일 마감 이후 첫 폴링"에 EOD를 채우려면 오히려
+    # 마감 게이트 밖에서 실행돼야 한다(collectors/scalp_tracker.py 모듈 docstring
+    # "스케줄링 배선" 참고). 이 잡의 다른 try/except들과 동일한 패턴 — 실패해도
+    # 나머지를 막지 않는다(이미 위에서 다 끝난 뒤라 막을 "나머지"도 없지만
+    # 일관성을 위해 유지).
     async with async_session_factory() as session:
-        # breadth도 2026-07-20부터 장 마감 시 DB 폴백을 위해 세션이 필요해졌다(버그
-        # 수정 — routers/markets.py `_warm_breadth_live` docstring 참고) — flow/attention과
-        # 같은 세션 블록 안으로 옮겼다(예전엔 세션 없이 별도로 호출했다).
         try:
-            await markets._warm_breadth_live(session)
-        except Exception as e:  # noqa: BLE001 - 한 캐시 실패가 나머지 워밍을 막지 않도록
-            logger.warning("live-refresh: breadth 워밍 실패: %s", e)
-
-        try:
-            flow_payload = await markets._warm_flow_live(session)
-            # 2026-07-21(PLAN.md §5.4-2): 방금 fetch한 값을 그대로 장중 누적
-            # 스냅샷 버퍼에 적립한다 — 새 외부 호출 없음. 같은 try 블록 안에 둬서
-            # 적립 실패가 flow 워밍 자체의 성공을 되돌리지 않는다(이미 캐시에는
-            # 반영된 뒤이므로 여기서 예외가 나도 무해하게 로깅만 하면 된다).
-            intraday_snapshot.record_flow_snapshot(flow_payload)
+            tracker_result = await scalp_tracker.track_scalp_picks(session, now_kst)
+            logger.debug("live-refresh: scalp-tracker %s", tracker_result)
         except Exception as e:  # noqa: BLE001
-            logger.warning("live-refresh: flow 워밍/스냅샷 적립 실패: %s", e)
-
-        try:
-            await markets._warm_attention(session)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("live-refresh: attention 워밍 실패: %s", e)
-
-        try:
-            await markets._warm_index_tiles_live(session)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("live-refresh: index-tiles 워밍 실패: %s", e)
-
-        try:
-            await markets._warm_fx_live(session)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("live-refresh: fx 워밍 실패: %s", e)
-
-    # §5.6 회귀 수정으로 7분 잡에서 옮겨왔다 — DB 세션이 필요 없는 3개라
-    # 위 session 블록 밖에서 호출한다(basis/groups/futures-flow 모두 세션 미사용).
-    try:
-        await basis_router._warm_basis_live()
-    except Exception as e:  # noqa: BLE001
-        logger.warning("live-refresh: basis 워밍 실패: %s", e)
-
-    for group_type in ("upjong", "theme"):
-        try:
-            await groups_router._warm_groups_live(group_type)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("live-refresh: groups(%s) 워밍 실패: %s", group_type, e)
-
-    try:
-        futures_flow_payload = await markets._warm_futures_flow_live()
-        intraday_snapshot.record_futures_flow_snapshot(futures_flow_payload)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("live-refresh: futures-flow 워밍/스냅샷 적립 실패: %s", e)
-
-    logger.info("live-refresh: cache warmed at %s KST", now_kst.isoformat())
+            logger.warning("live-refresh: scalp-tracker 실패: %s", e)
 
 
 async def _run_live_refresh_extra() -> None:
