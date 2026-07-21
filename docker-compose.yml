@@ -28,8 +28,10 @@ services:
       # 도커 네트워크 내부 주소로 명시 오버라이드한다 — env_file보다 environment가
       # 우선한다(.github/workflows/deploy-pages.yml CI가 쓰는 것과 같은 패턴).
       DATABASE_URL: postgresql+asyncpg://stock:stock@db:5432/stock
-      # 평일 18:00 KST 일별 배치(collectors/scheduler.py).
-      ENABLE_SCHEDULER: "1"
+      # 평일 18:00 KST 일별 배치는 여기서 켜지 않는다 — 이 서비스는 --reload라
+      # 코드 수정마다 재시작되고, 그때마다 APScheduler 인메모리 상태가 초기화돼
+      # 배치가 18:00을 무사히 통과하는 순간이 없다(실측: 71회 재시작, 배치 0회
+      # 완주 — worker.py 모듈 docstring 참고). 별도 `worker` 서비스가 담당한다.
       # 장중 60초 간격 라이브 캐시 선제 워밍(collectors/live_refresh.py) — 서버가
       # 스스로 breadth/live·flow/live·attention 캐시를 채워, 아무도 요청 안 해도
       # 값이 멈춰 있지 않게 한다.
@@ -53,6 +55,22 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
+
+  # 일별 배치(평일 18:00 KST) 전용 프로세스 — backend와 이미지는 같지만 --reload
+  # 없이 뜬다(app/worker.py). backend가 개발 중 아무리 자주 재시작돼도 이 프로세스는
+  # 영향받지 않아 18:00 배치가 안정적으로 완주한다(2026-07-21, 위 backend 주석 참고).
+  worker:
+    build: ./backend
+    command: ["python", "-m", "app.worker"]
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://stock:stock@db:5432/stock
+    volumes:
+      - ./backend:/app
+    depends_on:
+      db:
+        condition: service_healthy
 
   # 프런트엔드도 백엔드와 동일한 이유로 상시 서비스로 기동한다. vite dev 서버 +
   # HMR — 서버 측 능동 갱신(backend)과 별개로, 프런트는 여전히 폴링(setInterval)으로

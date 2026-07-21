@@ -21,6 +21,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import async_session_factory, engine
 from app.models import FlowRank, ValueRank
+from app.routers import flow_rank as flow_rank_module
 from app.routers.flow_rank import router
 
 TEST_DATE = dt.date(2099, 1, 1)
@@ -148,8 +149,25 @@ async def test_value_rank_rejects_unknown_market():
     assert resp.status_code == 400
 
 
-async def test_value_rank_returns_empty_rows_when_no_data_in_window():
+async def test_value_rank_returns_empty_rows_when_no_data_in_window(monkeypatch):
+    """days 창 안에 매치되는 날짜가 없을 때 빈 응답을 반환하는지 확인한다.
+
+    route가 `dt.date.today()`를 기준으로 창을 계산하므로(routers/flow_rank.py),
+    실제 오늘 날짜에는 이제 진짜 배치 데이터가 들어있다(2026-07-21 도커 워커
+    분리로 일별 배치가 정상 완주하게 됐다 — PLAN.md §7). "오늘 데이터가 없다"는
+    가정으로 짜여 있던 이 테스트가 그 수정으로 깨졌었다 — 이 파일의 다른 테스트들
+    처럼(모듈 docstring 참고) 오늘 날짜 대신 TEST_DATE(2099-*) 기준 창을 쓰도록
+    `dt.date.today`를 몽키패치해 실제 운영 데이터와 무관하게 만든다.
+    """
     await _clear_test_rows()
+
+    class _FixedDate(dt.date):
+        @classmethod
+        def today(cls):
+            return TEST_DATE
+
+    monkeypatch.setattr(flow_rank_module.dt, "date", _FixedDate)
+
     app = _make_app()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
