@@ -315,6 +315,8 @@ TR_RESOURCE_URL: dict[str, str] = {
     "ka90010": "/api/dostk/mrkcond",  # 프로그램매매추이요청 일자별 (PLAN.md §4.5-4, 2026-07-19 실호출 확정)
     "ka10080": "/api/dostk/chart",  # 주식분봉차트요청 (PLAN.md §5.1, 2026-07-21 실호출 확정)
     "ka20005": "/api/dostk/chart",  # 업종분봉차트요청 (PLAN.md §5.1, 2026-07-21 실호출 확정)
+    "ka10065": "/api/dostk/rkinfo",  # 장중투자자별매매상위요청 (수급 상위 카드 라이브화 probe, 2026-07-21)
+    "ka90009": "/api/dostk/rkinfo",  # 외국인기관매매상위요청 (수급 상위 카드 라이브화 probe, 2026-07-21)
 }
 
 # ka10080/ka20005 tic_scope 허용값 — 2026-07-21 실호출로 8개 전부 확인(모듈
@@ -974,6 +976,68 @@ class KiwoomClient:
         """
         body = {"inds_cd": inds_cd, "tic_scope": tic_scope}
         return await self.call_tr("ka20005", body, cont_yn=cont_yn, next_key=next_key)
+
+    async def foreign_institution_trading_top(
+        self,
+        mrkt_tp: str = "000",
+        amt_qty_tp: str = "0",
+        stex_tp: str = "3",
+        cont_yn: str | None = None,
+        next_key: str | None = None,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        """외국인기관매매상위요청 (ka90009) — "수급 상위" 카드 라이브화 **시도했으나
+        미채택**(2026-07-21 실호출, routers/flow_rank.py 모듈 docstring "키움
+        TR(ka10065/ka90009) 대체 재검토" 절 참고). ka10063/ka10066과 같은 관례로
+        "탐색했으나 부적합" 근거를 코드에 남겨두기 위해 메서드는 그대로 둔다 —
+        어떤 live 라우터도 이 메서드를 호출하지 않는다.
+
+        네이버 sise_deal_rank_iframe(2영업일 이상 지연)을 대체하는 라이브 후보로
+        ka10065(장중투자자별매매상위요청)와 함께 검토했으나, ka10065는
+        `opmr_invsr_trde_upper` 응답이 **수량만** 주고 정렬 기준도 금액이 아니라
+        회전율/수량 쪽으로 보여(예: 실호출 상위 1위가 시가총액 작은 흥아해운 —
+        "외국인 순매수 상위"라는 카드 의미와 어긋남) 채택하지 않았다. ka90009는
+        `frgnr_orgn_trde_upper` 응답 한 번으로 **외국인 순매도/순매수·기관
+        순매도/순매수 4개 랭킹을 병렬 컬럼**으로 준다(각 컬럼은 그 컬럼 기준
+        내림차순 정렬 — 실호출로 `for_netprps_amt`가 42264 -> 35624 -> 11619 ->
+        10768 -> 8438로 단조감소함을 확인). 필드/설계만 보면 기존 flow-rank의
+        investor(foreign/institution) x side(buy/sell) 2x2 토글에 정확히
+        대응된다: foreign+buy=`for_netprps_*`, foreign+sell=`for_netslmt_*`,
+        institution+buy=`orgn_netprps_*`, institution+sell=`orgn_netslmt_*`
+        (institution 쪽 `*_stk_cd`는 `"000660_AL"`처럼 `_AL` 접미사가 붙어 온다 —
+        실제 종목코드를 쓰려면 접미사를 잘라내야 한다, ka10051의 `"001_AL"`
+        종합행 코드와 유사한 관례로 추정).
+
+        **그러나 장중 갱신 실측에서 탈락시켰다**: 2026-07-21 09:44:59~09:51:00
+        KST(90초 간격 5회, 총 6분+) 동일 파라미터로 반복 호출했지만 상위
+        3종목(SK하이닉스 42264/삼성전자 35624/KODEX 200 11619, 백만원)이
+        **바이트 단위로 완전히 동일**했다 — 같은 시간대 `GET /api/markets/
+        attention`(ka00198)은 75초 간격 재호출에서 상위 3종목 등락률이 실제로
+        바뀌었으므로(장이 멈춰서가 아니라는 대조군 확인), ka90009 자체가
+        장중 실시간 갱신을 하지 않는 것으로 판정했다. `date` 파라미터도
+        오늘/어제/생략 세 경우 응답이 바이트 단위로 완전히 동일해(무시됨) —
+        이 TR은 "현재 시각 실시간 스냅샷"이 아니라 훨씬 드물게(또는 일 1회만)
+        갱신되는 소스로 추정된다(임의 과거일 조회도 안 됨 — EOD 대체도 아니고
+        진짜 라이브도 아닌 애매한 소스).
+
+        Args:
+            mrkt_tp: 시장구분 — "000"=전체(GitHub PARAMS 예시 기본값).
+            amt_qty_tp: 금액수량구분 — "0"=금액(백만원, 기본값 — 이 프로젝트가
+                쓰는 값), "1"=수량으로 추정(미확인).
+            stex_tp: 거래소구분 — 기본값 "3"(다른 TR과 동일 관례).
+
+        Returns:
+            `(응답 body, 응답 헤더)` — 응답 body의 `frgnr_orgn_trde_upper`가
+            25행 배열, 각 행에 8개 종목(4개 랭킹 x 종목코드/명/금액/수량)이
+            나란히 들어있다(위 컬럼 대응 참고).
+        """
+        body = {
+            "mrkt_tp": mrkt_tp,
+            "amt_qty_tp": amt_qty_tp,
+            "qry_dt_tp": "0",
+            "date": dt.date.today().strftime("%Y%m%d"),
+            "stex_tp": stex_tp,
+        }
+        return await self.call_tr("ka90009", body, cont_yn=cont_yn, next_key=next_key)
 
 
 # -- ka10080/ka20005 공통 분봉 응답 파싱 -------------------------------------------
