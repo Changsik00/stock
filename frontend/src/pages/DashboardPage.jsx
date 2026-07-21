@@ -1942,15 +1942,15 @@ export default function DashboardPage() {
       {/* 5. TOP5 요약 3열 — "…기준" 라벨은 대표 기준일(baseDate)과 같으면 생략, 다르면
           MM-DD만 붙인다(staleHintLabel, 대시보드 상단 표시와 동일 규칙). 정확한 날짜는
           카드 title(hover)로 확인 가능. */}
-      <div className="section-title">TOP5 요약</div>
+      <div className="section-title">종목 랭킹 요약</div>
       <div className="top5-grid">
         <Top5Card
           title="수급 상위"
           hint={
-            <>
+            <span title="소스가 최근 확정된 거래일까지만 제공 — 당일 장마감 전에는 전날 데이터가 최신입니다.">
               외국인 순매수
-              <StaleDate date={flowRankTop?.date} baseDate={baseDate} prefix=" · " />
-            </>
+              <StaleDate date={flowRankTop?.date} baseDate={baseDate} prefix=" · 확정 " />
+            </span>
           }
           hoverDate={flowRankTop?.date ? formatDate(flowRankTop.date) : undefined}
           rows={flowRankTop?.rows}
