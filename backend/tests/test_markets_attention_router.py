@@ -64,7 +64,7 @@ def _make_fake_kiwoom_client(item_inq_rank=None, raise_exc=None):
         async def __aexit__(self, *exc):
             return False
 
-        async def realtime_inquiry_rank(self, qry_tp="4"):
+        async def realtime_inquiry_rank(self, qry_tp="1"):
             _FakeClient.call_count += 1
             if raise_exc is not None:
                 raise raise_exc
@@ -130,7 +130,7 @@ async def test_attention_live_happy_path_with_stock_join():
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["qry_tp"] == "4"
+    assert body["qry_tp"] == "1"
     assert "queried_at" in body
     assert len(body["rows"]) == 3
     first = body["rows"][0]

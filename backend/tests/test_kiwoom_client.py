@@ -338,7 +338,7 @@ async def test_realtime_inquiry_rank_request_shape(make_client):
     finally:
         await client.aclose()
 
-    assert captured["body"] == {"qry_tp": "4"}
+    assert captured["body"] == {"qry_tp": "1"}
     assert headers["api-id"] == "ka00198"
     rows = data["item_inq_rank"]
     assert len(rows) == 3
