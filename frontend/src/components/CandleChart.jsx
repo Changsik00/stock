@@ -1,4 +1,4 @@
-import { CandlestickSeries, HistogramSeries, createChart } from 'lightweight-charts'
+import { CandlestickSeries, HistogramSeries, LineSeries, createChart } from 'lightweight-charts'
 import { useEffect, useMemo, useRef } from 'react'
 import { formatDate } from '../format'
 
@@ -36,7 +36,17 @@ function readCssVars(names) {
   return Object.fromEntries(names.map((n) => [n, style.getPropertyValue(n).trim()]))
 }
 
-const VAR_NAMES = ['--up', '--down', '--surface', '--grid', '--axis', '--text-muted', '--text-primary', '--border']
+const VAR_NAMES = [
+  '--up',
+  '--down',
+  '--surface',
+  '--grid',
+  '--axis',
+  '--text-muted',
+  '--text-primary',
+  '--border',
+  '--series-value',
+]
 
 // lightweight-charts 기반 캔들 + 거래량 히스토그램 (PLAN.md §5.1 CandleChart.jsx,
 // §5.4 색상 규칙: 상승/양봉=빨강(--up), 하락/음봉=파랑(--down)). 시장 탭(지수)과 향후
@@ -52,17 +62,24 @@ const VAR_NAMES = ['--up', '--down', '--surface', '--grid', '--axis', '--text-mu
 //   시점에 고정해야 한다 — 호출부가 모드 전환 시 `key`를 바꿔 컴포넌트를 remount
 //   시켜야 한다(예: `key={mode}`), 이 컴포넌트 내부에서는 마운트 이후 intraday
 //   prop 변경을 반영하지 않는다.
+// overlay: 선택적 보조 라인(예: VWAP, PLAN.md §5.3) — [{ timestamp: iso8601, value },
+// ...] 형태. intraday 모드 전용(시간축이 toLwcMinuteTime 기준) — 일봉 모드에서는
+// 호출부가 애초에 넘기지 않는다(§5.4 "일봉 모드엔 시그널 섹션 숨김"). 데이터가 없거나
+// value가 null인 포인트는 건너뛴다.
 export default function CandleChart({
   data,
   height = 360,
   volumeHeightRatio = 0.22,
   intraday = false,
   title = '캔들 · 거래량',
+  overlay = null,
+  overlayLabel = 'VWAP',
 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const candleSeriesRef = useRef(null)
   const volumeSeriesRef = useRef(null)
+  const overlaySeriesRef = useRef(null)
   const legendRef = useRef(null)
   // time -> { changeRate, rangeRate, label } — 크로스헤어 범례에서 등락률·변동폭·시각
   // 표기를 찾는 용도. updateLegend는 마운트 시 1회 만든 클로저라 ref로 최신 데이터를 넘긴다.
@@ -85,6 +102,14 @@ export default function CandleChart({
           label: intraday && d.time ? `${d.time.slice(0, 2)}:${d.time.slice(2, 4)}` : null,
         })),
     [data, intraday]
+  )
+
+  const overlayPoints = useMemo(
+    () =>
+      (overlay || [])
+        .filter((d) => d.value != null && d.timestamp)
+        .map((d) => ({ time: toLwcMinuteTime(d.timestamp), value: d.value })),
+    [overlay]
   )
 
   // 차트 생성은 마운트 시 1회만 — 데이터/리사이즈는 별도 effect에서 갱신한다.
@@ -138,6 +163,19 @@ export default function CandleChart({
       scaleMargins: { top: 1 - volumeHeightRatio, bottom: 0 },
     })
     volumeSeriesRef.current = volumeSeries
+
+    // VWAP 등 보조 라인 오버레이 — 캔들과 같은 가격 스케일('right')에 겹쳐 그린다.
+    // overlay가 없는 호출부(일봉 모드 등)에서도 빈 시리즈만 생기고 화면엔 아무것도
+    // 그려지지 않으므로 조건부로 만들 필요는 없다.
+    const overlaySeries = chart.addSeries(LineSeries, {
+      color: vars['--series-value'] || '#1baf7a',
+      lineWidth: 2,
+      priceScaleId: 'right',
+      lastValueVisible: false,
+      priceLineVisible: false,
+      crosshairMarkerVisible: false,
+    })
+    overlaySeriesRef.current = overlaySeries
 
     const legend = legendRef.current
 
@@ -212,6 +250,7 @@ export default function CandleChart({
       chartRef.current = null
       candleSeriesRef.current = null
       volumeSeriesRef.current = null
+      overlaySeriesRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 차트 인스턴스는 마운트 시 1회만 생성
   }, [])
@@ -248,9 +287,23 @@ export default function CandleChart({
     chartRef.current?.timeScale().fitContent()
   }, [points])
 
+  // 오버레이(VWAP 등)는 캔들/거래량과 별도 요청으로 도착할 수 있어(§5.3 시그널은
+  // intraday와 다른 API) 독립된 effect로 갱신한다 — 캔들 fitContent를 다시 트리거하지
+  // 않는다(시간축이 오버레이만으로 흔들리는 것을 방지).
+  useEffect(() => {
+    overlaySeriesRef.current?.setData(overlayPoints)
+  }, [overlayPoints])
+
   return (
     <div className="chart-card candle-chart-card">
-      <div className="chart-title">{title}</div>
+      <div className="chart-title">
+        {title}
+        {overlayPoints.length > 0 && (
+          <span className="candle-chart-overlay-legend">
+            <span className="dot" style={{ background: 'var(--series-value)' }} /> {overlayLabel}
+          </span>
+        )}
+      </div>
       <div className="candle-chart-wrap" style={{ height }}>
         <div ref={legendRef} className="candle-legend" />
         <div ref={containerRef} className="candle-chart-container" />

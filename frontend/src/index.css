@@ -276,6 +276,26 @@ header h1 {
   font-size: 13px;
   color: var(--text-secondary);
   padding: 0 12px 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* CandleChart 오버레이(VWAP 등) 범례 — PLAN.md §5.3 */
+.candle-chart-overlay-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.candle-chart-overlay-legend .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
 }
 
 .tooltip {
@@ -1095,6 +1115,29 @@ header h1 {
 
 .stock-detail-flow {
   margin-top: 16px;
+}
+
+/* 진입 타이밍 시그널 배지 (PLAN.md §5.3) — 분봉 모드 전용, 전부 관찰 서술. */
+.stock-detail-signals {
+  margin-top: 10px;
+}
+
+.stock-detail-signals-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.stock-detail-signals-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.stock-detail-signals-disclaimer {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
 }
 
 .stock-detail-flow-tiles {

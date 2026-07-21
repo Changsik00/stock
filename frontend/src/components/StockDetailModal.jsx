@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis } from 'recharts'
-import { STATIC_DATA, fetchStockIntraday, fetchStockSeries } from '../api'
+import { STATIC_DATA, fetchStockIntraday, fetchStockSeries, fetchStockSignals } from '../api'
 import { DEFAULT_INVESTORS, INTRADAY_OPTIONS, INVESTOR_COLOR_VAR } from '../constants'
 import { formatDate, formatEok } from '../format'
 import Badge from './Badge'
@@ -122,6 +122,92 @@ function FlowStatTiles({ flows }) {
   )
 }
 
+// 분봉으로 캔들 위에 겹칠 VWAP "라인"(누적 곡선)을 만든다 — 백엔드
+// GET /{code}/signals는 "지금까지 누적" 최종값 하나(vwap.value)만 주므로(§5.3
+// 배지 문구용), 곡선 자체는 이미 화면에 있는 intradayBars로 프런트에서 봉마다
+// 누적 계산한다. 전형가격(고+저+종가)/3 가중평균 — backend app/quant/signals.py
+// compute_vwap과 동일한 산식을 그대로 미러링(시각화 전용, 배지 수치의 근거는
+// 항상 서버 signals 응답 쪽을 쓴다).
+function computeVwapCurve(bars) {
+  let cumPv = 0
+  let cumVol = 0
+  const out = []
+  for (const b of bars || []) {
+    if (b.high == null || b.low == null || b.close == null) continue
+    const typical = (b.high + b.low + b.close) / 3
+    const vol = b.volume ?? 0
+    cumPv += typical * vol
+    cumVol += vol
+    out.push({ timestamp: b.timestamp, value: cumVol > 0 ? cumPv / cumVol : null })
+  }
+  return out
+}
+
+function fmtSignedPct1(v) {
+  if (v === null || v === undefined) return null
+  const sign = v > 0 ? '+' : ''
+  return `${sign}${v.toFixed(2)}%`
+}
+
+// 시그널 응답 -> 서술형 배지 목록(PLAN.md §5.3 "전부 관찰 서술, 지시 문구 금지").
+// 계산 불가/중립("none") 상태는 배지를 아예 안 만든다 — "관측된 사실"만 나열한다는
+// 원칙상 "아무 일 없음"까지 배지로 나열하면 오히려 신호처럼 읽힐 수 있어서다.
+function buildSignalBadges(signals) {
+  if (!signals) return []
+  const badges = []
+
+  const dev = signals.vwap?.deviation_pct
+  if (dev !== null && dev !== undefined) {
+    const side = dev >= 0 ? 'VWAP 상단' : 'VWAP 하단'
+    badges.push({ key: 'vwap', label: `${side} ${fmtSignedPct1(dev)}` })
+  }
+
+  const dir = signals.breakout?.direction
+  if (dir === 'high') badges.push({ key: 'breakout', label: '당일 신고가 돌파' })
+  else if (dir === 'low') badges.push({ key: 'breakout', label: '당일 신저가 돌파' })
+
+  const cross = signals.ma_cross?.state
+  if (cross === 'golden') badges.push({ key: 'ma_cross', label: '골든크로스 (5분/20분)' })
+  else if (cross === 'dead') badges.push({ key: 'ma_cross', label: '데드크로스 (5분/20분)' })
+
+  if (signals.volume_spike?.is_spike && signals.volume_spike?.ratio != null) {
+    badges.push({ key: 'volume_spike', label: `거래량 급증 ${signals.volume_spike.ratio.toFixed(1)}배` })
+  }
+
+  const mom = signals.momentum?.return_pct
+  const win = signals.momentum?.window_minutes
+  if (mom !== null && mom !== undefined && win) {
+    badges.push({ key: 'momentum', label: `${win}분 모멘텀 ${fmtSignedPct1(mom)}` })
+  }
+
+  return badges
+}
+
+// 분봉 모드 전용 "시그널" 섹션(PLAN.md §5.3) — VWAP 오버레이는 CandleChart가 그리고,
+// 여기서는 서술형 배지 목록 + 고정 안내 문구만 담당한다. 일봉 모드에서는 아예
+// 렌더링하지 않는다(§5.4 "일봉 모드엔 시그널 섹션 숨김" — 호출부에서 조건부 렌더).
+function SignalPanel({ loading, error, signals }) {
+  if (loading) return <div className="state">시그널 계산 중…</div>
+  if (error) return <div className="state error">시그널 불러오기 실패</div>
+  const badges = buildSignalBadges(signals)
+  return (
+    <div className="stock-detail-signals">
+      <div className="stock-detail-signals-badges">
+        {badges.length > 0 ? (
+          badges.map((b) => (
+            <Badge kind="info" key={b.key}>
+              {b.label}
+            </Badge>
+          ))
+        ) : (
+          <span className="stock-detail-signals-empty">특이 시그널 없음</span>
+        )}
+      </div>
+      <div className="stock-detail-signals-disclaimer">참고용 기술적 관찰 — 매매 신호 아님</div>
+    </div>
+  )
+}
+
 // 종목 상세 모달 (PLAN.md §6 3.7-2) — StockSearch에서 종목을 고르면 뜬다. initial은
 // 검색 결과 행({code, name, market, is_etf})을 그대로 넘겨받아, 헤더(이름/코드/배지)를
 // 시리즈 응답을 기다리지 않고 즉시 그릴 수 있게 한다 — 첫 조회는 외부 API를 거쳐
@@ -140,6 +226,12 @@ export default function StockDetailModal({ code, initial }) {
   const [intradayDate, setIntradayDate] = useState(null)
   const [intradayLoading, setIntradayLoading] = useState(false)
   const [intradayError, setIntradayError] = useState(null)
+  // 진입 타이밍 시그널(PLAN.md §5.3) — 분봉 모드에서만 별도 요청. intraday 캔들과
+  // 독립된 API(GET /{code}/signals)라 로딩 상태도 따로 둔다(캔들은 배지 없이도
+  // 먼저 그려질 수 있게).
+  const [signals, setSignals] = useState(null)
+  const [signalsLoading, setSignalsLoading] = useState(false)
+  const [signalsError, setSignalsError] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -183,6 +275,29 @@ export default function StockDetailModal({ code, initial }) {
     }
   }, [code, intradayMode])
 
+  useEffect(() => {
+    if (STATIC_DATA || intradayMode === 'daily') {
+      setSignals(null)
+      return undefined
+    }
+    let cancelled = false
+    setSignalsLoading(true)
+    setSignalsError(null)
+    fetchStockSignals(code, intradayMode)
+      .then((body) => {
+        if (!cancelled) setSignals(body)
+      })
+      .catch((e) => {
+        if (!cancelled) setSignalsError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setSignalsLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [code, intradayMode])
+
   // 모달을 닫았다 다른 종목으로 다시 열 때 이전 종목의 분봉 모드가 남아있지 않도록
   // — code가 바뀌면 항상 일봉으로 되돌린다(사용자가 매번 다시 고르게 함, 놀람 방지).
   useEffect(() => {
@@ -196,6 +311,7 @@ export default function StockDetailModal({ code, initial }) {
   const latestPrice = prices.length > 0 ? prices[prices.length - 1] : null
   const flowsError = series?.meta?.flows_error
   const hasFlows = !flowsError && series?.flows && Object.keys(series.flows).length > 0
+  const vwapCurve = useMemo(() => computeVwapCurve(intradayBars), [intradayBars])
 
   return (
     <div className="stock-detail">
@@ -253,13 +369,18 @@ export default function StockDetailModal({ code, initial }) {
             <div className="state">오늘 분봉 데이터가 없습니다(장 시작 전이거나 휴장일 수 있음).</div>
           )}
           {!intradayLoading && !intradayError && intradayBars.length > 0 && (
-            <CandleChart
-              key={`${code}-${intradayMode}`}
-              data={intradayBars}
-              height={280}
-              intraday
-              title={`캔들 · 거래량 (${intradayMode}분봉 · ${formatDate(intradayDate)})`}
-            />
+            <>
+              <CandleChart
+                key={`${code}-${intradayMode}`}
+                data={intradayBars}
+                height={280}
+                intraday
+                title={`캔들 · 거래량 (${intradayMode}분봉 · ${formatDate(intradayDate)})`}
+                overlay={vwapCurve}
+                overlayLabel="VWAP"
+              />
+              <SignalPanel loading={signalsLoading} error={signalsError} signals={signals} />
+            </>
           )}
         </>
       )}

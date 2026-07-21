@@ -295,12 +295,32 @@ export async function fetchStockIntraday(code, interval) {
   return getJson(`/api/stocks/${code}/intraday?interval=${interval}`)
 }
 
+// GET /api/stocks/{code}/signals?interval=N -> { code, interval, computed_at,
+// vwap: {value, deviation_pct}, breakout: {direction: "high"|"low"|"none"},
+// ma_cross: {state: "golden"|"dead"|"none", short_ma, long_ma},
+// volume_spike: {zscore, is_spike, ratio}, momentum: {return_pct, window_minutes} }
+// (PLAN.md §5.3) — 위 intraday와 같은 오늘 하루치 분봉을 서버가 내부에서 재사용해
+// 계산한다(관찰 서술 전용, 매매 지시 아님). 로컬 전용 기능, STATIC_DATA 대상 아님.
+export async function fetchStockSignals(code, interval) {
+  return getJson(`/api/stocks/${code}/signals?interval=${interval}`)
+}
+
 // GET /api/markets/{market}/intraday?interval=N -> { market, interval, date, bars: [...],
 // cached_at } (PLAN.md §5.1) — kospi/kosdaq은 키움 ka20005, futures는 501(선물 분봉
 // 소스 없음, 백엔드 routers/markets.py 모듈 주석 참고). 로컬 전용 기능, STATIC_DATA
 // 대상 아님.
 export async function fetchMarketIntraday(market, interval) {
   return getJson(`/api/markets/${market}/intraday?interval=${interval}`)
+}
+
+// GET /api/markets/scalp-candidates?limit=N -> { date, market_closed, cached_at,
+// rows: [{code, name, market, score, change_rate, turnover, in_attention_top,
+// value_rank_position}] } (PLAN.md §5.2) — 스켈핑 후보 스크리닝(참고용, 매매
+// 신호 아님). 백엔드가 value-rank/live(거래대금 상위)·attention(실시간 관심순위)
+// 두 라이브 캐시를 조합해 스코어링한다(신규 수집 없음). 로컬 전용 기능(장중
+// 스냅샷 성격 — flowLive/attention과 동일한 이유), STATIC_DATA 대상 아님.
+export async function fetchScalpCandidates(limit = 10) {
+  return getJson(`/api/markets/scalp-candidates?limit=${limit}`)
 }
 
 // GET /api/macro/series?ids=usdkrw,wti,brent&days=N -> { days, series: { id: [...] } }

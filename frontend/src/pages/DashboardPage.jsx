@@ -15,6 +15,7 @@ import {
   fetchGroupsLive,
   fetchMacroSeries,
   fetchMarketSeries,
+  fetchScalpCandidates,
   fetchSentiment,
   fetchValueRank,
   fetchValueRankLive,
@@ -168,6 +169,22 @@ function rateLabel(rate) {
   if (rate === null || rate === undefined) return '-'
   const sign = rate > 0 ? '+' : ''
   return `${sign}${rate.toFixed(2)}%`
+}
+
+// 스켈핑 후보 카드 전용(PLAN.md §5.2) — turnover(회전율 %)는 근거 배지 문구로만
+// 쓴다("회전율 8.2%"). score는 z-score 가중합이라(app/quant/screener.py 참고)
+// sentiment 게이지의 scoreClass(-100~100 기준)를 재사용하면 임계값이 전혀 안
+// 맞으므로 별도로 부호만 붙인 중립 표기를 쓴다 — 매매 방향을 암시하는 색(up/down)은
+// 의도적으로 넣지 않는다(참고용 스크리닝, 매매 신호 아님 원칙).
+function turnoverBadgeLabel(turnover) {
+  if (turnover === null || turnover === undefined) return null
+  return `회전율 ${turnover.toFixed(1)}%`
+}
+
+function scalpScoreLabel(score) {
+  if (score === null || score === undefined) return '-'
+  const sign = score > 0 ? '+' : ''
+  return `${sign}${score.toFixed(2)}`
 }
 
 // MM-DD만 뽑는다 (StaleDate/TOP5 "…기준" 라벨 공용) — formatDate가 이미
@@ -854,6 +871,65 @@ function AttentionFullModal({ onSelectStock }) {
   )
 }
 
+// 스켈핑 후보 전체 보기(PLAN.md §5.2) — AttentionFullModal과 동일하게 마운트 시
+// 자기 데이터를 불러오는 자기완결 컴포넌트다(카드가 폴링하는 5개보다 넉넉하게
+// limit=10 기본값으로 재조회). 근거 배지(회전율·관심 TOP)를 행마다 노출해 왜 이
+// 순위인지 바로 보이게 한다 — score 자체는 z-score 가중합이라 절대값에 의미가
+// 없으므로(app/quant/screener.py 참고) 근거 배지가 더 중요한 정보다.
+function ScalpCandidatesFullModal({ onSelectStock }) {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    fetchScalpCandidates(10)
+      .then((body) => {
+        if (!cancelled) setData(body)
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const rows = data?.rows || []
+
+  return (
+    <div>
+      <div className="toggle-hint" style={{ marginBottom: 8 }}>
+        거래대금 상위 + 실시간 관심순위 조합 스코어 · 참고용 스크리닝 — 매매 신호 아님
+        {data?.market_closed && ' · 장 마감(마지막 갱신 유지)'}
+      </div>
+      {loading && <div className="state">불러오는 중…</div>}
+      {error && <div className="state error">{error}</div>}
+      {!loading && !error && rows.length === 0 && <div className="state">표시할 데이터가 없습니다.</div>}
+      {!loading && !error && rows.length > 0 && (
+        <div>
+          {rows.map((row, i) => (
+            <Top5RowTile key={row.code} clickable onClick={() => onSelectStock(row)}>
+              <span className="top5-row-name">
+                <span className="top5-row-label">
+                  {i + 1}. {row.name || row.code}
+                </span>
+                {row.market && <Badge kind={row.market} />}
+                {turnoverBadgeLabel(row.turnover) && <Badge kind="info">{turnoverBadgeLabel(row.turnover)}</Badge>}
+                {row.in_attention_top && <Badge kind="live">관심 TOP</Badge>}
+              </span>
+              <span className="top5-row-value">{scalpScoreLabel(row.score)}</span>
+            </Top5RowTile>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // TOP5 카드 행 — clickable=true면 <button>(hover 배경 + 클릭), false면 기존과 동일한
 // <div>(정적 텍스트). 모든 랭킹 행 클릭 → 종목 상세 모달 통일(사용자 요구, 이전엔
@@ -949,6 +1025,11 @@ export default function DashboardPage() {
   // 담는다({ rows, qry_tp, queried_at }). flowLive와 동일하게 정적 배포에서는 항상
   // null로 남는다.
   const [attentionTop, setAttentionTop] = useState(null)
+  // 스켈핑 후보(PLAN.md §5.2) — GET /api/markets/scalp-candidates 응답 바디를 그대로
+  // 담는다({ date, market_closed, cached_at, rows }). value-rank/live·attention 두
+  // 라이브 캐시를 조합한 참고용 스크리닝이라 정적 배포에서는 항상 null(다른 로컬
+  // 전용 기능과 동일한 관례).
+  const [scalpCandidates, setScalpCandidates] = useState(null)
 
   const [modal, setModal] = useState(null) // { type, title, ...params } | null
 
@@ -1219,6 +1300,30 @@ export default function DashboardPage() {
         })
         .catch(() => {
           if (!cancelled) setValueRankLive(null)
+        })
+    }
+    load()
+    const intervalId = setInterval(load, EXTRA_LIVE_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(intervalId)
+    }
+  }, [])
+
+  // 스켈핑 후보 폴링(PLAN.md §5.2) — 백엔드가 조합하는 두 소스 중 더 느린 쪽
+  // (value-rank/live, 7분)에 맞춰 EXTRA_LIVE_POLL_MS를 그대로 쓴다(valueRankLive와
+  // 동일한 패턴). 실패 시 조용히 null로 두고 카드가 "표시할 데이터가 없습니다"를
+  // 자연히 보여주게 둔다.
+  useEffect(() => {
+    if (STATIC_DATA) return undefined
+    let cancelled = false
+    function load() {
+      fetchScalpCandidates(5)
+        .then((body) => {
+          if (!cancelled) setScalpCandidates(body)
+        })
+        .catch(() => {
+          if (!cancelled) setScalpCandidates(null)
         })
     }
     load()
@@ -1994,6 +2099,33 @@ export default function DashboardPage() {
             </Top5RowTile>
           )}
         />
+        {/* 스켈핑 후보(PLAN.md §5.2) — 거래대금 상위(value-rank/live) + 실시간 관심순위
+            (attention) 조합 스코어 상위. 참고용 스크리닝이지 매매 신호가 아니라는
+            문구를 hint에 항상 노출한다(§5 전체 원칙). 행 클릭은 실시간 관심 TOP5와
+            동일하게 바로 종목 상세 모달로 이어진다. */}
+        <Top5Card
+          title="스켈핑 후보"
+          hint="참고용 스크리닝 — 매매 신호 아님 · 7분 갱신"
+          rows={scalpCandidates?.rows}
+          onMore={() => setModal({ type: 'scalp', title: '스켈핑 후보 — 전체' })}
+          renderRow={(row, i) => (
+            <Top5RowTile
+              key={row.code}
+              clickable
+              onClick={() => openStockModal(row.code, row.name, { market: row.market })}
+            >
+              <span className="top5-row-name">
+                <span className="top5-row-label">
+                  {i + 1}. {row.name || row.code}
+                </span>
+                {row.market && <Badge kind={row.market} />}
+                {turnoverBadgeLabel(row.turnover) && <Badge kind="info">{turnoverBadgeLabel(row.turnover)}</Badge>}
+                {row.in_attention_top && <Badge kind="live">관심 TOP</Badge>}
+              </span>
+              <span className="top5-row-value">{scalpScoreLabel(row.score)}</span>
+            </Top5RowTile>
+          )}
+        />
       </div>
 
       <Modal open={Boolean(modal)} onClose={closeModal} title={modal?.title}>
@@ -2020,6 +2152,11 @@ export default function DashboardPage() {
         {modal?.type === 'attention' && (
           <AttentionFullModal
             onSelectStock={(row) => openStockModal(row.code, row.name, { market: row.market, is_etf: row.is_etf })}
+          />
+        )}
+        {modal?.type === 'scalp' && (
+          <ScalpCandidatesFullModal
+            onSelectStock={(row) => openStockModal(row.code, row.name, { market: row.market })}
           />
         )}
         {modal?.type === 'stock' && <StockDetailModal code={modal.code} initial={modal.stock} />}
