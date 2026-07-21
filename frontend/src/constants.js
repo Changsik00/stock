@@ -46,6 +46,16 @@ export const MACRO_SERIES = [
   { id: 'brent', label: '브렌트유', unit: '달러' },
 ]
 
+// 전일 미국장 4대 지수(PLAN.md §5.8) — macro_series 재사용, yfinance 1차/FRED 폴백
+// (다우·SOX는 FRED 대체 시리즈가 없어 yfinance 단일 소스). 미국장 EOD라 하루 1회
+// 배치로만 갱신되고(WTI와 동일한 관례) 라이브 갱신은 없다.
+export const US_INDEX_SERIES = [
+  { id: 'us_sp500', label: 'S&P500', unit: 'pt' },
+  { id: 'us_nasdaq', label: '나스닥종합', unit: 'pt' },
+  { id: 'us_dow', label: '다우존스', unit: 'pt' },
+  { id: 'us_sox', label: 'SOX(필라델피아반도체)', unit: 'pt' },
+]
+
 // 시장 자금·대차 보조 차트 (PLAN.md §3.5/§6 1.5-4) — kofia freesis 적재, macro_series
 // 재사용. 값은 전부 백만원 단위로 DB에 있어 화면에서는 조원으로 환산(§3.5: 1조원 =
 // 1,000,000백만원)해 표시한다. 신용융자는 코스피/코스닥 두 라인을 한 차트에 겹친다.

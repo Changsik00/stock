@@ -50,6 +50,7 @@ import {
   MACRO_SERIES,
   MARKETS,
   MARKET_FUND_IDS,
+  US_INDEX_SERIES,
 } from '../constants'
 import { formatDate } from '../format'
 
@@ -70,6 +71,9 @@ const countFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 0 })
 // 모달, 사용자 원문: "환율·유가 2~3개 차트만으로 탭 하나는 과하다").
 const fxFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 1, minimumFractionDigits: 1 })
 const oilFmt = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2, minimumFractionDigits: 2 })
+// 전일 미국장 4대 지수(PLAN.md §5.8) 타일 포맷 — pt 단위, 소수 1자리(WTI의 달러 2자리
+// 관례와 달리 지수 자체가 큰 값이라 1자리면 충분).
+const usIndexFmt = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1, minimumFractionDigits: 1 })
 // 베이시스(K200 선물-현물, pt) 타일 포맷 — PLAN.md §4.5-3/-5.
 const basisFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 2, minimumFractionDigits: 2 })
 
@@ -166,6 +170,11 @@ function fxLabel(value) {
 function oilLabel(value) {
   if (typeof value !== 'number') return '-'
   return `$${oilFmt.format(value)}`
+}
+
+function usIndexLabel(value) {
+  if (typeof value !== 'number') return '-'
+  return usIndexFmt.format(value)
 }
 
 function basisLabel(value) {
@@ -618,24 +627,24 @@ function FundModal() {
   )
 }
 
-// 환율(USD/KRW) · WTI · 브렌트 라인차트 3개 + 기간 선택 — 옛 MacroPage.jsx를 그대로
-// 모달로 옮긴 것이다(차트 렌더 로직은 components/MacroChart.jsx로 뽑아 공용화). 타일은
-// 환율/WTI 2개만 두지만(브렌트는 타일 생략 지시) 모달에서는 기존과 동일하게 3개 라인을
-// 전부 보여준다.
+// 환율(USD/KRW) · WTI · 브렌트 라인차트 3개 + 전일 미국장 4대 지수(S&P500/나스닥/다우/SOX,
+// PLAN.md §5.8) + 기간 선택 — 옛 MacroPage.jsx를 그대로 모달로 옮긴 것이다(차트 렌더
+// 로직은 components/MacroChart.jsx로 뽑아 공용화). 타일은 환율/WTI/미국 4대 지수만 두지만
+// (브렌트는 타일 생략 지시) 모달에서는 기존 3개 라인 + 미국 4대 지수까지 전부 보여준다
+// (환율/유가와 스케일이 달라 섹션 제목으로만 구분하고 차트 자체는 나누지 않는다).
 function MacroModal() {
   const [days, setDays] = useState(DEFAULT_MACRO_DAYS)
   const [seriesMap, setSeriesMap] = useState({})
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
+  const allIds = [...MACRO_SERIES.map((s) => s.id), ...US_INDEX_SERIES.map((s) => s.id)]
+
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     setError(null)
-    fetchMacroSeries(
-      MACRO_SERIES.map((s) => s.id),
-      days
-    )
+    fetchMacroSeries(allIds, days)
       .then((body) => {
         if (!cancelled) setSeriesMap(body.series || {})
       })
@@ -648,6 +657,7 @@ function MacroModal() {
     return () => {
       cancelled = true
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [days])
 
   return (
@@ -656,11 +666,21 @@ function MacroModal() {
       {loading && <div className="state">불러오는 중…</div>}
       {error && <div className="state error">{error}</div>}
       {!loading && !error && (
-        <div className="chart-stack">
-          {MACRO_SERIES.map((s) => (
-            <MacroChart key={s.id} label={s.label} unit={s.unit} points={seriesMap[s.id] || []} />
-          ))}
-        </div>
+        <>
+          <div className="chart-stack">
+            {MACRO_SERIES.map((s) => (
+              <MacroChart key={s.id} label={s.label} unit={s.unit} points={seriesMap[s.id] || []} />
+            ))}
+          </div>
+          <div className="section-title" style={{ marginTop: 16 }}>
+            전일 미국장 4대 지수
+          </div>
+          <div className="chart-stack">
+            {US_INDEX_SERIES.map((s) => (
+              <MacroChart key={s.id} label={s.label} unit={s.unit} points={seriesMap[s.id] || []} />
+            ))}
+          </div>
+        </>
       )}
     </div>
   )
@@ -1521,7 +1541,7 @@ export default function DashboardPage() {
   useEffect(() => {
     let cancelled = false
     fetchMacroSeries(
-      MACRO_SERIES.map((s) => s.id),
+      [...MACRO_SERIES.map((s) => s.id), ...US_INDEX_SERIES.map((s) => s.id)],
       MACRO_TILE_DAYS
     )
       .then((body) => {
@@ -2296,7 +2316,7 @@ export default function DashboardPage() {
             </>
           }
           title={macroDate('usdkrw') ? formatDate(macroDate('usdkrw')) : undefined}
-          onClick={() => setModal({ type: 'macro', title: '환율 · 유가' })}
+          onClick={() => setModal({ type: 'macro', title: '환율 · 유가 · 전일 미국장' })}
         />
         <KpiTile
           label="WTI"
@@ -2308,8 +2328,26 @@ export default function DashboardPage() {
             </>
           }
           title={macroDate('wti') ? formatDate(macroDate('wti')) : undefined}
-          onClick={() => setModal({ type: 'macro', title: '환율 · 유가' })}
+          onClick={() => setModal({ type: 'macro', title: '환율 · 유가 · 전일 미국장' })}
         />
+        {/* 전일 미국장 4대 지수(PLAN.md §5.8, 2026-07-22 사용자 제안) — 미국장 EOD라
+            WTI와 동일하게 라이브 갱신 없이 하루 1회 배치 값 + StaleDate 배지만 보여준다.
+            등락 색은 다른 지수 타일과 동일한 관례(neutral 없이 up=상승/down=하락). */}
+        {US_INDEX_SERIES.map((s) => (
+          <KpiTile
+            key={s.id}
+            label={s.label}
+            value={usIndexLabel(macroLatest(s.id))}
+            sub={
+              <>
+                <DiffArrow current={macroLatest(s.id)} prev={macroPrev(s.id)} formatter={(v) => usIndexFmt.format(v)} />
+                <StaleDate date={macroDate(s.id)} baseDate={baseDate} prefix=" · " />
+              </>
+            }
+            title={macroDate(s.id) ? formatDate(macroDate(s.id)) : undefined}
+            onClick={() => setModal({ type: 'macro', title: '환율 · 유가 · 전일 미국장' })}
+          />
+        ))}
       </div>
 
       {/* 4. 컴팩트 트리맵 */}

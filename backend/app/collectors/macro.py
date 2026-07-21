@@ -14,7 +14,7 @@ import httpx
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..clients import commodities, kofia, naver_fx
+from ..clients import commodities, kofia, naver_fx, us_indices
 from ..models import MacroSeries
 from .base import REGISTRY
 
@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 LOOKBACK_DAYS = 10
 
 OIL_SERIES = ("wti", "brent")
+
+# 전일 미국장 4대 지수(PLAN.md §5.8) — S&P500/나스닥/다우/필라델피아반도체(SOX).
+US_INDEX_SERIES = ("us_sp500", "us_nasdaq", "us_dow", "us_sox")
 
 
 async def upsert_series_rows(session: AsyncSession, rows: list[dict], series: str) -> int:
@@ -95,9 +98,24 @@ async def _collect_kofia(session: AsyncSession, start: dt.date, target_date: dt.
     return total
 
 
+async def _collect_us_indices(session: AsyncSession, start: dt.date, target_date: dt.date) -> int:
+    """전일 미국장 4대 지수(PLAN.md §5.8) 수집 — yfinance 단일/폴백 소스라 장중
+    실행 시 아직 전일 종가가 없거나 yfinance 일시 장애가 있을 수 있으므로,
+    kofia와 동일하게 시리즈별로 개별 try/except로 감싸 다른 매크로 수집
+    (환율/유가/KOFIA)을 막지 않는다."""
+    total = 0
+    for series in US_INDEX_SERIES:
+        try:
+            rows = await asyncio.to_thread(us_indices.fetch_us_index_series, series, start, target_date)
+            total += await upsert_series_rows(session, rows, series)
+        except Exception as e:  # noqa: BLE001 - deliberately broad, see docstring
+            logger.warning("us_indices %s 수집 실패: %s", series, e)
+    return total
+
+
 async def collect_macro(session: AsyncSession, target_date: dt.date) -> int:
-    """Fetch USD/KRW (naver/FRED) + WTI/Brent (yfinance/FRED) + KOFIA(예탁금/신용융자/대차잔고)
-    around target_date, upsert all."""
+    """Fetch USD/KRW (naver/FRED) + WTI/Brent (yfinance/FRED) + 미국 4대 지수
+    (yfinance/FRED) + KOFIA(예탁금/신용융자/대차잔고) around target_date, upsert all."""
     start = target_date - dt.timedelta(days=LOOKBACK_DAYS)
     total = 0
 
@@ -109,6 +127,8 @@ async def collect_macro(session: AsyncSession, target_date: dt.date) -> int:
     for series in OIL_SERIES:
         oil_rows = await asyncio.to_thread(commodities.fetch_oil_series, series, start, target_date)
         total += await upsert_series_rows(session, oil_rows, series)
+
+    total += await _collect_us_indices(session, start, target_date)
 
     total += await _collect_kofia(session, start, target_date)
 
