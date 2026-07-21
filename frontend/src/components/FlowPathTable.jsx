@@ -54,6 +54,13 @@ function EtfContribDot({ contrib }) {
   )
 }
 
+// MM-DD만 뽑는다(DashboardPage.jsx의 mmdd/StaleDate와 동일한 관례) — 개별 기여 ETF
+// 배지에 인라인으로 붙일 때 쓴다(§5.6-2).
+function mmdd(date) {
+  const d = formatDate(date)
+  return typeof d === 'string' && d.length === 10 ? d.slice(5) : d
+}
+
 // onRowClick(code, name) — FlowRankTable/ValueRankTable과 동일한 선택 prop. 행
 // 클릭만 종목 상세 모달로 연결하고, 기여 ETF 배지(EtfContribDot/title 툴팁)는 원래
 // 자체 onClick이 없어 행 클릭과 겹치지 않는다 — 배지 쪽은 건드리지 않는다.
@@ -126,18 +133,28 @@ export default function FlowPathTable({ loading, error, date, rows, direction = 
                             ETF(code)가 두 번 나타나는 경우(예: 서로 다른 basis/date로
                             중복 집계된 기여분)가 실제로 관측되어(122630/233740 등)
                             etf.code만으로는 key가 겹쳤다. */}
-                        {(row.top_etfs || []).slice(0, 3).map((etf, j) => (
-                          <span
-                            key={`${etf.code}-${j}`}
-                            className="flow-path-etf-badge"
-                            title={`${etf.name || etf.code} · ${eokLabel(etf.contrib)} · ${
-                              BASIS_LABEL[etf.basis] || etf.basis
-                            } · ${formatDate(etf.date)} · ${etf.contrib > 0 ? '설정' : etf.contrib < 0 ? '환매' : ''}`}
-                          >
-                            <EtfContribDot contrib={etf.contrib} />
-                            {etf.name || etf.code}
-                          </span>
-                        ))}
+                        {/* §5.6-2: 상단 "YYYY-MM-DD 기준"은 flow_path 행 자체의 날짜일 뿐,
+                            기여 ETF(top_etfs) 각각의 basis(etf_stats/flow_rank) 관측일은 제각각일
+                            수 있다(예: 07-20/07-15 혼재 — PLAN.md §5.6 진단). title 툴팁에는
+                            원래도 formatDate(etf.date)가 있었지만 호버해야만 보였다 — 상단 날짜와
+                            다른 ETF에는 마우스를 올리지 않아도 보이도록 인라인 MM-DD를 덧붙인다. */}
+                        {(row.top_etfs || []).slice(0, 3).map((etf, j) => {
+                          const etfDateMismatch =
+                            etf.date && date && formatDate(etf.date) !== formatDate(date)
+                          return (
+                            <span
+                              key={`${etf.code}-${j}`}
+                              className="flow-path-etf-badge"
+                              title={`${etf.name || etf.code} · ${eokLabel(etf.contrib)} · ${
+                                BASIS_LABEL[etf.basis] || etf.basis
+                              } · ${formatDate(etf.date)} · ${etf.contrib > 0 ? '설정' : etf.contrib < 0 ? '환매' : ''}`}
+                            >
+                              <EtfContribDot contrib={etf.contrib} />
+                              {etf.name || etf.code}
+                              {etfDateMismatch && <span className="stale-date"> {mmdd(etf.date)}</span>}
+                            </span>
+                          )
+                        })}
                         {(!row.top_etfs || row.top_etfs.length === 0) && (
                           <span className="flow-path-etf-empty">–</span>
                         )}

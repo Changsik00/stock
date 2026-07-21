@@ -1737,6 +1737,13 @@ export default function DashboardPage() {
     const points = macroSeries[id] || []
     return points.length > 0 ? points[points.length - 1].date : null
   }
+  // §5.6-1: fundSeries(투자자예탁금/신용융자/대차잔고)도 macroSeries와 동일한
+  // /api/macro/series 응답이라 각 포인트에 date가 이미 있다 — macroDate와 동일한
+  // 관례로 최신 포인트의 date만 뽑는다(KPI 타일 StaleDate 배지용).
+  const fundDate = (id) => {
+    const points = fundSeries[id] || []
+    return points.length > 0 ? points[points.length - 1].date : null
+  }
   // 신용융자 타일 — 코스피+코스닥 두 시리즈를 합산해 단일 숫자로 보여준다(MARKET_FUND_IDS
   // 관례상 별도 "합계" id가 없다). 둘 다 없으면 null(대시 표시), 하나라도 있으면 0으로
   // 보정해 더한다.
@@ -1748,6 +1755,10 @@ export default function DashboardPage() {
   }
   const creditLoanLatest = creditLoanSum(fundLatest)
   const creditLoanPrev = creditLoanSum(fundPrev)
+  // 코스피/코스닥 두 시리즈가 서로 다른 날짜에 멈춰 있을 수 있어(KOFIA 소스별 지연이
+  // 다를 수 있음) latestOf로 더 최근 쪽을 대표일로 쓴다 — macroDate('usdkrw') 등과
+  // 동일한 "여러 후보 중 최신" 관례.
+  const creditLoanDate = latestOf(fundDate('credit_loan_kospi'), fundDate('credit_loan_kosdaq'))
 
   const etfComponent = sentiment?.components?.etf
 
@@ -2205,35 +2216,52 @@ export default function DashboardPage() {
           sub={<span className="kpi-tile-sub">코스피+코스닥 합계</span>}
           onClick={() => setModal({ type: 'breadth', title: '등락 종목수' })}
         />
+        {/* §5.6-1: 예탁금/대차잔고/신용융자는 KOFIA T+1(영업일) 공시라 구조적으로
+            라이브 불가(§4.7-4, §7에 기록됨, 바꾸지 않음) — 그래서 실제 데이터 날짜가
+            오늘과 다를 때가 대부분이다. ETF순유입/WTI 타일과 동일한 StaleDate("MM-DD"
+            회색 배지) 패턴을 그대로 재사용해 "이 값이 언제 기준인지"를 명시한다. */}
         <KpiTile
           label="투자자예탁금"
           value={trillionLabel(fundLatest('investor_deposit'))}
           sub={
-            <DiffArrow
-              current={trillion(fundLatest('investor_deposit'))}
-              prev={trillion(fundPrev('investor_deposit'))}
-              formatter={(v) => `${joFmt.format(v)}조`}
-            />
+            <>
+              <DiffArrow
+                current={trillion(fundLatest('investor_deposit'))}
+                prev={trillion(fundPrev('investor_deposit'))}
+                formatter={(v) => `${joFmt.format(v)}조`}
+              />
+              <StaleDate date={fundDate('investor_deposit')} baseDate={baseDate} prefix=" · " />
+            </>
           }
+          title={fundDate('investor_deposit') ? formatDate(fundDate('investor_deposit')) : undefined}
           onClick={() => setModal({ type: 'fund', title: '시장 자금 · 대차' })}
         />
         <KpiTile
           label="대차잔고"
           value={trillionLabel(fundLatest('lending_balance'))}
           sub={
-            <DiffArrow
-              current={trillion(fundLatest('lending_balance'))}
-              prev={trillion(fundPrev('lending_balance'))}
-              formatter={(v) => `${joFmt.format(v)}조`}
-            />
+            <>
+              <DiffArrow
+                current={trillion(fundLatest('lending_balance'))}
+                prev={trillion(fundPrev('lending_balance'))}
+                formatter={(v) => `${joFmt.format(v)}조`}
+              />
+              <StaleDate date={fundDate('lending_balance')} baseDate={baseDate} prefix=" · " />
+            </>
           }
+          title={fundDate('lending_balance') ? formatDate(fundDate('lending_balance')) : undefined}
           onClick={() => setModal({ type: 'fund', title: '시장 자금 · 대차' })}
         />
         <KpiTile
           label="신용융자"
           value={creditLoanLatest !== null ? `${joFmt.format(creditLoanLatest)}조` : '-'}
-          sub={<DiffArrow current={creditLoanLatest} prev={creditLoanPrev} formatter={(v) => `${joFmt.format(v)}조`} />}
-          title="코스피+코스닥 합계"
+          sub={
+            <>
+              <DiffArrow current={creditLoanLatest} prev={creditLoanPrev} formatter={(v) => `${joFmt.format(v)}조`} />
+              <StaleDate date={creditLoanDate} baseDate={baseDate} prefix=" · " />
+            </>
+          }
+          title={creditLoanDate ? `코스피+코스닥 합계 · ${formatDate(creditLoanDate)}` : '코스피+코스닥 합계'}
           onClick={() => setModal({ type: 'fund', title: '시장 자금 · 대차' })}
         />
         <KpiTile
@@ -2369,7 +2397,19 @@ export default function DashboardPage() {
         />
         <Top5Card
           title="ETF 경유 상위"
-          hint={flowPathTop?.date ? staleHintLabel(flowPathTop.date, baseDate, '유입') || '유입' : undefined}
+          // §5.6-2: 형제 카드(수급 상위="확정 MM-DD", 거래대금 상위="7분 경신")와
+          // 달리 헤더에 날짜 배지가 없던 문제 — flow-path 응답 최상위 date를 "확정
+          // MM-DD"로 항상 노출한다(수급 상위와 동일한 문구, staleHintLabel처럼
+          // baseDate 대비 뒤처졌을 때만 표시하는 조건은 걸지 않는다 — 이 카드는
+          // 배치 스냅샷이라 "언제 확정된 값인지"가 항상 의미 있는 정보이기 때문).
+          hint={
+            <span title="기여 ETF마다 날짜가 다를 수 있습니다 — 배지에 마우스를 올려 확인">
+              유입
+              {flowPathTop?.date && (
+                <span className="stale-date"> · 확정 {mmdd(flowPathTop.date)}</span>
+              )}
+            </span>
+          }
           hoverDate={flowPathTop?.date ? formatDate(flowPathTop.date) : undefined}
           rows={flowPathTop?.rows}
           onMore={() => setModal({ type: 'flowPath', title: 'ETF 경유 수급 상위 — 전체' })}
