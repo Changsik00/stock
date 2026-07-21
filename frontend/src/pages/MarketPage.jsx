@@ -94,10 +94,13 @@ export default function MarketPage() {
   // DashboardPage.jsx의 모달은 타입이 여러 개(candle/sentiment/…)라 { type, ... } 객체를
   // 쓰지만, 여기서는 종목 상세 하나뿐이라 { code, name, market, is_etf } | null로 충분하다.
   const [stockModal, setStockModal] = useState(null)
-  // 분봉 토글(PLAN.md §5.1) — 'daily'(기본, 기존 일봉)면 아래 fetchMarketSeries 로직을
-  // 그대로 쓰고, 정수 분이면 이 state들이 CandleChart를 대체한다. 선물 탭은 분봉 소스가
-  // 없어(routers/markets.py 501) 'daily'로 강제한다(아래 effect).
-  const [intradayMode, setIntradayMode] = useState('daily')
+  // 분봉 토글(PLAN.md §5.1/§5.5-1) — 'daily'면 아래 fetchMarketSeries 로직을 그대로
+  // 쓰고, 정수 분이면 이 state들이 CandleChart를 대체한다. 기본값은 1분(§5.5-1
+  // "지수 차트 1D 통일" — 이전엔 분봉 토글을 만들어놓고 기본은 여전히 일봉이었다).
+  // 선물 탭은 분봉 소스가 없어(routers/markets.py 501) 'daily'로 강제한다(아래
+  // effect). 정적 배포(STATIC_DATA)는 실시간 온디맨드 소스가 없어 'daily'로 시작한다
+  // (아래 토글 UI 자체도 STATIC_DATA일 때 숨긴다).
+  const [intradayMode, setIntradayMode] = useState(STATIC_DATA || market === 'futures' ? 'daily' : 1)
   const [intradayBars, setIntradayBars] = useState([])
   const [intradayDate, setIntradayDate] = useState(null)
   const [intradayError, setIntradayError] = useState(null)

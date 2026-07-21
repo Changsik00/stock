@@ -17,6 +17,7 @@ import {
   fetchGroupsLive,
   fetchIndexTilesLive,
   fetchMacroSeries,
+  fetchMarketIntraday,
   fetchMarketSeries,
   fetchScalpCandidates,
   fetchSentiment,
@@ -41,7 +42,14 @@ import SentimentGauge from '../components/SentimentGauge'
 import StockDetailModal from '../components/StockDetailModal'
 import StockSearch from '../components/StockSearch'
 import ValueRankTable from '../components/ValueRankTable'
-import { DEFAULT_INVESTORS, INVESTOR_COLOR_VAR, MACRO_SERIES, MARKETS, MARKET_FUND_IDS } from '../constants'
+import {
+  DEFAULT_INVESTORS,
+  INTRADAY_OPTIONS,
+  INVESTOR_COLOR_VAR,
+  MACRO_SERIES,
+  MARKETS,
+  MARKET_FUND_IDS,
+} from '../constants'
 import { formatDate } from '../format'
 
 // 대시보드 탭 (PLAN.md §6 3.7-1, 사용자 원문: "장황하게 정보가 노출됨. 디테일은 뒤로
@@ -115,14 +123,23 @@ const FLOW_RANK_LOOKBACK_DAYS = 7
 // 작업(PLAN.md)과 함께 수정. breadth·flowLive·attentionTop·scalpCandidates는
 // 원래 독립 setInterval 4개였으나 1분 티어 useEffect 하나로 통합했다(BreadthModal의
 // setInterval은 모달 전용이라 별개로 남는다).
+//
+// 2026-07-21(§5.5-2)부터 업종/테마 등락률 groups·베이시스 basis·외인 선물수급
+// futures-flow도 이 1분 티어에 합류했다(원래 7분 티어 소속, 아래 EXTRA_LIVE_POLL_MS
+// 주석 참고) — 백엔드 캐시 TTL 자체는 여전히 420초(routers/basis.py·groups.py·
+// markets.py)라 프런트가 60초마다 재요청해도 캐시가 갱신될 때만 새 값을 받는다.
+// 즉 서버 부담은 늘지 않고(캐시 미스 빈도 그대로), 프런트가 캐시 갱신 시점을 더
+// 빨리(최대 1분 지연) 따라잡을 뿐이다.
 const BREADTH_LIVE_POLL_MS = 60_000
-// 7분 티어(거래대금 상위 value-rank·업종/테마 등락률 groups·베이시스 basis·외인
-// 선물수급 futures-flow) 자동 갱신 주기 — 백엔드 5~10분 캐시(routers/basis.py·
-// groups.py·flow_rank.py·markets.py의 LIVE_TTL_SECONDS/_FUTURES_FLOW_LIVE_TTL_SECONDS
-// =420초)와 맞춘다(PLAN.md §4.7 3단 갱신 주기, 2026-07-20 장중 실측: 4개 소스 모두
-// 7분 이내 값 변화 확인). 수급 상위(flow-rank)는 실측 결과 소스가 2영업일 이상
-// 지연돼 있어 라이브로 편입하지 않았다 — EOD(FLOW_RANK_LOOKBACK_DAYS 기준) 그대로
-// 유지. 위 4개 소스도 독립 setInterval 4개에서 7분 티어 useEffect 하나로 통합했다.
+// 7분 티어 — 이제 거래대금 상위(value-rank) 하나만 남았다. 백엔드 5~10분 캐시
+// (routers/flow_rank.py의 LIVE_TTL_SECONDS=420초)와 맞춘다(PLAN.md §4.7 3단 갱신
+// 주기, 2026-07-20 장중 실측으로 편입). value-rank만 7분을 유지하는 이유(§5.5-2
+// 진단②): 코스피+코스닥 전 종목(~4,300종목) 페이지네이션이 필요해 사이클당
+// ~44요청·13초+가 걸리는 진짜 비싼 호출이라, 유가(yfinance) 429 차단 전례와 같은
+// 리스크 카테고리로 보수적으로 유지한다. 업종/테마·베이시스·외인선물수급은 목록·
+// 단일 조회 1회뿐이라 비용이 없어 위 1분 티어로 옮겼다. 수급 상위(flow-rank)는
+// 실측 결과 소스가 2영업일 이상 지연돼 있어 애초에 라이브로 편입하지 않았다 —
+// EOD(FLOW_RANK_LOOKBACK_DAYS 기준) 그대로 유지.
 const EXTRA_LIVE_POLL_MS = 420_000
 
 function eokLabel(million) {
@@ -317,14 +334,56 @@ function KpiTile({ label, value, valueClass, sub, onClick, title }) {
 // 작업 지시에 따라 MarketPage를 import하지 않고 이 파일 안에서 자기완결로 둔다).
 // ---------------------------------------------------------------------------
 
+// 지수 타일 클릭 시 뜨는 캔들 모달 — 분봉 토글(PLAN.md §5.5-1) 추가 전에는 90일
+// EOD만 보여줘 다른 수급 모달들(1D 기본)과 기본값이 어긋나 있었다. MarketPage.jsx의
+// intradayMode 토글과 동일한 패턴을 이식한다(코드 재사용보다 최소 침습 이식을
+// 선택 — 작업 지시 참고). 기본값은 1분(§5.5-1), 선물은 분봉 소스가 없어
+// (routers/markets.py 501) 'daily'로 강제, 정적 배포(STATIC_DATA)도 실시간
+// 온디맨드 소스가 없어 'daily'로 시작하고 토글 UI 자체를 숨긴다.
 function CandleModal({ market }) {
   const label = MARKETS.find((m) => m.key === market)?.label || market
+  const [intradayMode, setIntradayMode] = useState(STATIC_DATA || market === 'futures' ? 'daily' : 1)
   const [days, setDays] = useState(DEFAULT_CANDLE_DAYS)
   const [prices, setPrices] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
+  const [intradayBars, setIntradayBars] = useState([])
+  const [intradayDate, setIntradayDate] = useState(null)
+  const [intradayLoading, setIntradayLoading] = useState(false)
+  const [intradayError, setIntradayError] = useState(null)
+
+  // 선물엔 분봉 옵션이 없다 — 혹시라도 futures 모달이 분봉 모드로 남아 있으면
+  // 되돌린다(MarketPage.jsx와 동일한 안전장치).
   useEffect(() => {
+    if (market === 'futures' && intradayMode !== 'daily') setIntradayMode('daily')
+  }, [market, intradayMode])
+
+  useEffect(() => {
+    if (STATIC_DATA || intradayMode === 'daily' || market === 'futures') return undefined
+    let cancelled = false
+    setIntradayLoading(true)
+    setIntradayError(null)
+    fetchMarketIntraday(market, intradayMode)
+      .then((body) => {
+        if (!cancelled) {
+          setIntradayBars(body.bars || [])
+          setIntradayDate(body.date)
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setIntradayError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setIntradayLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [market, intradayMode])
+
+  useEffect(() => {
+    if (intradayMode !== 'daily') return undefined
     let cancelled = false
     setLoading(true)
     setError(null)
@@ -341,19 +400,66 @@ function CandleModal({ market }) {
     return () => {
       cancelled = true
     }
-  }, [market, days])
+  }, [market, days, intradayMode])
 
   return (
     <div>
       <div className="toggle-hint" style={{ marginBottom: 8 }}>
         {label} · 캔들 + 거래량
       </div>
-      <PeriodPicker value={days} onChange={setDays} />
-      {loading && <div className="state">불러오는 중…</div>}
-      {error && <div className="state error">{error}</div>}
-      {!loading && !error && prices && prices.length > 0 && <CandleChart data={prices} height={320} />}
-      {!loading && !error && prices && prices.length === 0 && (
-        <div className="state">해당 기간에 표시할 데이터가 없습니다.</div>
+
+      {!STATIC_DATA && (
+        <div className="toggle-row">
+          {INTRADAY_OPTIONS.map((opt) => {
+            const disabled = market === 'futures' && opt.key !== 'daily'
+            return (
+              <button
+                key={opt.key}
+                type="button"
+                className={`toggle-chip ${intradayMode === opt.key ? 'active' : ''}`}
+                disabled={disabled}
+                title={disabled ? 'K200 선물은 분봉 데이터 소스가 없습니다' : undefined}
+                onClick={() => setIntradayMode(opt.key)}
+              >
+                {opt.label}
+              </button>
+            )
+          })}
+          <span className="toggle-hint">
+            {intradayMode === 'daily' ? '분봉은 오늘 하루치만 제공' : '오늘 하루치 · 참고용'}
+          </span>
+        </div>
+      )}
+
+      {intradayMode === 'daily' && (
+        <>
+          <PeriodPicker value={days} onChange={setDays} />
+          {loading && <div className="state">불러오는 중…</div>}
+          {error && <div className="state error">{error}</div>}
+          {!loading && !error && prices && prices.length > 0 && <CandleChart data={prices} height={320} />}
+          {!loading && !error && prices && prices.length === 0 && (
+            <div className="state">해당 기간에 표시할 데이터가 없습니다.</div>
+          )}
+        </>
+      )}
+
+      {intradayMode !== 'daily' && (
+        <>
+          {intradayLoading && <div className="state">불러오는 중…</div>}
+          {intradayError && <div className="state error">{intradayError}</div>}
+          {!intradayLoading && !intradayError && intradayBars.length === 0 && (
+            <div className="state">오늘 분봉 데이터가 없습니다(장 시작 전이거나 휴장일 수 있음).</div>
+          )}
+          {!intradayLoading && !intradayError && intradayBars.length > 0 && (
+            <CandleChart
+              key={`${market}-${intradayMode}`}
+              data={intradayBars}
+              intraday
+              height={320}
+              title={`캔들 · 거래량 (${intradayMode}분봉 · ${formatDate(intradayDate)})`}
+            />
+          )}
+        </>
       )}
     </div>
   )
@@ -1155,11 +1261,12 @@ export default function DashboardPage() {
   const [derivativeFlow, setDerivativeFlow] = useState(null)
   const [programFlow, setProgramFlow] = useState({})
 
-  // PLAN.md §4.7 3단 갱신 주기(2026-07-20 장중 실측 편입) — 베이시스·외인 선물수급의
-  // 7분 라이브 오버레이. null이면 "라이브 없음"(폴링 전/실패/정적 배포)이라 아래
-  // KPI 타일은 항상 기존 EOD 값(basisData/foreignFuturesRow)으로 폴백한다 —
-  // flowLive와 동일한 "오버레이 + 폴백" 관례. 시그널 판정(foreignSignals)은 EOD
-  // 데이터 기준을 그대로 유지한다(라이브 값은 표시만, 판정 기준은 안 바꿈).
+  // PLAN.md §4.7 3단 갱신 주기(2026-07-20 장중 실측 편입, §5.5-2로 7분→1분 이동) —
+  // 베이시스·외인 선물수급의 1분 라이브 오버레이. null이면 "라이브 없음"(폴링 전/
+  // 실패/정적 배포)이라 아래 KPI 타일은 항상 기존 EOD 값(basisData/foreignFuturesRow)
+  // 으로 폴백한다 — flowLive와 동일한 "오버레이 + 폴백" 관례. 시그널 판정
+  // (foreignSignals)은 EOD 데이터 기준을 그대로 유지한다(라이브 값은 표시만, 판정
+  // 기준은 안 바꿈).
   const [basisLive, setBasisLive] = useState(null)
   const [futuresFlowLive, setFuturesFlowLive] = useState(null)
 
@@ -1167,9 +1274,10 @@ export default function DashboardPage() {
   const [groupItems, setGroupItems] = useState([])
   const [groupLoading, setGroupLoading] = useState(false)
   const [groupError, setGroupError] = useState(null)
-  // 업종/테마 등락률 7분 라이브 오버레이(PLAN.md §4.7) — { type, rows: [{name,
-  // change_rate}], ... }. groupItems(EOD, value/market_sum 포함)와 이름 기준으로
-  // 병합해 트리맵 박스 크기는 유지하면서 색(등락률)만 갱신한다(아래 groupTreemapItems).
+  // 업종/테마 등락률 1분 라이브 오버레이(PLAN.md §4.7, §5.5-2로 7분→1분 이동) —
+  // { type, rows: [{name, change_rate}], ... }. groupItems(EOD, value/market_sum
+  // 포함)와 이름 기준으로 병합해 트리맵 박스 크기는 유지하면서 색(등락률)만
+  // 갱신한다(아래 groupTreemapItems).
   const [groupLive, setGroupLive] = useState(null)
 
   const [flowRankTop, setFlowRankTop] = useState(null)
@@ -1231,7 +1339,17 @@ export default function DashboardPage() {
   // 번에 실행한다 — 백엔드는 엔드포인트별 TTL 캐시를 그대로 쓰므로 서버 부하는
   // 그대로고, 프런트 쪽 타이머 개수만 준다. breadth는 fetchBreadthLive() 내부에서
   // STATIC_DATA를 이미 처리하므로(정적 스냅샷 폴백) 이 효과 전체에는 STATIC_DATA
-  // 가드를 두지 않고, 나머지 3개만 개별적으로 가드한다.
+  // 가드를 두지 않고, 나머지는 개별적으로 가드한다.
+  //
+  // groupLive(업종/테마 등락률)·basisLive(베이시스)·futuresFlowLive(외인 선물수급)도
+  // 2026-07-21(§5.5-2)부터 이 1분 티어에 합류했다 — 원래 value-rank와 같은 7분
+  // 티어에 있었지만 실측 결과(PLAN.md §5.5 진단②) 이 셋은 그룹 목록/단일 조회
+  // 1회뿐인 가벼운 호출이라 "단순함을 위해" 묶여 있었을 뿐 1분으로 당겨도 백엔드
+  // 비용이 늘지 않는다(비싼 건 코스피+코스닥 전 종목 페이지네이션인 value-rank
+  // 하나뿐 — 아래 7분 티어에 그대로 남긴다). groupLive는 groupType(업종/테마 탭)에
+  // 의존하므로 이 effect의 dependency에도 groupType을 추가했다 — 탭이 바뀌면 나머지
+  // (breadth·flowLive 등)도 함께 재요청되지만 전부 자기 완결적인 서버 TTL 캐시라
+  // 무해하다(기존 7분 티어가 groupType 의존일 때와 동일한 트레이드오프).
   useEffect(() => {
     let cancelled = false
     const toCamel = (row) =>
@@ -1313,10 +1431,50 @@ export default function DashboardPage() {
         })
     }
 
+    // §5.5-2로 7분 티어에서 이 1분 티어로 옮겨온 3개(가벼운 소스만 — value-rank는
+    // 7분 티어에 그대로 남음, 근거는 위 주석 참고).
+    function loadGroupLive() {
+      return fetchGroupsLive(groupType)
+        .then((body) => {
+          if (!cancelled) setGroupLive(body)
+        })
+        .catch(() => {
+          if (!cancelled) setGroupLive(null)
+        })
+    }
+
+    function loadBasisLive() {
+      return fetchBasisLive()
+        .then((body) => {
+          if (!cancelled) setBasisLive(body)
+        })
+        .catch(() => {
+          if (!cancelled) setBasisLive(null)
+        })
+    }
+
+    function loadFuturesFlowLive() {
+      return fetchFuturesFlowLive()
+        .then((body) => {
+          if (!cancelled) setFuturesFlowLive(body)
+        })
+        .catch(() => {
+          if (!cancelled) setFuturesFlowLive(null)
+        })
+    }
+
     function load() {
       const tasks = [loadBreadth()]
       if (!STATIC_DATA) {
-        tasks.push(loadFlowLive(), loadAttentionTop(), loadScalpCandidates(), loadIndexTilesLive())
+        tasks.push(
+          loadFlowLive(),
+          loadAttentionTop(),
+          loadScalpCandidates(),
+          loadIndexTilesLive(),
+          loadGroupLive(),
+          loadBasisLive(),
+          loadFuturesFlowLive()
+        )
       }
       return Promise.all(tasks)
     }
@@ -1327,7 +1485,7 @@ export default function DashboardPage() {
       cancelled = true
       clearInterval(intervalId)
     }
-  }, [])
+  }, [groupType])
 
   useEffect(() => {
     let cancelled = false
@@ -1454,13 +1612,13 @@ export default function DashboardPage() {
     }
   }, [])
 
-  // 7분 티어 폴링 통합(PLAN.md §4.7, 2026-07-20 장중 실측 편입) — valueRankLive(거래대금
-  // 상위)·groupLive(업종/테마 등락률)·basisLive(베이시스)·futuresFlowLive(외인 선물수급)는
-  // 전부 백엔드 5~10분 캐시라 원래 4개의 독립된 setInterval로 따로 돌았다. 위 1분 티어와
-  // 동일한 이유로 하나의 useEffect/setInterval로 묶어 Promise.all로 한 번에 실행한다.
-  // groupType(업종/테마 탭)이 바뀌면 groupLive뿐 아니라 나머지 3개도 함께 재요청되지만,
-  // 전부 서버 TTL 캐시를 쓰므로 추가 부하는 없다(의도적 단순화). 실패한 소스는 조용히
-  // null로 두고 각 카드/타일이 EOD 폴백이나 "데이터 없음" 상태를 자연히 보여주게 둔다.
+  // 7분 티어(PLAN.md §4.7, 2026-07-20 장중 실측 편입) — value-rank(거래대금 상위)만
+  // 남았다. 2026-07-21(§5.5-2)에 groupLive/basisLive/futuresFlowLive를 위 1분 티어로
+  // 옮겼다 — 실측 결과(§4.7-1) 4개 소스 모두 값이 장중에 갱신되는 건 맞지만, 그중
+  // 코스피+코스닥 전 종목(~4,300종목) 페이지네이션이 필요한 value-rank만 진짜
+  // 비싸고(사이클당 ~44요청·13초+) groups/basis/futures-flow는 목록·단일 조회 1회뿐이라
+  // "단순함을 위해" 같은 티어에 묶여 있었을 뿐이었다(진단 근거는 PLAN.md §5.5
+  // 진단②). 실패 시 조용히 null로 두고 카드/타일이 EOD 폴백을 자연히 보여주게 둔다.
   useEffect(() => {
     if (STATIC_DATA) return undefined
     let cancelled = false
@@ -1475,38 +1633,8 @@ export default function DashboardPage() {
         })
     }
 
-    function loadGroupLive() {
-      return fetchGroupsLive(groupType)
-        .then((body) => {
-          if (!cancelled) setGroupLive(body)
-        })
-        .catch(() => {
-          if (!cancelled) setGroupLive(null)
-        })
-    }
-
-    function loadBasisLive() {
-      return fetchBasisLive()
-        .then((body) => {
-          if (!cancelled) setBasisLive(body)
-        })
-        .catch(() => {
-          if (!cancelled) setBasisLive(null)
-        })
-    }
-
-    function loadFuturesFlowLive() {
-      return fetchFuturesFlowLive()
-        .then((body) => {
-          if (!cancelled) setFuturesFlowLive(body)
-        })
-        .catch(() => {
-          if (!cancelled) setFuturesFlowLive(null)
-        })
-    }
-
     function load() {
-      return Promise.all([loadValueRankLive(), loadGroupLive(), loadBasisLive(), loadFuturesFlowLive()])
+      return loadValueRankLive()
     }
 
     load()
@@ -1515,7 +1643,7 @@ export default function DashboardPage() {
       cancelled = true
       clearInterval(intervalId)
     }
-  }, [groupType])
+  }, [])
 
   const closeModal = () => setModal(null)
 
@@ -1647,17 +1775,18 @@ export default function DashboardPage() {
   const foreignSpotValue = foreignSpotIsLive ? foreignSpotLiveValue : foreignSpotRow?.net_value
   const foreignFuturesRow = latestFlowRow(marketData.futures?.flows, '외국인')
 
-  // 외인 선물(K200) 7분 라이브 오버레이(PLAN.md §4.7) — 장중이고(market_closed===false)
-  // 값이 있을 때만 "표시"를 라이브로 바꾼다(시그널 판정 foreignFuturesSign은 EOD
-  // 기준 그대로, 아래 futuresFlowLiveNetValue는 KPI 타일 표시 전용).
+  // 외인 선물(K200) 1분 라이브 오버레이(PLAN.md §4.7, §5.5-2로 7분→1분 이동) —
+  // 장중이고(market_closed===false) 값이 있을 때만 "표시"를 라이브로 바꾼다
+  // (시그널 판정 foreignFuturesSign은 EOD 기준 그대로, 아래 futuresFlowLiveNetValue는
+  // KPI 타일 표시 전용).
   const futuresFlowLiveNetValue =
     !STATIC_DATA && futuresFlowLive && futuresFlowLive.market_closed === false
       ? (futuresFlowLive.investors?.['외국인']?.net_value ?? null)
       : null
 
   const basisLatest = basisData?.latest
-  // 베이시스 7분 라이브 오버레이(PLAN.md §4.7) — KPI 타일 표시 전용(시그널 판정
-  // backwardationSignal은 EOD 기준 basisLatest 그대로).
+  // 베이시스 1분 라이브 오버레이(PLAN.md §4.7, §5.5-2로 7분→1분 이동) — KPI 타일
+  // 표시 전용(시그널 판정 backwardationSignal은 EOD 기준 basisLatest 그대로).
   const basisLiveActive = Boolean(
     !STATIC_DATA && basisLive && basisLive.market_closed === false && typeof basisLive.basis === 'number'
   )
@@ -1738,11 +1867,12 @@ export default function DashboardPage() {
     programArbDate
   )
 
-  // 업종/테마 트리맵 — groupItems(EOD, value/market_sum 포함)에 groupLive(7분 라이브,
-  // change_rate만)를 이름 기준으로 병합한다(PLAN.md §4.7). 박스 크기(value)는 EOD
-  // 그대로 유지하고 색(change_rate)만 장중에 갱신되는 셈 — GroupTreemap.jsx는 이
-  // 병합 여부를 모르는 순수 컴포넌트라 그대로 재사용한다. groupLive가 없거나(정적
-  // 배포/폴링 전/실패) 해당 그룹 타입과 다르면 groupItems를 그대로 쓴다.
+  // 업종/테마 트리맵 — groupItems(EOD, value/market_sum 포함)에 groupLive(1분 라이브,
+  // §5.5-2로 7분→1분 이동, change_rate만)를 이름 기준으로 병합한다(PLAN.md §4.7).
+  // 박스 크기(value)는 EOD 그대로 유지하고 색(change_rate)만 장중에 갱신되는 셈 —
+  // GroupTreemap.jsx는 이 병합 여부를 모르는 순수 컴포넌트라 그대로 재사용한다.
+  // groupLive가 없거나(정적 배포/폴링 전/실패) 해당 그룹 타입과 다르면 groupItems를
+  // 그대로 쓴다.
   const groupLiveActive = Boolean(!STATIC_DATA && groupLive && groupLive.type === groupType && groupLive.market_closed === false)
   const groupTreemapItems = groupLiveActive
     ? groupItems.map((item) => {
@@ -1947,7 +2077,7 @@ export default function DashboardPage() {
           }
           sub={
             futuresFlowLiveNetValue !== null ? (
-              <span className="kpi-tile-sub">7분 갱신 · 장중</span>
+              <span className="kpi-tile-sub">1분 갱신 · 장중</span>
             ) : (
               foreignFuturesRow?.date && (
                 <span className="kpi-tile-sub">
@@ -1997,7 +2127,7 @@ export default function DashboardPage() {
               ) : (
                 '콘탱고'
               )}
-              {basisLiveActive ? ' · 7분 갱신' : <StaleDate date={basisLatest?.date} baseDate={baseDate} prefix=" · " />}
+              {basisLiveActive ? ' · 1분 갱신' : <StaleDate date={basisLatest?.date} baseDate={baseDate} prefix=" · " />}
             </span>
           }
           title={basisLatest?.date ? formatDate(basisLatest.date) : undefined}
@@ -2139,7 +2269,7 @@ export default function DashboardPage() {
           </button>
         ))}
         <span className="toggle-hint">
-          {groupLiveActive ? '박스 크기 = 일별 거래대금 · 색(등락률) 7분 갱신 · 장중' : '일별 스냅샷 · 색 = 등락률'}
+          {groupLiveActive ? '박스 크기 = 일별 거래대금 · 색(등락률) 1분 갱신 · 장중' : '일별 스냅샷 · 색 = 등락률'}
         </span>
       </div>
       {groupLoading && <div className="state">불러오는 중…</div>}
