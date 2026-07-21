@@ -46,8 +46,13 @@ router = APIRouter(tags=["groups"])
 
 GROUP_TYPES = {"upjong", "theme"}
 
-# 5~10분 장중 라이브 캐시 TTL — collectors/live_refresh.py 신규 인터벌 잡과 맞춘다.
-LIVE_TTL_SECONDS = 420  # 7분
+# 1분 장중 라이브 캐시 TTL — collectors/live_refresh.py의 60초 인터벌 잡과 맞춘다.
+# 2026-07-21(§5.5-2) 7분→1분: 목록 페이지 1~2회 조회뿐인 가벼운 호출이라 값 비용
+# 없이 당길 수 있다고 판단해 프런트 폴링 주기만 먼저 옮겼는데, 이 TTL 상수와
+# live_refresh.py의 스케줄러 잡 배정을 같이 옮기는 걸 빠뜨려 실제로는 계속 7분
+# 캐시로 응답하는 회귀가 있었다(§5.6 후속 사용자 지적으로 재발견, 90초 간격
+# 재호출에도 byte-for-byte 동일 응답으로 실측 확인). 이번에 TTL도 함께 맞춘다.
+LIVE_TTL_SECONDS = 60
 
 _groups_live_cache: dict[str, dict] = {
     "upjong": {"ts": 0.0, "data": None},

@@ -583,9 +583,13 @@ async def market_attention_live(session: AsyncSession = Depends(get_session)):
     return await _warm_attention(session)
 
 
-# GET /api/markets/futures-flow/live 5~10분 메모리 캐시 (PLAN.md §4.7, 모듈
+# GET /api/markets/futures-flow/live 1분 메모리 캐시 (PLAN.md §4.7, 모듈
 # docstring 참고) — breadth/live·flow/live와 동일한 패턴이지만 독립 캐시를 쓴다.
-_FUTURES_FLOW_LIVE_TTL_SECONDS = 420  # 7분 — collectors/live_refresh.py 신규 인터벌 잡과 맞춘다
+# 2026-07-21(§5.5-2→§5.6 회귀 수정): 단일 요청 1회뿐이라 1분으로 당겨도 비용이
+# 늘지 않는다고 판단해 프런트 폴링 주기만 먼저 옮겼는데, 이 TTL과 live_refresh.py
+# 스케줄러 잡 배정을 함께 옮기는 걸 빠뜨려 실제로는 계속 7분 캐시로 응답하는
+# 회귀가 있었다(§5.6 후속 사용자 지적으로 재발견). TTL도 맞춘다.
+_FUTURES_FLOW_LIVE_TTL_SECONDS = 60
 _futures_flow_live_cache: dict[str, object] = {"ts": 0.0, "data": None}
 _futures_flow_live_cache_lock = asyncio.Lock()
 

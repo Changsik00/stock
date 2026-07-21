@@ -62,10 +62,14 @@ router = APIRouter(tags=["markets"])
 FUTURES_MARKET = "k200_futures"
 SPOT_MARKET = "kospi200"
 
-# 5~10분 장중 라이브 캐시 TTL — collectors/live_refresh.py의 신규 인터벌 잡(§4.7-2)과
-# 맞춘다. 그 잡이 죽어 있어도(예: 로컬 미기동) 이 라우트 핸들러가 캐시 미스 시 직접
+# 1분 장중 라이브 캐시 TTL — collectors/live_refresh.py의 60초 인터벌 잡과 맞춘다.
+# 그 잡이 죽어 있어도(예: 로컬 미기동) 이 라우트 핸들러가 캐시 미스 시 직접
 # 채우므로 최소 기능은 항상 동작한다(breadth/live 등 기존 패턴과 동일).
-LIVE_TTL_SECONDS = 420  # 7분 — PLAN.md §4.7 실측 근거는 모듈 상단 절 참고
+# 2026-07-21(§5.5-2→§5.6 회귀 수정): 단일 심볼 조회 1~2회뿐이라 1분으로 당겨도
+# 비용이 늘지 않는다고 판단해 프런트 폴링 주기만 먼저 옮겼는데, 이 TTL과
+# live_refresh.py 스케줄러 잡 배정을 함께 옮기는 걸 빠뜨려 실제로는 계속 7분
+# 캐시로 응답하는 회귀가 있었다(§5.6 후속 사용자 지적으로 재발견). TTL도 맞춘다.
+LIVE_TTL_SECONDS = 60
 
 _basis_live_cache: dict[str, object] = {"ts": 0.0, "data": None}
 _basis_live_cache_lock = asyncio.Lock()
