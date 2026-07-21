@@ -94,26 +94,22 @@ const VALUE_RANK_MARKET_OPTIONS = [
   { key: 'kosdaq', label: '코스닥' },
 ]
 const FLOW_RANK_LOOKBACK_DAYS = 7
-// 등락 종목수(breadth/live) 자동 갱신 주기 — 백엔드 60초 캐시(routers/markets.py
-// GET /api/markets/breadth/live)와 맞춘다. flow/live·attention과 동일한 값이지만
-// 소스가 달라 독립 폴링을 쓴다. 2026-07-20까지는 이 값을 쓰는 두 useEffect
+// 1분 티어(등락 종목수 breadth/live·장중 잠정 수급 flow/live·실시간 관심 TOP20
+// attention·스켈핑 후보 scalp-candidates) 자동 갱신 주기 — 백엔드 각각 60초 캐시
+// (routers/markets.py)와 맞춘다. 2026-07-20까지는 이 값을 쓰는 두 useEffect
 // (DashboardPage 본문 + BreadthModal) 모두 최초 1회만 fetch하고 재폴링이 없어서
 // 아무도 요청하지 않으면 화면이 멈춰 있는 버그가 있었다 — 서버 측 능동 60초 갱신
-// 작업(PLAN.md)과 함께 수정.
+// 작업(PLAN.md)과 함께 수정. breadth·flowLive·attentionTop·scalpCandidates는
+// 원래 독립 setInterval 4개였으나 1분 티어 useEffect 하나로 통합했다(BreadthModal의
+// setInterval은 모달 전용이라 별개로 남는다).
 const BREADTH_LIVE_POLL_MS = 60_000
-// 장중 잠정 수급(PLAN.md §6 3.7-3) 자동 갱신 주기 — 백엔드 60초 캐시(routers/markets.py
-// GET /api/markets/flow/live)와 맞춘다. 그보다 짧게 폴링해도 캐시 히트라 낭비만 커진다.
-const FLOW_LIVE_POLL_MS = 60_000
-// 실시간 관심 종목 TOP20 자동 갱신 주기 — 백엔드 60초 캐시(routers/markets.py
-// GET /api/markets/attention)와 맞춘다. FLOW_LIVE_POLL_MS와 동일한 값이지만 소스가
-// 달라(플로우 vs 조회수 순위) 각자 독립 폴링/캐시를 갖는다.
-const ATTENTION_POLL_MS = 60_000
-// 거래대금 상위(value-rank)·업종/테마 등락률(groups)·베이시스(basis)·외인 선물수급
-// (futures-flow) 자동 갱신 주기 — 백엔드 5~10분 캐시(routers/basis.py·groups.py·
-// flow_rank.py·markets.py의 LIVE_TTL_SECONDS/_FUTURES_FLOW_LIVE_TTL_SECONDS=420초)와
-// 맞춘다(PLAN.md §4.7 3단 갱신 주기, 2026-07-20 장중 실측: 4개 소스 모두 7분 이내
-// 값 변화 확인). 수급 상위(flow-rank)는 실측 결과 소스가 2영업일 이상 지연돼 있어
-// 라이브로 편입하지 않았다 — EOD(FLOW_RANK_LOOKBACK_DAYS 기준) 그대로 유지.
+// 7분 티어(거래대금 상위 value-rank·업종/테마 등락률 groups·베이시스 basis·외인
+// 선물수급 futures-flow) 자동 갱신 주기 — 백엔드 5~10분 캐시(routers/basis.py·
+// groups.py·flow_rank.py·markets.py의 LIVE_TTL_SECONDS/_FUTURES_FLOW_LIVE_TTL_SECONDS
+// =420초)와 맞춘다(PLAN.md §4.7 3단 갱신 주기, 2026-07-20 장중 실측: 4개 소스 모두
+// 7분 이내 값 변화 확인). 수급 상위(flow-rank)는 실측 결과 소스가 2영업일 이상
+// 지연돼 있어 라이브로 편입하지 않았다 — EOD(FLOW_RANK_LOOKBACK_DAYS 기준) 그대로
+// 유지. 위 4개 소스도 독립 setInterval 4개에서 7분 티어 useEffect 하나로 통합했다.
 const EXTRA_LIVE_POLL_MS = 420_000
 
 function eokLabel(million) {
@@ -185,6 +181,11 @@ function scalpScoreLabel(score) {
   if (score === null || score === undefined) return '-'
   const sign = score > 0 ? '+' : ''
   return `${sign}${score.toFixed(2)}`
+}
+
+function scalpScoreBadgeLabel(score) {
+  if (score === null || score === undefined) return null
+  return `스코어 ${scalpScoreLabel(score)}`
 }
 
 // MM-DD만 뽑는다 (StaleDate/TOP5 "…기준" 라벨 공용) — formatDate가 이미
@@ -919,9 +920,10 @@ function ScalpCandidatesFullModal({ onSelectStock }) {
                 </span>
                 {row.market && <Badge kind={row.market} />}
                 {turnoverBadgeLabel(row.turnover) && <Badge kind="info">{turnoverBadgeLabel(row.turnover)}</Badge>}
+                {scalpScoreBadgeLabel(row.score) && <Badge kind="info">{scalpScoreBadgeLabel(row.score)}</Badge>}
                 {row.in_attention_top && <Badge kind="live">관심 TOP</Badge>}
               </span>
-              <span className="top5-row-value">{scalpScoreLabel(row.score)}</span>
+              <span className={`top5-row-value ${rateClass(row.change_rate)}`}>{rateLabel(row.change_rate)}</span>
             </Top5RowTile>
           ))}
         </div>
@@ -1066,6 +1068,14 @@ export default function DashboardPage() {
     }
   }, [])
 
+  // 1분 티어 폴링 통합 — breadth(등락 종목수)·flowLive(장중 잠정 수급)·attentionTop
+  // (실시간 관심 TOP20)·scalpCandidates(스켈핑 후보)는 전부 백엔드 60초 캐시라
+  // 원래 4개의 독립된 setInterval로 따로 돌았다(폴링 시점이 서로 어긋나 있었을 뿐
+  // 실질적 차이는 없었다). 하나의 useEffect/setInterval로 묶어 Promise.all로 한
+  // 번에 실행한다 — 백엔드는 엔드포인트별 TTL 캐시를 그대로 쓰므로 서버 부하는
+  // 그대로고, 프런트 쪽 타이머 개수만 준다. breadth는 fetchBreadthLive() 내부에서
+  // STATIC_DATA를 이미 처리하므로(정적 스냅샷 폴백) 이 효과 전체에는 STATIC_DATA
+  // 가드를 두지 않고, 나머지 3개만 개별적으로 가드한다.
   useEffect(() => {
     let cancelled = false
     const toCamel = (row) =>
@@ -1079,7 +1089,7 @@ export default function DashboardPage() {
           }
         : null
 
-    async function load() {
+    async function loadBreadth() {
       try {
         const body = await fetchBreadthLive()
         if (cancelled) return
@@ -1103,27 +1113,9 @@ export default function DashboardPage() {
         // 배지는 데이터 없음 상태로 자연히 표시된다.
       }
     }
-    load()
-    // flow/live·attention 폴링(아래 두 useEffect)과 동일한 60초 간격 — 이전에는 최초
-    // 1회만 fetch하고 setInterval이 없어서 breadthTotals 배지(상단 등락 종목수)가
-    // 페이지를 오래 열어둬도 갱신되지 않는 버그가 있었다(PLAN.md 서버 측 능동 60초
-    // 갱신 작업에서 발견/수정).
-    const intervalId = setInterval(load, BREADTH_LIVE_POLL_MS)
-    return () => {
-      cancelled = true
-      clearInterval(intervalId)
-    }
-  }, [])
 
-  // 장중 잠정 수급 폴링 (PLAN.md §6 3.7-3) — 정적 배포에서는 애초에 시도하지 않는다
-  // (로컬 전용 기능, api.js fetchFlowLive 주석 참고). 60초 간격 setInterval, 페이지를
-  // 벗어나면(언마운트) 정리한다. 실패해도 조용히 null로 두고 기존 확정치 타일로
-  // 폴백하므로 별도 에러 상태를 만들지 않는다.
-  useEffect(() => {
-    if (STATIC_DATA) return undefined
-    let cancelled = false
-    function load() {
-      fetchFlowLive()
+    function loadFlowLive() {
+      return fetchFlowLive()
         .then((body) => {
           if (!cancelled) setFlowLive(body)
         })
@@ -1131,22 +1123,9 @@ export default function DashboardPage() {
           if (!cancelled) setFlowLive(null)
         })
     }
-    load()
-    const intervalId = setInterval(load, FLOW_LIVE_POLL_MS)
-    return () => {
-      cancelled = true
-      clearInterval(intervalId)
-    }
-  }, [])
 
-  // 실시간 관심 종목 TOP20 폴링 — flowLive 폴링과 동일한 패턴(정적 배포에서는 시도하지
-  // 않음, 60초 간격 setInterval, 언마운트 시 정리, 실패 시 조용히 null로 두고 카드가
-  // "표시할 데이터가 없습니다"를 자연히 보여주게 둔다).
-  useEffect(() => {
-    if (STATIC_DATA) return undefined
-    let cancelled = false
-    function load() {
-      fetchAttention()
+    function loadAttentionTop() {
+      return fetchAttention()
         .then((body) => {
           if (!cancelled) setAttentionTop(body)
         })
@@ -1154,8 +1133,27 @@ export default function DashboardPage() {
           if (!cancelled) setAttentionTop(null)
         })
     }
+
+    function loadScalpCandidates() {
+      return fetchScalpCandidates(5)
+        .then((body) => {
+          if (!cancelled) setScalpCandidates(body)
+        })
+        .catch(() => {
+          if (!cancelled) setScalpCandidates(null)
+        })
+    }
+
+    function load() {
+      const tasks = [loadBreadth()]
+      if (!STATIC_DATA) {
+        tasks.push(loadFlowLive(), loadAttentionTop(), loadScalpCandidates())
+      }
+      return Promise.all(tasks)
+    }
+
     load()
-    const intervalId = setInterval(load, ATTENTION_POLL_MS)
+    const intervalId = setInterval(load, BREADTH_LIVE_POLL_MS)
     return () => {
       cancelled = true
       clearInterval(intervalId)
@@ -1287,14 +1285,19 @@ export default function DashboardPage() {
     }
   }, [])
 
-  // 거래대금 상위 7분 라이브 폴링(PLAN.md §4.7, 2026-07-20 장중 실측 편입) — flowLive/
-  // attentionTop과 동일한 패턴(정적 배포에서는 시도하지 않음, 언마운트 시 정리). 실패
-  // 시 조용히 null로 두고 위 valueRankTop(EOD 1회성 fetch)으로 자연히 폴백한다.
+  // 7분 티어 폴링 통합(PLAN.md §4.7, 2026-07-20 장중 실측 편입) — valueRankLive(거래대금
+  // 상위)·groupLive(업종/테마 등락률)·basisLive(베이시스)·futuresFlowLive(외인 선물수급)는
+  // 전부 백엔드 5~10분 캐시라 원래 4개의 독립된 setInterval로 따로 돌았다. 위 1분 티어와
+  // 동일한 이유로 하나의 useEffect/setInterval로 묶어 Promise.all로 한 번에 실행한다.
+  // groupType(업종/테마 탭)이 바뀌면 groupLive뿐 아니라 나머지 3개도 함께 재요청되지만,
+  // 전부 서버 TTL 캐시를 쓰므로 추가 부하는 없다(의도적 단순화). 실패한 소스는 조용히
+  // null로 두고 각 카드/타일이 EOD 폴백이나 "데이터 없음" 상태를 자연히 보여주게 둔다.
   useEffect(() => {
     if (STATIC_DATA) return undefined
     let cancelled = false
-    function load() {
-      fetchValueRankLive()
+
+    function loadValueRankLive() {
+      return fetchValueRankLive()
         .then((body) => {
           if (!cancelled) setValueRankLive(body)
         })
@@ -1302,47 +1305,9 @@ export default function DashboardPage() {
           if (!cancelled) setValueRankLive(null)
         })
     }
-    load()
-    const intervalId = setInterval(load, EXTRA_LIVE_POLL_MS)
-    return () => {
-      cancelled = true
-      clearInterval(intervalId)
-    }
-  }, [])
 
-  // 스켈핑 후보 폴링(PLAN.md §5.2) — 백엔드가 조합하는 두 소스 중 더 느린 쪽
-  // (value-rank/live, 7분)에 맞춰 EXTRA_LIVE_POLL_MS를 그대로 쓴다(valueRankLive와
-  // 동일한 패턴). 실패 시 조용히 null로 두고 카드가 "표시할 데이터가 없습니다"를
-  // 자연히 보여주게 둔다.
-  useEffect(() => {
-    if (STATIC_DATA) return undefined
-    let cancelled = false
-    function load() {
-      fetchScalpCandidates(5)
-        .then((body) => {
-          if (!cancelled) setScalpCandidates(body)
-        })
-        .catch(() => {
-          if (!cancelled) setScalpCandidates(null)
-        })
-    }
-    load()
-    const intervalId = setInterval(load, EXTRA_LIVE_POLL_MS)
-    return () => {
-      cancelled = true
-      clearInterval(intervalId)
-    }
-  }, [])
-
-  // 업종/테마 등락률 7분 라이브 폴링(PLAN.md §4.7) — 탭(groupType)이 바뀌면 그 타입으로
-  // 다시 폴링을 시작한다(위 groupItems EOD fetch와 동일한 의존성). 거래대금 합산은
-  // 라이브에 없어(api.js fetchGroupsLive 주석 참고) groupItems의 값과 이름 기준으로
-  // 병합해 쓴다(아래 groupTreemapItems).
-  useEffect(() => {
-    if (STATIC_DATA) return undefined
-    let cancelled = false
-    function load() {
-      fetchGroupsLive(groupType)
+    function loadGroupLive() {
+      return fetchGroupsLive(groupType)
         .then((body) => {
           if (!cancelled) setGroupLive(body)
         })
@@ -1350,21 +1315,9 @@ export default function DashboardPage() {
           if (!cancelled) setGroupLive(null)
         })
     }
-    load()
-    const intervalId = setInterval(load, EXTRA_LIVE_POLL_MS)
-    return () => {
-      cancelled = true
-      clearInterval(intervalId)
-    }
-  }, [groupType])
 
-  // 베이시스 7분 라이브 폴링(PLAN.md §4.7) — basisData(EOD)는 시그널 판정(foreignSignals)
-  // 기준으로 그대로 두고, 이 state는 베이시스 KPI 타일의 표시값만 갱신하는 오버레이다.
-  useEffect(() => {
-    if (STATIC_DATA) return undefined
-    let cancelled = false
-    function load() {
-      fetchBasisLive()
+    function loadBasisLive() {
+      return fetchBasisLive()
         .then((body) => {
           if (!cancelled) setBasisLive(body)
         })
@@ -1372,22 +1325,9 @@ export default function DashboardPage() {
           if (!cancelled) setBasisLive(null)
         })
     }
-    load()
-    const intervalId = setInterval(load, EXTRA_LIVE_POLL_MS)
-    return () => {
-      cancelled = true
-      clearInterval(intervalId)
-    }
-  }, [])
 
-  // 외인 선물(K200) 순매수 7분 라이브 폴링(PLAN.md §4.7) — marketData.futures(EOD)는
-  // 시그널 판정 기준으로 그대로 두고, 이 state는 "외인 선물(K200)" KPI 타일의 표시값만
-  // 갱신하는 오버레이다.
-  useEffect(() => {
-    if (STATIC_DATA) return undefined
-    let cancelled = false
-    function load() {
-      fetchFuturesFlowLive()
+    function loadFuturesFlowLive() {
+      return fetchFuturesFlowLive()
         .then((body) => {
           if (!cancelled) setFuturesFlowLive(body)
         })
@@ -1395,13 +1335,18 @@ export default function DashboardPage() {
           if (!cancelled) setFuturesFlowLive(null)
         })
     }
+
+    function load() {
+      return Promise.all([loadValueRankLive(), loadGroupLive(), loadBasisLive(), loadFuturesFlowLive()])
+    }
+
     load()
     const intervalId = setInterval(load, EXTRA_LIVE_POLL_MS)
     return () => {
       cancelled = true
       clearInterval(intervalId)
     }
-  }, [])
+  }, [groupType])
 
   const closeModal = () => setModal(null)
 
@@ -2105,7 +2050,7 @@ export default function DashboardPage() {
             동일하게 바로 종목 상세 모달로 이어진다. */}
         <Top5Card
           title="스켈핑 후보"
-          hint="참고용 스크리닝 — 매매 신호 아님 · 7분 갱신"
+          hint="참고용 스크리닝 — 매매 신호 아님 · 1분 갱신"
           rows={scalpCandidates?.rows}
           onMore={() => setModal({ type: 'scalp', title: '스켈핑 후보 — 전체' })}
           renderRow={(row, i) => (
@@ -2120,9 +2065,10 @@ export default function DashboardPage() {
                 </span>
                 {row.market && <Badge kind={row.market} />}
                 {turnoverBadgeLabel(row.turnover) && <Badge kind="info">{turnoverBadgeLabel(row.turnover)}</Badge>}
+                {scalpScoreBadgeLabel(row.score) && <Badge kind="info">{scalpScoreBadgeLabel(row.score)}</Badge>}
                 {row.in_attention_top && <Badge kind="live">관심 TOP</Badge>}
               </span>
-              <span className="top5-row-value">{scalpScoreLabel(row.score)}</span>
+              <span className={`top5-row-value ${rateClass(row.change_rate)}`}>{rateLabel(row.change_rate)}</span>
             </Top5RowTile>
           )}
         />
