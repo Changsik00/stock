@@ -49,6 +49,7 @@ from ..clients.kiwoom import (
     parse_minute_chart_rows,
 )
 from ..db import get_session
+from ..market_hours import KST, is_market_closed
 from ..models import Stock, StockFlow, StockOhlcv
 from ..quant.signals import (
     compute_vwap,
@@ -85,11 +86,9 @@ _EXTERNAL_FETCH_COOLDOWN_SECONDS = 60.0
 _candle_fetch_attempted_at: dict[str, float] = {}
 _flow_fetch_attempted_at: dict[str, float] = {}
 
-_KST = dt.timezone(dt.timedelta(hours=9))
-
 
 def _today_kst() -> dt.date:
-    return dt.datetime.now(_KST).date()
+    return dt.datetime.now(KST).date()
 
 
 def _latest_trading_day() -> dt.date:
@@ -163,20 +162,29 @@ async def _upsert_ohlcv_rows(session: AsyncSession, code: str, rows: list[dict])
 
 
 async def _ensure_candles_cached(session: AsyncSession, code: str, days: int) -> None:
-    """stock_ohlcv에 code의 최신 거래일 캔들이 이미 있으면 아무 것도 하지 않는다
-    (캐시 히트, 외부 호출 생략). 없거나 오래됐으면 네이버 fchart를 호출해 필요한
+    """stock_ohlcv에 code의 최신 거래일 캔들이 이미 있고 **장 마감**이면 아무 것도
+    하지 않는다(캐시 히트, 외부 호출 생략 — 그 값이 진짜 확정 종가이므로). 없거나
+    오래됐으면, 또는 장중인데 쿨다운이 지났으면 네이버 fchart를 호출해 필요한
     구간만 upsert한다.
 
-    Raises: naver_index.NaverIndexError / requests 예외를 그대로 전파한다 —
-    호출측(stock_series)이 502로 변환한다.
+    **2026-07-21 수정(SOT 이슈)**: 원래는 "오늘 날짜 행이 존재하면" 그것만으로
+    캐시 히트 처리했다 — 장중에 처음 이 종목 상세를 연 사람이 그 순간의 부분
+    스냅샷을 그대로 그날 하루 종일 고정시켜버리는 버그였다(사용자 지적: 리스트
+    카드는 실시간으로 갱신되는데 종목 상세 모달만 다른 값을 계속 보여줌 — attention/
+    value-rank/live 등은 60초~7분 TTL로 계속 새로 받아오는데 이 캐시만 "오늘치
+    있음=끝"으로 하루 종일 얼어붙어 있었다). 장중에는 오늘 행이 있어도 여전히
+    쿨다운(60초)마다 재조회해 index-tiles/live와 같은 성격의 "장중엔 계속 새로
+    받는다" 원칙을 맞춘다 — 장 마감 후에만 진짜로 캐시 히트로 취급한다.
     """
     target_end = _latest_trading_day()
     existing_max = (
         await session.execute(select(func.max(StockOhlcv.date)).where(StockOhlcv.code == code))
     ).scalar_one_or_none()
 
-    if existing_max is not None and existing_max >= target_end:
-        return  # 캐시 히트
+    market_open = not is_market_closed(dt.datetime.now(KST))
+
+    if existing_max is not None and existing_max >= target_end and not market_open:
+        return  # 장 마감 확정치 — 캐시 히트
 
     if existing_max is None:
         calendar_days = (
@@ -184,7 +192,8 @@ async def _ensure_candles_cached(session: AsyncSession, code: str, days: int) ->
         )
         fetch_start = target_end - dt.timedelta(days=calendar_days)
     else:
-        # 캐시는 있지만 오래됨 — 쿨다운 확인(모듈 docstring "공휴일" 안전장치).
+        # 캐시는 있지만 오래됐거나(기존 사유) 장중이라 오늘치가 아직 잠정치인 경우 —
+        # 쿨다운 확인(모듈 docstring "공휴일" 안전장치 + 장중 재조회 과호출 방지 겸용).
         now = time.monotonic()
         last_attempt = _candle_fetch_attempted_at.get(code)
         if last_attempt is not None and (now - last_attempt) < _EXTERNAL_FETCH_COOLDOWN_SECONDS:
@@ -331,9 +340,14 @@ async def _upsert_flow_rows(session: AsyncSession, code: str, rows: list[dict]) 
 
 
 async def _ensure_flows_cached(session: AsyncSession, code: str) -> None:
-    """stock_flow에 code의 최신 거래일 수급이 이미 있으면 외부 호출을 생략한다
-    (캐시 히트). 없으면 ka10059를 1콜 호출해 최근 FLOW_BACKFILL_DAYS일만 잘라
-    upsert한다(모듈 docstring 참고 — 1콜로 충분해 연속조회 불필요).
+    """stock_flow에 code의 최신 거래일 수급이 이미 있고 **장 마감**이면 외부 호출을
+    생략한다(캐시 히트). 없거나, 오래됐거나, 장중인데 쿨다운이 지났으면 ka10059를
+    1콜 호출해 최근 FLOW_BACKFILL_DAYS일만 잘라 upsert한다(모듈 docstring 참고 —
+    1콜로 충분해 연속조회 불필요).
+
+    2026-07-21 수정(SOT 이슈) — `_ensure_candles_cached`와 동일한 이유·동일한
+    수정(위 함수 docstring 참고): 장중엔 "오늘치 있음"만으로 신선하다고 보지 않고
+    쿨다운(60초)마다 재조회한다.
 
     Raises: KiwoomAuthError/KiwoomAPIError/httpx 예외를 그대로 전파한다 — 호출측이
     "수급만 실패면 200 + flows 빈 채로"로 흡수한다.
@@ -343,11 +357,14 @@ async def _ensure_flows_cached(session: AsyncSession, code: str) -> None:
         await session.execute(select(func.max(StockFlow.date)).where(StockFlow.code == code))
     ).scalar_one_or_none()
 
-    if existing_max is not None and existing_max >= target_end:
-        return  # 캐시 히트
+    market_open = not is_market_closed(dt.datetime.now(KST))
+
+    if existing_max is not None and existing_max >= target_end and not market_open:
+        return  # 장 마감 확정치 — 캐시 히트
 
     if existing_max is not None:
-        # 캐시는 있지만 오래됨 — 쿨다운 확인(모듈 docstring "공휴일" 안전장치).
+        # 캐시는 있지만 오래됐거나(기존 사유) 장중이라 오늘치가 아직 잠정치인 경우 —
+        # 쿨다운 확인(모듈 docstring "공휴일" 안전장치 + 장중 재조회 과호출 방지 겸용).
         now = time.monotonic()
         last_attempt = _flow_fetch_attempted_at.get(code)
         if last_attempt is not None and (now - last_attempt) < _EXTERNAL_FETCH_COOLDOWN_SECONDS:

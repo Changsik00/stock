@@ -219,6 +219,12 @@ def test_parse_signed_int_handles_signs_commas_and_junk():
 async def test_series_first_request_fetches_and_caches_then_second_hits_cache(
     monkeypatch, seeded_stock
 ):
+    # 2026-07-21(SOT 이슈 수정) — 장 마감일 때만 "오늘치 있음"이 캐시 히트로 취급된다
+    # (아래 test_series_market_open_still_refetches_even_with_todays_row_cached가
+    # 장중 분기를 검증한다). 이 테스트는 실제 벽시계와 무관하게 "마감" 경로를
+    # 고정해서 검증해야 하므로 명시적으로 monkeypatch한다.
+    monkeypatch.setattr(stocks, "is_market_closed", lambda now_kst: True)
+
     target_end = stocks._latest_trading_day()
     prev_day = target_end - dt.timedelta(days=1)
 
@@ -295,6 +301,73 @@ async def test_series_first_request_fetches_and_caches_then_second_hits_cache(
     assert flow_calls["n"] == 1  # unchanged -> cache hit
     assert resp2.json()["prices"] == body1["prices"]
     assert resp2.json()["flows"] == body1["flows"]
+
+
+async def test_series_market_open_still_refetches_even_with_todays_row_cached(
+    monkeypatch, seeded_stock
+):
+    """SOT 이슈 회귀 테스트(2026-07-21) — 사용자가 실측으로 지적: 리스트 카드
+    (attention/value-rank/live 등)는 60초~7분 TTL로 계속 새로 받는데, 종목 상세
+    모달의 캔들/수급만 "오늘 날짜 행이 DB에 있으면 끝"으로 장중 내내 얼어붙어
+    있어 같은 종목인데 카드와 모달이 다른 값을 보여줬다. 장중에는 오늘 행이 이미
+    있어도(쿨다운만 지났으면) 다시 외부를 호출해야 한다 — 장 마감일 때만
+    캐시 히트가 되는 위 테스트와 대조."""
+    monkeypatch.setattr(stocks, "is_market_closed", lambda now_kst: False)
+
+    target_end = stocks._latest_trading_day()
+    prev_day = target_end - dt.timedelta(days=1)
+
+    candle_calls = {"n": 0}
+
+    def fake_fetch_stock_series(code, start, end):
+        candle_calls["n"] += 1
+        return [
+            {
+                "date": target_end,
+                "open": 105.0,
+                "high": 115.0,
+                "low": 100.0,
+                "close": 110.0 + candle_calls["n"],  # 호출마다 값이 달라짐(장중 갱신 흉내)
+                "volume": 2000,
+            }
+        ]
+
+    monkeypatch.setattr(stocks.naver_index, "fetch_stock_series", fake_fetch_stock_series)
+
+    flow_calls = {"n": 0}
+    fake_response = _fake_ka10059_response(target_end, prev_day)
+    monkeypatch.setattr(
+        stocks, "KiwoomClient", _make_fake_kiwoom_client(flow_calls, fake_response)
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp1 = await client.get(f"/api/stocks/{TEST_CODE}/series", params={"days": 30})
+    assert resp1.status_code == 200
+    assert candle_calls["n"] == 1
+    assert flow_calls["n"] == 1
+    assert resp1.json()["prices"][-1]["close"] == 111.0
+
+    # 쿨다운(60초) 안이면 장중이라도 재요청을 또 안 한다 — 과호출 방지 장치는 유지.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp_within_cooldown = await client.get(
+            f"/api/stocks/{TEST_CODE}/series", params={"days": 30}
+        )
+    assert resp_within_cooldown.status_code == 200
+    assert candle_calls["n"] == 1  # 아직 쿨다운 안 지남 -> 캐시 그대로
+    assert flow_calls["n"] == 1
+
+    # 쿨다운이 지난 뒤(장중)에는 오늘 행이 이미 있어도 다시 외부를 호출해 값을
+    # 갱신해야 한다 — 이게 이번에 고친 버그의 핵심.
+    del stocks._candle_fetch_attempted_at[TEST_CODE]
+    del stocks._flow_fetch_attempted_at[TEST_CODE]
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp2 = await client.get(f"/api/stocks/{TEST_CODE}/series", params={"days": 30})
+
+    assert resp2.status_code == 200
+    assert candle_calls["n"] == 2  # 장중 재조회로 다시 호출됨
+    assert flow_calls["n"] == 2
+    assert resp2.json()["prices"][-1]["close"] == 112.0  # 새로 받은 값으로 갱신됨
 
 
 async def test_series_candle_fetch_failure_returns_502(monkeypatch, seeded_stock):
