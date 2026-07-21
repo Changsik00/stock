@@ -72,6 +72,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..clients import naver_breadth, naver_futures_flow, naver_index
 from ..clients.kiwoom import MINUTE_CHART_INTERVALS, KiwoomClient, parse_minute_chart_rows
+from ..collectors import intraday_snapshot
 from ..collectors.market_flow import fetch_live_flow
 from ..db import get_session
 from ..market_hours import KST, is_market_closed as _market_closed_kst
@@ -646,6 +647,53 @@ async def futures_flow_live():
     "market_closed": bool, "cached_at": iso8601}``.
     """
     return await _warm_futures_flow_live()
+
+
+@router.get("/api/markets/flow/intraday-accumulated")
+async def flow_intraday_accumulated():
+    """오늘 장중 개인·외국인·기관계 순매수 누적 스냅샷 시계열(PLAN.md §5.4-2/3).
+
+    새로 소스를 호출하지 않는다 — `collectors/live_refresh.py`의 60초 잡이
+    `_warm_flow_live`를 호출할 때마다 그 반환값을 `collectors.intraday_snapshot.
+    record_flow_snapshot`에 넘겨 이미 메모리 버퍼에 적립해 둔 것을 그대로
+    읽어서 반환할 뿐이다(이 엔드포인트 자체는 키움/네이버를 전혀 두드리지
+    않고, DB 세션도 필요 없다). ka10051에는 분단위 이력이 없어 "3M"(EOD
+    히스토리, `GET /api/markets/flow/history` 계열)과 별개로 "1D"(오늘 장중
+    누적)를 자체 생성하는 절충안이다(모듈 상단 collectors/intraday_snapshot.py
+    docstring 참고).
+
+    자정이 지나 오늘 KST 날짜가 바뀌면(다음 거래일 첫 워밍 시점에) 버퍼가
+    비워지고 새로 쌓인다(자정 즉시가 아니라 "다음 append 때 지연 리셋" —
+    intraday_snapshot.py 모듈 docstring 참고). 스케줄러가 꺼져 있거나(
+    ``ENABLE_LIVE_REFRESH`` 미설정) 앱이 막 기동해 아직 한 번도 워밍이 안
+    됐으면 각 시리즈가 빈 리스트로 온다 — 프런트는 이를 "적립 중" 상태로
+    표시한다.
+
+    Returns ``{"date": "YYYY-MM-DD", "series": {"개인": [...], "외국인": [...],
+    "기관계": [...]}, "market_closed": bool}`` — 각 시리즈 원소는
+    ``{"time": "HH:MM", "value": float}``(net_value, 백만원 단위 — 다른 flow
+    엔드포인트와 동일한 단위, 프런트에서 억원 변환). ``market_closed``는 저장된
+    값이 아니라 호출 시점 기준으로 새로 계산한다.
+    """
+    return intraday_snapshot.get_flow_series()
+
+
+@router.get("/api/markets/foreign-position/intraday-accumulated")
+async def foreign_position_intraday_accumulated():
+    """오늘 외인 현물·선물 순매수 누적 스냅샷 시계열(PLAN.md §5.4-2/3).
+
+    "외인 양손" 상세 모달의 1D 탭 전용 — `flow_intraday_accumulated`와 같은
+    버퍼를 공유한다(현물 쪽은 정확히 같은 "외국인" 시리즈를 재사용, 별도로
+    적립하지 않는다). 선물 쪽("외인선물")은 `_run_live_refresh_extra`(7분 잡)가
+    `_warm_futures_flow_live` 반환값을 적립한 것이라 현물(60초 틱)과 실제 갱신
+    간격이 다르다 — 억지로 맞추지 않는다(collectors/intraday_snapshot.py 모듈
+    docstring 참고). 이 엔드포인트도 새 외부 호출이 전혀 없다.
+
+    Returns ``{"date": "YYYY-MM-DD", "spot": [...], "futures": [...],
+    "market_closed": bool}`` — ``spot``/``futures`` 원소는 각각
+    ``{"time": "HH:MM", "value": float}``(net_value, 백만원 단위).
+    """
+    return intraday_snapshot.get_foreign_position_series()
 
 
 # GET /api/markets/{market}/intraday — 지수 분봉(PLAN.md §5.1). kospi/kosdaq은

@@ -2,12 +2,29 @@
 
 1. ``live_refresh``(60초, 기존): routers/markets.py의 breadth/live, flow/live,
    attention, index-tiles/live(2026-07-21 추가 — 대시보드 지수 3종 타일) 4개 라이브
-   캐시를 요청 없이도 선제적으로 채운다.
+   캐시를 요청 없이도 선제적으로 채운다. **2026-07-21 추가(PLAN.md §5.4-2)**:
+   flow/live를 워밍한 직후, 그 반환값을 그대로 `collectors/intraday_snapshot.
+   record_flow_snapshot`에 넘겨 개인/외국인/기관계 순매수를 그날의 장중 누적
+   스냅샷 버퍼에 append한다 — 새 외부 호출은 없다(이미 fetch한 값 재사용),
+   실패해도 flow 워밍 자체의 try/except 안에 있어 캐시 워밍을 막지 않는다.
 2. ``live_refresh_extra``(7분, PLAN.md §4.7 3단 갱신 주기 신규): value-rank/live·
    basis/live·groups/live(업종+테마)·futures-flow/live 4개 5~10분 캐시를 채운다
    (수급 상위/flow-rank는 장중 실측 결과 소스 자체가 2영업일 이상 지연돼 있어
    제외 — routers/flow_rank.py 모듈 docstring "flow-rank/live는 만들지 않는다"
-   절 참고).
+   절 참고). **2026-07-21 추가(PLAN.md §5.4-2)**: futures-flow/live를 워밍한
+   직후, 그 반환값을 `collectors/intraday_snapshot.record_futures_flow_snapshot`에
+   넘겨 외인선물 순매수를 같은 스냅샷 버퍼(다른 시리즈)에 append한다 — 60초
+   잡의 3개 시리즈와 실제 갱신 주기가 다르지만(7분 vs 60초) 억지로 맞추지
+   않는다(intraday_snapshot.py 모듈 docstring 참고).
+
+`collectors/intraday_snapshot.py`는 위 두 잡이 이미 끝낸 fetch 결과를 그대로
+받아 메모리 리스트에 적립만 하는 순수 저장소다 — "오늘 장중 수급 추이" 1D
+차트(PLAN.md §5.4-3/4, `GET /api/markets/flow/intraday-accumulated` 및
+`GET /api/markets/foreign-position/intraday-accumulated`)의 데이터 소스가
+된다. 이 스케줄러가 없으면(``ENABLE_LIVE_REFRESH`` 꺼짐) 그 버퍼도 전혀
+쌓이지 않는다 — 라우트 핸들러 쪽 온디맨드 호출은 warm 함수만 부르고
+intraday_snapshot 기록은 하지 않으므로(routers/markets.py 참고), 1D 누적은
+전적으로 이 스케줄러가 살아있어야 동작하는 기능이다.
 
 기존 60초 메모리 캐시(routers/markets.py)는 "요청이 들어와야 갱신"하는 수동적
 캐시였다 — 아무도 요청하지 않으면 대시보드 값이 마지막 요청 시점에 멈춰 있었다.
@@ -74,6 +91,7 @@ async def _run_live_refresh() -> None:
     # 스케줄러를 켤 때(앱이 이미 완전히 초기화된 뒤)만 routers.markets를 끌어오도록
     # 함수 내부에서 임포트한다(collectors/scheduler.py는 이런 사정이 없어 최상단 임포트).
     from ..routers import markets
+    from . import intraday_snapshot
 
     async with async_session_factory() as session:
         # breadth도 2026-07-20부터 장 마감 시 DB 폴백을 위해 세션이 필요해졌다(버그
@@ -85,9 +103,14 @@ async def _run_live_refresh() -> None:
             logger.warning("live-refresh: breadth 워밍 실패: %s", e)
 
         try:
-            await markets._warm_flow_live(session)
+            flow_payload = await markets._warm_flow_live(session)
+            # 2026-07-21(PLAN.md §5.4-2): 방금 fetch한 값을 그대로 장중 누적
+            # 스냅샷 버퍼에 적립한다 — 새 외부 호출 없음. 같은 try 블록 안에 둬서
+            # 적립 실패가 flow 워밍 자체의 성공을 되돌리지 않는다(이미 캐시에는
+            # 반영된 뒤이므로 여기서 예외가 나도 무해하게 로깅만 하면 된다).
+            intraday_snapshot.record_flow_snapshot(flow_payload)
         except Exception as e:  # noqa: BLE001
-            logger.warning("live-refresh: flow 워밍 실패: %s", e)
+            logger.warning("live-refresh: flow 워밍/스냅샷 적립 실패: %s", e)
 
         try:
             await markets._warm_attention(session)
@@ -117,6 +140,7 @@ async def _run_live_refresh_extra() -> None:
     from ..routers import flow_rank as flow_rank_router
     from ..routers import groups as groups_router
     from ..routers import markets
+    from . import intraday_snapshot
 
     try:
         await flow_rank_router._warm_value_rank_live()
@@ -135,9 +159,12 @@ async def _run_live_refresh_extra() -> None:
             logger.warning("live-refresh-extra: groups(%s) 워밍 실패: %s", group_type, e)
 
     try:
-        await markets._warm_futures_flow_live()
+        futures_flow_payload = await markets._warm_futures_flow_live()
+        # 2026-07-21(PLAN.md §5.4-2): 60초 잡의 flow 스냅샷과 동일한 이유로,
+        # 방금 fetch한 값을 그대로 "외인선물" 시리즈에 적립한다(새 외부 호출 없음).
+        intraday_snapshot.record_futures_flow_snapshot(futures_flow_payload)
     except Exception as e:  # noqa: BLE001
-        logger.warning("live-refresh-extra: futures-flow 워밍 실패: %s", e)
+        logger.warning("live-refresh-extra: futures-flow 워밍/스냅샷 적립 실패: %s", e)
 
     logger.info("live-refresh-extra: 5~10분 캐시 warmed at %s KST", now_kst.isoformat())
 
