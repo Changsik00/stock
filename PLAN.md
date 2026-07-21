@@ -743,10 +743,66 @@ MarketBreadth/FlowRank **DB(EOD)만** 조회 — breadth 자체는 라이브(/br
 |---|---|---|---|
 | 5.5-1 | 지수 차트 1D 통일 | CandleModal에 분봉 토글 추가 + 기본값 1D, MarketPage `intradayMode` 기본값을 daily→1(분) 변경 | 지수 차트 전부 1D 기본 |
 | 5.5-2 | 7분 티어 쪼개기 | value-rank만 7분 유지(비용 근거 유지), groups·basis·futures-flow를 1분 티어로 이동. 장시간(10분+) 실관찰로 프런트 렌더 실제 갱신 검증 | 3개 소스 1분 갱신 실증, 나머지는 여전히 정상 |
-| 5.5-3 | 환율 라이브 소스 실측 | 네이버 환율에 장중 실시간 소스 있는지 실측 → 있으면 전환(§4.7 패턴), 없으면 현행 유지 + 이유 문서화. 유가는 손대지 않음(§7 리스크 유지) | 판정 결과 문서화 |
-| 5.5-4 | 게이지·시황 정합성 | market_sentiment의 breadth 요소를 라이브(breadth/live) 반영 검토, 구조적 EOD 항목은 명확한 라벨 유지(이미 있는 StaleDate 패턴 재사용) | 게이지가 오늘 등락 반영 |
+| 5.5-3 ✅ | 환율 라이브 소스 실측 | 네이버 환율에 장중 실시간 소스 있는지 실측 → 있으면 전환(§4.7 패턴), 없으면 현행 유지 + 이유 문서화. 유가는 손대지 않음(§7 리스크 유지) | 판정 결과 문서화 — **완료(2026-07-21)**: 아래 §5.5-3 실측 결과 참고, "된다" 판정으로 전환 |
+| 5.5-4 ✅ | 게이지·시황 정합성 | market_sentiment의 breadth 요소를 라이브(breadth/live) 반영 검토, 구조적 EOD 항목은 명확한 라벨 유지(이미 있는 StaleDate 패턴 재사용) | 게이지가 오늘 등락 반영 — **완료(2026-07-21)**: 아래 §5.5-4 결과 참고 |
 
-### Phase 4 — 선물 + 실시간 (선택)
+#### §5.5-3 환율 라이브 소스 실측 결과 (2026-07-21 화요일 장중, 13:27~13:32 KST)
+
+기존에 이미 쓰던 `clients/naver_fx.py`의 `m.stock.naver.com/front-api/marketIndex/
+prices` 응답을 60~90초 간격으로 3회 재호출(13:27:26/13:28:41/13:29:43)했을 때는
+"오늘" 행이 세 번 다 동일(1,474.50)해 처음엔 "일별 배치 값"처럼 보였다. 그런데
+`finance.naver.com/marketindex/exchangeDetail.naver?marketindexCd=FX_USDKRW`
+페이지를 대조 확인하는 과정에서 "고시회차 281회"·"고시환율은 하루에도 여러번
+재고시 될 수 있습니다"라는 문구를 발견했고, 그 iframe
+(`exchangeDegreeCountQuote.naver?marketindexCd=FX_USDKRW`, "고시회차별 시세")을
+25초 간격으로 재호출하자 281회→282회→283회로 고시회차 자체가 몇 분 안에 계속
+올라가며 매매기준율도 1,474.50→1,474.10→1,474.30으로 실제 바뀌었다. 이 회차별
+값과 `front-api/marketIndex/prices`의 "오늘" 행을 같은 시각에 나란히 비교하니
+**완전히 일치**했다(13:30:36에 두 소스 모두 1,474.10, 13:31:26에 두 소스 모두
+1,474.30) — 즉 처음 3회 실측이 우연히 같은 고시회차 구간(281회) 안에서 이뤄져
+"안 바뀐다"는 오판을 할 뻔했을 뿐, **이미 쓰고 있던 소스의 "오늘" 행 자체가
+장중 고시회차 갱신(대략 1~2분 간격)을 그대로 반영하는 준실시간 값이었다**.
+
+**판정: 된다.** 새 소스 탐색이 필요 없었다 — `clients/naver_fx.py`의
+`fetch_usdkrw_naver(start, end)`를 `[오늘, 오늘]` 구간으로 좁혀 그대로
+재사용하면 라이브 조회가 된다. 유가(WTI/yfinance)는 지시대로 건드리지 않았다.
+
+구현: `routers/markets.py`에 `_warm_fx_live()` + `GET /api/markets/fx/live`
+신설(다른 1분 티어 warm 함수와 동일한 60초 캐시 + 장마감 게이트 패턴, 장마감
+시 macro_series DB의 usdkrw 최신 확정치로 폴백, macro_series 테이블에는 쓰지
+않음 — §3.5 원칙). `collectors/live_refresh.py`의 60초 잡에 `_warm_fx_live`
+호출 추가. 프런트(`DashboardPage.jsx`)의 환율 타일이 `fxLive`(1분 폴링, 다른
+1분 티어와 동일한 useEffect에 합류)를 우선 표시하고 "1분 갱신 · 장중" 라벨을
+붙이며, 없으면 기존 `macroSeries`(EOD) 폴백 그대로. WTI 타일은 변경 없음.
+
+실배포 검증: 배포 후 `GET /api/markets/fx/live`를 반복 호출해 값이
+1,474.50→1,475.30(13:41 KST, live-refresh 60초 잡이 자연 갱신)으로 계속
+바뀜을 재확인했다.
+
+#### §5.5-4 게이지·시황 정합성 결과 (2026-07-21)
+
+`routers/flow_rank.py`의 `market_sentiment`가 breadth 요소를 계산할 때
+`_load_breadth_component_live(session)`을 먼저 시도하도록 변경했다 — 내부에서
+`routers.markets._warm_breadth_live(session)`(이미 있는 1분 캐시 함수)를
+재사용해 장중이고 라이브 조회가 성공하면 그 adv/dec/flat 합계로 breadth 요소를
+계산하고(`source: "live"`), 장 마감이거나 라이브가 실패하면 기존
+`_load_breadth_component`(market_breadth DB EOD, `source: "eod"`) 그대로
+폴백한다 — **완전 대체가 아니라 우선순위 추가**. flow(flow_rank)·etf(etf_stats)
+요소는 지시대로 손대지 않았다(flow는 §4.7-4에서 라이브 부적합 판정된 상태 유지).
+
+실측(2026-07-21 13:37 KST 장중, `GET /api/markets/sentiment`): breadth가
+`{"score": 21.5, "date": "2026-07-21", "adv": 1553, "dec": 982, "flat": 115,
+"source": "live"}`로 응답(오늘 날짜, live). 같은 시각 DB EOD 경로만 직접 호출한
+값과 대조하면 `{"score": -52.9, "adv": 556, "dec": 1944, "flat": 126, "source":
+"eod"}`로 완전히 다르다 — EOD가 실제로는 장중에 이미 적재된 "오늘" 날짜의
+불완전한 스냅샷이라 라이브와 크게 어긋나는 사례가 실증됐고(정확히 이런
+어긋남 때문에 라이브 우선이 필요했다는 진단④가 재확인됨), flow/etf 요소는
+여전히 전일(2026-07-20) EOD 그대로다.
+
+프런트: `SentimentGauge.jsx`(대시보드 모달 + `MarketPage.jsx` 양쪽에서 재사용)의
+breadth 요소 라벨 옆에 `components.breadth.source === "live"`일 때만 작은
+"장중" 배지를 추가(최소 침습, 별도 상태/폴링 신설 없음 — 이미 있는
+`sentiment.components` 응답을 그대로 사용).
 - [ ] KIS 클라이언트 + `FHPTJ04040000`으로 market_flow 소스를 pykrx→KIS 교체 (pykrx는 검증용 강등)
 - [ ] 선물 투자자별: KIS `FHPTJ04030000` 시장구분 코드 실호출 검증 → 실패 시 KRX 파생 통계 파싱
 - [ ] 키움 WebSocket: 장중 잠정 수급(ka10063 폴링 or `0w` 프로그램매매), StockPage 실시간 갱신

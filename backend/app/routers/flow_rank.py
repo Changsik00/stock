@@ -106,6 +106,7 @@ from ..db import get_session
 from ..market_hours import KST, is_market_closed
 from ..models import EtfStat, FlowPath, FlowRank, MarketBreadth, Stock, ValueRank
 from ..sentiment import breadth_score, compute_sentiment, etf_score, flow_score
+from .markets import _warm_breadth_live
 
 router = APIRouter(tags=["markets"])
 
@@ -337,6 +338,9 @@ async def value_rank_top(
 
 
 async def _load_breadth_component(session: AsyncSession) -> dict:
+    """market_breadth DB(EOD 확정치) 기준 breadth 요소 — market_sentiment의
+    폴백 경로(라이브를 못 쓸 때: 장 마감이거나 breadth/live 자체가 실패)다.
+    §5.5-4 이전에는 이 함수가 유일한 경로였다."""
     since = dt.date.today() - dt.timedelta(days=SENTIMENT_LOOKBACK_DAYS)
     latest_date = (
         await session.execute(
@@ -345,7 +349,7 @@ async def _load_breadth_component(session: AsyncSession) -> dict:
     ).scalar()
 
     if latest_date is None:
-        return {"score": None, "date": None, "adv": 0, "dec": 0, "flat": 0}
+        return {"score": None, "date": None, "adv": 0, "dec": 0, "flat": 0, "source": "eod"}
 
     rows = (
         await session.execute(select(MarketBreadth).where(MarketBreadth.date == latest_date))
@@ -360,6 +364,36 @@ async def _load_breadth_component(session: AsyncSession) -> dict:
         "adv": adv,
         "dec": dec,
         "flat": flat,
+        "source": "eod",
+    }
+
+
+async def _load_breadth_component_live(session: AsyncSession) -> dict | None:
+    """breadth/live(routers.markets._warm_breadth_live, 1분 캐시)를 재사용해
+    라이브 adv/dec/flat으로 breadth 요소를 계산한다(PLAN.md §5.5-4 — 게이지가
+    오늘 등락을 반영하도록). 장 마감이거나 코스피/코스닥 라이브 조회가 둘 다
+    실패하면 None을 반환해 호출자(market_sentiment)가 EOD 폴백
+    (`_load_breadth_component`)으로 넘어가게 한다 — **완전 대체가 아니라
+    "가능하면 라이브 우선" 원칙**(flow/etf 요소는 이번 범위 밖, 그대로 EOD)."""
+    live = await _warm_breadth_live(session)
+    if live.get("market_closed"):
+        return None
+    kospi = live.get("kospi")
+    kosdaq = live.get("kosdaq")
+    if kospi is None and kosdaq is None:
+        return None
+
+    adv = (kospi or {}).get("adv", 0) + (kosdaq or {}).get("adv", 0)
+    dec = (kospi or {}).get("dec", 0) + (kosdaq or {}).get("dec", 0)
+    flat = (kospi or {}).get("flat", 0) + (kosdaq or {}).get("flat", 0)
+
+    return {
+        "score": breadth_score(adv, dec, flat),
+        "date": dt.datetime.now(KST).date().isoformat(),
+        "adv": adv,
+        "dec": dec,
+        "flat": flat,
+        "source": "live",
     }
 
 
@@ -469,8 +503,18 @@ async def market_sentiment(session: AsyncSession = Depends(get_session)) -> dict
     approx=True는 항상 고정값이다 — 이 프로젝트의 flow/etf 요소는 상위 랭킹·ETF
     유니버스 기반 근사치이지 시장 전체 정밀값이 아니다(§4.6 한계 절, 정밀값은 향후
     KRX/KIS market_flow 연동 후 대체 예정).
+
+    **breadth 요소는 2026-07-21(PLAN.md §5.5-4)부터 라이브를 우선한다**: 장중이고
+    breadth/live(routers.markets._warm_breadth_live, 1분 캐시) 조회가 성공하면 그
+    adv/dec/flat으로 계산하고(``components.breadth.source == "live"``), 장
+    마감이거나 라이브가 실패하면 기존 market_breadth DB EOD 확정치로 폴백한다
+    (``source == "eod"``) — 완전 대체가 아니라 우선순위 추가다. flow(flow_rank)·
+    etf(etf_stats) 요소는 이번 범위 밖이라 그대로 EOD 전용이다(flow_rank는 §4.7-4에서
+    라이브가 부적합 판정된 상태).
     """
-    breadth = await _load_breadth_component(session)
+    breadth = await _load_breadth_component_live(session)
+    if breadth is None:
+        breadth = await _load_breadth_component(session)
     flow = await _load_flow_component(session)
     etf = await _load_etf_component(session)
 

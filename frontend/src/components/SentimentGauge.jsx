@@ -15,6 +15,11 @@ import { formatDate } from '../format'
 //
 // 이 프로젝트 전체가 "상위 랭킹·ETF 유니버스 기반 근사"라는 한계를 갖고 있으므로
 // (PLAN.md §4.6 한계 절) approx prop 값과 무관하게 안내 문구를 항상 고정 노출한다.
+//
+// breadth 요소는 2026-07-21(PLAN.md §5.5-4)부터 라이브(breadth/live)를 우선
+// 반영한다 — 응답의 components.breadth.source가 "live"면 라벨 옆에 작은 "장중"
+// 배지를 붙인다(장 마감/폴백이면 "eod"라 배지 없음). flow/etf 요소는 이번 범위
+// 밖이라 source 필드 자체가 없다 — 있을 때만 조건부로 그린다.
 
 const scoreFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 1, minimumFractionDigits: 1 })
 const countFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 0 })
@@ -65,6 +70,7 @@ function ComponentBar({ id, component }) {
     <div className="sentiment-gauge-component">
       <div className="sentiment-gauge-component-head">
         <span className="sentiment-gauge-component-label">{meta.label}</span>
+        {component?.source === 'live' && <span className="sentiment-gauge-component-live">장중</span>}
         <span className="sentiment-gauge-component-weight">가중치 {(weight * 100).toFixed(0)}%</span>
         <span className={`sentiment-gauge-component-score ${scoreClass(component?.score)}`}>
           {scoreLabel(component?.score)}
@@ -182,6 +188,15 @@ export default function SentimentGauge({ loading, error, score, approx: _approx,
         .sentiment-gauge-component-weight {
           color: var(--text-muted);
           font-size: 10px;
+        }
+        .sentiment-gauge-component-live {
+          font-size: 9px;
+          font-weight: 700;
+          color: var(--up);
+          border: 1px solid var(--up);
+          border-radius: 999px;
+          padding: 0 5px;
+          line-height: 14px;
         }
         .sentiment-gauge-component-score {
           margin-left: auto;

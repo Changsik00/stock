@@ -252,6 +252,14 @@ export async function fetchFuturesFlowLive() {
   return getJson('/api/markets/futures-flow/live')
 }
 
+// GET /api/markets/fx/live -> { usdkrw: {date, value, source}|null, market_closed,
+// cached_at } (PLAN.md §5.5-3 — 실측으로 naver front-api "오늘" 행이 장중 고시회차
+// 갱신을 그대로 반영함을 확인해 1분 서버 캐시로 편입). 로컬 전용 기능, STATIC_DATA
+// 대상 아님(basis/futures-flow live와 동일한 관례).
+export async function fetchFxLive() {
+  return getJson('/api/markets/fx/live')
+}
+
 // GET /api/markets/flow/intraday-accumulated -> { date, series: {개인, 외국인,
 // 기관계: [{time: "HH:MM", value}]}, market_closed } (PLAN.md §5.4-2/3) — 새 외부
 // 호출 없이 서버가 이미 60초마다 flow/live를 워밍하는 김에 그 결과를 그날 메모리

@@ -13,6 +13,7 @@ import {
   fetchFlowRank,
   fetchForeignPositionIntradayAccumulated,
   fetchFuturesFlowLive,
+  fetchFxLive,
   fetchGroups,
   fetchGroupsLive,
   fetchIndexTilesLive,
@@ -1269,6 +1270,11 @@ export default function DashboardPage() {
   // 기준은 안 바꿈).
   const [basisLive, setBasisLive] = useState(null)
   const [futuresFlowLive, setFuturesFlowLive] = useState(null)
+  // 환율(USD/KRW) 1분 라이브 오버레이(PLAN.md §5.5-3, 2026-07-21 실측 편입) — naver
+  // front-api의 "오늘" 행이 장중 고시회차 갱신을 그대로 반영함을 실측으로 확인해
+  // basisLive/futuresFlowLive와 같은 "오버레이 + 폴백" 관례로 추가했다. null이면
+  // macroSeries(EOD, usdkrw)로 폴백한다.
+  const [fxLive, setFxLive] = useState(null)
 
   const [groupType, setGroupType] = useState('upjong')
   const [groupItems, setGroupItems] = useState([])
@@ -1463,6 +1469,18 @@ export default function DashboardPage() {
         })
     }
 
+    // §5.5-3 — 환율도 위 groupLive/basisLive/futuresFlowLive와 같은 1분 티어에
+    // 합류한다(백엔드 fx/live 60초 캐시와 맞춤).
+    function loadFxLive() {
+      return fetchFxLive()
+        .then((body) => {
+          if (!cancelled) setFxLive(body)
+        })
+        .catch(() => {
+          if (!cancelled) setFxLive(null)
+        })
+    }
+
     function load() {
       const tasks = [loadBreadth()]
       if (!STATIC_DATA) {
@@ -1473,7 +1491,8 @@ export default function DashboardPage() {
           loadIndexTilesLive(),
           loadGroupLive(),
           loadBasisLive(),
-          loadFuturesFlowLive()
+          loadFuturesFlowLive(),
+          loadFxLive()
         )
       }
       return Promise.all(tasks)
@@ -1789,6 +1808,12 @@ export default function DashboardPage() {
   // 표시 전용(시그널 판정 backwardationSignal은 EOD 기준 basisLatest 그대로).
   const basisLiveActive = Boolean(
     !STATIC_DATA && basisLive && basisLive.market_closed === false && typeof basisLive.basis === 'number'
+  )
+  // 환율(USD/KRW) 1분 라이브 오버레이(PLAN.md §5.5-3) — basisLiveActive와 동일한
+  // 관례. 값 표시만 라이브로 바꾸고, DiffArrow의 기준(prev)은 여전히 macroPrev
+  // (전일 종가)를 쓴다 — "전일 대비"라는 의미 자체는 유지한 채 "현재"만 갱신한다.
+  const fxLiveActive = Boolean(
+    !STATIC_DATA && fxLive && fxLive.market_closed === false && typeof fxLive.usdkrw?.value === 'number'
   )
   const expiry = basisData?.expiry
   const derivativeLatest = derivativeFlow?.latest
@@ -2226,16 +2251,20 @@ export default function DashboardPage() {
             브렌트는 타일에서 생략하고 모달(MacroModal)에서만 보여준다. */}
         <KpiTile
           label="환율(USD/KRW)"
-          value={fxLabel(macroLatest('usdkrw'))}
+          value={fxLabel(fxLiveActive ? fxLive.usdkrw.value : macroLatest('usdkrw'))}
           sub={
             <>
               <DiffArrow
-                current={macroLatest('usdkrw')}
+                current={fxLiveActive ? fxLive.usdkrw.value : macroLatest('usdkrw')}
                 prev={macroPrev('usdkrw')}
                 formatter={(v) => `${fxFmt.format(v)}원`}
                 neutral
               />
-              <StaleDate date={macroDate('usdkrw')} baseDate={baseDate} prefix=" · " />
+              {fxLiveActive ? (
+                <span className="kpi-tile-sub"> · 1분 갱신 · 장중</span>
+              ) : (
+                <StaleDate date={macroDate('usdkrw')} baseDate={baseDate} prefix=" · " />
+              )}
             </>
           }
           title={macroDate('usdkrw') ? formatDate(macroDate('usdkrw')) : undefined}

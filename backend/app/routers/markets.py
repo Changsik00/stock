@@ -57,6 +57,18 @@ collectors/futures_flow.py는 그대로 하루 1회 market_flow에 확정 적재
 엔드포인트는 DB에 쓰지 않는다, §3.5 원칙). breadth/live와 동일한 warm 함수 +
 TTL + Lock 패턴이지만 DB 폴백이 없어(소스가 항상 최신 스냅샷을 주므로) 세션
 의존이 없다.
+
+Also owns GET /api/markets/fx/live (PLAN.md §5.5-3, 2026-07-21 장중 실측 편입) —
+USD/KRW 환율. clients/naver_fx.py의 ``fetch_usdkrw_naver``(원래 일별 EOD 조회용,
+[start, end] 구간을 받는다)를 오늘 하루([오늘, 오늘])로 좁혀 재사용한다. 실측
+결과 이 소스의 "오늘" 행은 하루 1회 배치가 아니라 네이버 고시환율의
+"고시회차"(장중 여러 번 재고시되는 매매기준율, ``finance.naver.com/marketindex/
+exchangeDegreeCountQuote.naver``로 대조 확인)를 그대로 반영해 대략 1~2분
+간격으로 갱신된다(60~90초 간격 3회 호출로 값이 실제로 바뀜을 확인) — 그래서
+새 엔드포인트를 만들되 **새 소스는 필요 없다**. breadth/live와 동일한 60초
+캐시 + 장 마감 게이트 패턴이지만, 장 마감 시 폴백은 macro_series DB의 usdkrw
+최신 확정치(collectors/macro.py 일별 배치)를 쓴다 — macro_series 테이블에는
+절대 쓰지 않는다(§3.5 원칙).
 """
 
 from __future__ import annotations
@@ -70,13 +82,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..clients import naver_breadth, naver_futures_flow, naver_index
+from ..clients import naver_breadth, naver_futures_flow, naver_fx, naver_index
 from ..clients.kiwoom import MINUTE_CHART_INTERVALS, KiwoomClient, parse_minute_chart_rows
 from ..collectors import intraday_snapshot
 from ..collectors.market_flow import fetch_live_flow
 from ..db import get_session
 from ..market_hours import KST, is_market_closed as _market_closed_kst
-from ..models import IndexOhlcv, MarketBreadth, MarketFlow, Stock
+from ..models import IndexOhlcv, MacroSeries, MarketBreadth, MarketFlow, Stock
 from ..services import DB_MARKET, get_market_series_from_db
 
 logger = logging.getLogger(__name__)
@@ -647,6 +659,106 @@ async def futures_flow_live():
     "market_closed": bool, "cached_at": iso8601}``.
     """
     return await _warm_futures_flow_live()
+
+
+# GET /api/markets/fx/live 60초 메모리 캐시 — breadth/live와 동일한 이유(모듈
+# docstring "GET /api/markets/fx/live" 절 참고, PLAN.md §5.5-3).
+_FX_LIVE_CACHE_TTL_SECONDS = 60
+_fx_live_cache: dict[str, object] = {"ts": 0.0, "data": None}
+_fx_live_cache_lock = asyncio.Lock()
+
+
+def _fetch_fx_latest_blocking() -> dict | None:
+    """clients.naver_fx.fetch_usdkrw_naver를 [오늘, 오늘] 구간(페이지 1회)으로
+    호출해 "오늘" 행 하나만 뽑는다. 실측(§5.5-3, 모듈 docstring 참고) 결과 이
+    행이 장중 고시회차 갱신을 그대로 반영하므로 별도 라이브 클라이언트를
+    새로 만들지 않고 기존 EOD용 함수를 그대로 재사용한다."""
+    today = dt.date.today()
+    rows = naver_fx.fetch_usdkrw_naver(today, today)
+    if not rows:
+        return None
+    return rows[-1]
+
+
+async def _fetch_fx_confirmed(session: AsyncSession) -> dict | None:
+    """macro_series(series='usdkrw') DB 최신 확정치 — 장 마감/라이브 실패 폴백
+    (breadth/live의 `_fetch_breadth_confirmed_for_market`과 동일한 패턴)."""
+    stmt = (
+        select(MacroSeries)
+        .where(MacroSeries.series == "usdkrw")
+        .order_by(MacroSeries.date.desc())
+        .limit(1)
+    )
+    row = (await session.execute(stmt)).scalars().first()
+    if row is None:
+        return None
+    return {"date": row.date.isoformat(), "value": float(row.value), "source": "macro_series_db"}
+
+
+async def _warm_fx_live(session: AsyncSession | None = None) -> dict:
+    """fx/live 캐시를 채우고 payload를 반환한다 — 라우트 핸들러와
+    collectors/live_refresh.py의 60초 인터벌 잡이 공유한다(breadth/live와
+    동일한 패턴). macro_series 테이블에는 절대 쓰지 않는다(§3.5 원칙 — EOD
+    확정치는 collectors/macro.py 일별 배치가 그대로 담당).
+
+    장 마감이면 네이버 호출을 생략하고(다른 1분 티어 warm 함수와 동일한
+    원칙) macro_series DB 최신 확정치로 응답한다. 라이브 호출이 실패해도(네이버
+    비공식 API라 언제든 형태가 바뀔 수 있음) 같은 DB 폴백으로 넘어간다 —
+    breadth/live와 달리 두 경로 모두 세션이 필요하므로 세션이 없으면(호출자가
+    안 넘긴 경우) 폴백 없이 usdkrw: None으로 응답한다."""
+    now = time.monotonic()
+    async with _fx_live_cache_lock:
+        cached = _fx_live_cache["data"]
+        if cached is not None and (now - _fx_live_cache["ts"]) < _FX_LIVE_CACHE_TTL_SECONDS:
+            return cached
+
+        now_kst = dt.datetime.now(KST)
+        if _market_closed_kst(now_kst):
+            usdkrw = await _fetch_fx_confirmed(session) if session is not None else None
+            payload = {
+                "usdkrw": usdkrw,
+                "market_closed": True,
+                "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            }
+            _fx_live_cache["data"] = payload
+            _fx_live_cache["ts"] = now
+            return payload
+
+        try:
+            row = await asyncio.to_thread(_fetch_fx_latest_blocking)
+        except Exception as e:  # noqa: BLE001 - 비공식 API, 실패해도 DB 폴백으로 진행
+            row = None
+            logger.warning("fx_live: naver 조회 실패, DB 폴백 시도: %s", e)
+
+        if row is not None:
+            usdkrw = {"date": row["date"].isoformat(), "value": row["value"], "source": "naver"}
+        else:
+            usdkrw = await _fetch_fx_confirmed(session) if session is not None else None
+
+        payload = {
+            "usdkrw": usdkrw,
+            "market_closed": False,
+            "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        _fx_live_cache["data"] = payload
+        _fx_live_cache["ts"] = now
+        return payload
+
+
+@router.get("/api/markets/fx/live")
+async def market_fx_live(session: AsyncSession = Depends(get_session)):
+    """USD/KRW 환율 장중 라이브(PLAN.md §5.5-3, 2026-07-21 실측 편입).
+
+    clients/naver_fx.py의 m.stock.naver.com front-api를 오늘 하루 구간으로
+    온디맨드 재조회해 60초 메모리 캐시로 감싼다(macro_series DB에는 쓰지
+    않는다 — §3.5 원칙, EOD 확정치는 collectors/macro.py 일별 배치가 그대로
+    담당). 장 마감이면 네이버 호출을 생략하고 macro_series 최신 확정치로
+    폴백한다(`_warm_fx_live` docstring 참고).
+
+    Returns ``{"usdkrw": {"date", "value", "source"} | None, "market_closed":
+    bool, "cached_at": iso8601}``.
+    """
+    return await _warm_fx_live(session)
 
 
 @router.get("/api/markets/flow/intraday-accumulated")
