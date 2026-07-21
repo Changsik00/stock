@@ -1713,6 +1713,18 @@ export default function DashboardPage() {
   // 하고, isLive만 추가로 얹어 "장중" 배지 여부를 결정한다. 모달(캔들차트)은 이
   // 헬퍼를 쓰지 않고 marketData를 그대로 쓴다(모달·차트는 기존 로직 유지 — 작업 지시).
   const indexTilesLiveOpen = indexTilesLive?.market_closed === false
+  // 장 상태 배너(PLAN.md §5.9, 2026-07-22 사용자 지적) — 정규장 09:00 개장 전(또는
+  // 15:30 마감 후)엔 지수·수급 등 "오늘" 계산이 정규장 기준이라 어제 확정치로 보이는
+  // 게 정상인데, 화면이 그걸 알려주지 않아 "고장났나?" 헷갈림이 반복됐다. 새 API·새
+  // 시간 로직 없이 이미 폴링 중인 두 신호만으로 3단계를 판정한다:
+  //   1) 정규장 중: indexTilesLive.market_closed === false — 배너 없음(가장 흔한
+  //      상태라 화면을 어지럽히지 않는다).
+  //   2) NXT만 열림(프리마켓 08:00~09:00 / 애프터마켓 15:30~20:00): 지수 쪽은
+  //      닫혔는데 attentionTop이 살아있음(rows가 오는, market_closed가 true가
+  //      아닌) 경우.
+  //   3) 완전 마감(야간·주말): 둘 다 닫힘.
+  const nxtAlive = Boolean(attentionTop && attentionTop.market_closed !== true)
+  const marketStatus = indexTilesLiveOpen ? 'regular' : nxtAlive ? 'nxt-only' : 'closed'
   const indexTileOf = (key) => {
     const row = indexTilesLiveOpen ? indexTilesLive?.[key] : null
     if (row) {
@@ -1971,6 +1983,19 @@ export default function DashboardPage() {
           </span>
         )}
       </div>
+
+      {/* 장 상태 배너(PLAN.md §5.9) — 정규장 중엔 렌더하지 않는다(가장 흔한 상태라
+          배너로 화면을 어지럽히지 않는다). 정적 배포(STATIC_DATA)는 라이브 폴링이
+          없어 판정 근거가 없으므로 아예 숨긴다(다른 라이브 전용 UI와 동일한 관례). */}
+      {!STATIC_DATA && marketStatus === 'nxt-only' && (
+        <div className="banner">
+          NXT 확장세션 — 실시간 관심 TOP5 등 개별 종목만 갱신 중이며, 지수·수급·업종·테마
+          등은 정규장(09:00~15:30) 확정치입니다.
+        </div>
+      )}
+      {!STATIC_DATA && marketStatus === 'closed' && (
+        <div className="banner">장 마감 — 모든 지표가 최근 확정치입니다.</div>
+      )}
 
       {/* 1. 지수 3종 */}
       <div className="section-title" style={{ marginTop: 16 }}>
