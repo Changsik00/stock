@@ -2597,10 +2597,19 @@ export default function DashboardPage() {
           value={fxLabel(fxLiveActive ? fxLive.usdkrw.value : macroLatest('usdkrw'))}
           sub={
             <>
+              {/* 사용자 지적(2026-07-23): 원 단위 차액만으로는 "얼마나 오른 건지"
+                  체감이 안 된다 — 전일 대비 %를 같이 보여준다. formatter는 절대
+                  차액(v)만 받으므로, 같은 렌더 스코프에 있는 macroPrev('usdkrw')를
+                  클로저로 참조해 비율을 직접 계산한다(DiffArrow 자체는 다른 여러
+                  타일이 공유하는 범용 컴포넌트라 시그니처를 바꾸지 않는다). */}
               <DiffArrow
                 current={fxLiveActive ? fxLive.usdkrw.value : macroLatest('usdkrw')}
                 prev={macroPrev('usdkrw')}
-                formatter={(v) => `${fxFmt.format(v)}원`}
+                formatter={(v) => {
+                  const prevValue = macroPrev('usdkrw')
+                  const pct = prevValue ? (v / prevValue) * 100 : null
+                  return `${fxFmt.format(v)}원${pct !== null ? ` (${pct.toFixed(2)}%)` : ''}`
+                }}
                 neutral
               />
               {fxLiveActive ? (
