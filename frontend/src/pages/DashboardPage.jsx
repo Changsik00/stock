@@ -322,6 +322,16 @@ function DiffArrow({ current, prev, formatter, neutral = false }) {
   )
 }
 
+// 사용자 지적(2026-07-23): "point, 원, 달러 같은거 얼마나 변동됐는지 % 로 다
+// 처리해줘" — DiffArrow의 formatter는 절대 차액(diffAbs)만 받으므로, 전일값
+// (prevValue)을 알고 있는 호출부가 이 헬퍼로 "(N.NN%)" 접미사를 붙인다.
+// prevValue가 없거나 0이면(분모가 0인 경우 포함) 빈 문자열 — 계산 불가 상황을
+// 조용히 생략한다(억지로 0%나 에러를 보여주지 않음).
+function pctSuffix(diffAbs, prevValue) {
+  if (!prevValue) return ''
+  return ` (${((diffAbs / Math.abs(prevValue)) * 100).toFixed(2)}%)`
+}
+
 // 두 시장(코스피/코스닥)의 flows(투자자 -> [{date, net_value, net_volume}])를 투자자·
 // 날짜 기준으로 합산한다 — market_flow는 시장별로만 적재되고 백엔드에 "합계" 엔드포인트가
 // 없어(routers/markets.py MARKETS={kospi,kosdaq,futures}, FLOW_MARKETS={kospi,kosdaq})
@@ -2543,7 +2553,7 @@ export default function DashboardPage() {
               <DiffArrow
                 current={trillion(fundLatest('investor_deposit'))}
                 prev={trillion(fundPrev('investor_deposit'))}
-                formatter={(v) => `${joFmt.format(v)}조`}
+                formatter={(v) => `${joFmt.format(v)}조${pctSuffix(v, trillion(fundPrev('investor_deposit')))}`}
               />
               <StaleDate date={fundDate('investor_deposit')} baseDate={baseDate} prefix=" · " />
             </>
@@ -2559,7 +2569,7 @@ export default function DashboardPage() {
               <DiffArrow
                 current={trillion(fundLatest('lending_balance'))}
                 prev={trillion(fundPrev('lending_balance'))}
-                formatter={(v) => `${joFmt.format(v)}조`}
+                formatter={(v) => `${joFmt.format(v)}조${pctSuffix(v, trillion(fundPrev('lending_balance')))}`}
               />
               <StaleDate date={fundDate('lending_balance')} baseDate={baseDate} prefix=" · " />
             </>
@@ -2572,7 +2582,11 @@ export default function DashboardPage() {
           value={creditLoanLatest !== null ? `${joFmt.format(creditLoanLatest)}조` : '-'}
           sub={
             <>
-              <DiffArrow current={creditLoanLatest} prev={creditLoanPrev} formatter={(v) => `${joFmt.format(v)}조`} />
+              <DiffArrow
+                current={creditLoanLatest}
+                prev={creditLoanPrev}
+                formatter={(v) => `${joFmt.format(v)}조${pctSuffix(v, creditLoanPrev)}`}
+              />
               <StaleDate date={creditLoanDate} baseDate={baseDate} prefix=" · " />
             </>
           }
@@ -2597,19 +2611,10 @@ export default function DashboardPage() {
           value={fxLabel(fxLiveActive ? fxLive.usdkrw.value : macroLatest('usdkrw'))}
           sub={
             <>
-              {/* 사용자 지적(2026-07-23): 원 단위 차액만으로는 "얼마나 오른 건지"
-                  체감이 안 된다 — 전일 대비 %를 같이 보여준다. formatter는 절대
-                  차액(v)만 받으므로, 같은 렌더 스코프에 있는 macroPrev('usdkrw')를
-                  클로저로 참조해 비율을 직접 계산한다(DiffArrow 자체는 다른 여러
-                  타일이 공유하는 범용 컴포넌트라 시그니처를 바꾸지 않는다). */}
               <DiffArrow
                 current={fxLiveActive ? fxLive.usdkrw.value : macroLatest('usdkrw')}
                 prev={macroPrev('usdkrw')}
-                formatter={(v) => {
-                  const prevValue = macroPrev('usdkrw')
-                  const pct = prevValue ? (v / prevValue) * 100 : null
-                  return `${fxFmt.format(v)}원${pct !== null ? ` (${pct.toFixed(2)}%)` : ''}`
-                }}
+                formatter={(v) => `${fxFmt.format(v)}원${pctSuffix(v, macroPrev('usdkrw'))}`}
                 neutral
               />
               {fxLiveActive ? (
@@ -2627,7 +2632,11 @@ export default function DashboardPage() {
           value={oilLabel(macroLatest('wti'))}
           sub={
             <>
-              <DiffArrow current={macroLatest('wti')} prev={macroPrev('wti')} formatter={(v) => `$${oilFmt.format(v)}`} />
+              <DiffArrow
+                current={macroLatest('wti')}
+                prev={macroPrev('wti')}
+                formatter={(v) => `$${oilFmt.format(v)}${pctSuffix(v, macroPrev('wti'))}`}
+              />
               <StaleDate date={macroDate('wti')} baseDate={baseDate} prefix=" · " />
             </>
           }
@@ -2644,7 +2653,11 @@ export default function DashboardPage() {
             value={usIndexLabel(macroLatest(s.id))}
             sub={
               <>
-                <DiffArrow current={macroLatest(s.id)} prev={macroPrev(s.id)} formatter={(v) => usIndexFmt.format(v)} />
+                <DiffArrow
+                  current={macroLatest(s.id)}
+                  prev={macroPrev(s.id)}
+                  formatter={(v) => `${usIndexFmt.format(v)}${pctSuffix(v, macroPrev(s.id))}`}
+                />
                 <StaleDate date={macroDate(s.id)} baseDate={baseDate} prefix=" · " />
               </>
             }
