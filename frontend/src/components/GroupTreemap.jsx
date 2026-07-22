@@ -146,16 +146,34 @@ function TreemapCell(props) {
   // 데이터의 원본 거래대금이 아니라 sizeValue(압축된 크기)로 뒤바뀐다. 원본
   // API 필드명이 우연히 둘 다 'value'라 충돌하므로, GroupTreemap 하단에서 미리
   // tradeValue로 별칭을 만들어 이 충돌을 피한다.
-  const { x, y, width, height, name, change_rate: changeRate, tradeValue } = props
+  // onBoxClick: PLAN.md §5.12 "트리맵 클릭 → 대장 종목 TOP10" — 박스 클릭 시 그
+  // 항목의 name을 콜백으로 넘긴다(DashboardPage가 이 name으로 GET
+  // /api/groups/top-stocks를 호출해 모달을 연다). GroupTreemap이 prop으로 받아
+  // <Treemap content={<TreemapCell onBoxClick={onBoxClick} />}>로 내려보낸 걸
+  // recharts가 노드별 데이터(x/y/width/height/name/...)와 병합해 그대로 전달한다.
+  const { x, y, width, height, name, change_rate: changeRate, tradeValue, onBoxClick } = props
   if (width <= 0 || height <= 0) return null
 
   const showName = width >= MIN_LABEL_WIDTH && height >= MIN_LABEL_HEIGHT
   const showSubLabel = showName && height >= MIN_RATE_LABEL_HEIGHT
   const showValueLabel = showSubLabel && width >= MIN_VALUE_LABEL_WIDTH && height >= MIN_VALUE_LABEL_HEIGHT
   const textColor = labelColorFor(changeRate)
+  const clickable = typeof onBoxClick === 'function'
 
   return (
-    <g>
+    <g
+      role={clickable ? 'button' : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onClick={clickable ? () => onBoxClick(name) : undefined}
+      onKeyDown={
+        clickable
+          ? (e) => {
+              if (e.key === 'Enter' || e.key === ' ') onBoxClick(name)
+            }
+          : undefined
+      }
+      style={{ cursor: clickable ? 'pointer' : 'default' }}
+    >
       <rect
         x={x}
         y={y}
@@ -358,7 +376,9 @@ function GroupCaption({ groups }) {
 // height: 트리맵 렌더 높이(px) — 기본 420은 시장 탭(상세 뷰) 크기. 대시보드 탭은
 // 무스크롤 첫 화면 목표(PLAN.md §6 3.7-1)를 위해 더 낮은 값(예: 260)을 넘긴다.
 // 동작(데이터 처리/접기/색 스케일)은 그대로이고 렌더 높이만 바뀐다.
-export default function GroupTreemap({ items, sizeBy = 'value', height = 420 }) {
+// onBoxClick(name): 박스 클릭 시 그 항목의 name을 넘긴다(선택 — 생략하면 클릭
+// 불가, 기존 시장 탭처럼 순수 시각화로만 쓸 수 있다. PLAN.md §5.12).
+export default function GroupTreemap({ items, sizeBy = 'value', height = 420, onBoxClick }) {
   // tradeValue: 원본 거래대금을 recharts Treemap의 'value' 필드 덮어쓰기(위 TreemapCell
   // 주석 참고)로부터 지키기 위한 별칭이다 — content/Tooltip 어느 쪽도 props.value를
   // 원본 거래대금으로 신뢰할 수 없으므로 여기서 한 번만 복제해 둔다.
@@ -393,7 +413,7 @@ export default function GroupTreemap({ items, sizeBy = 'value', height = 420 }) 
           nodeGap={2}
           aspectRatio={4 / 3}
           isAnimationActive={false}
-          content={<TreemapCell />}
+          content={<TreemapCell onBoxClick={onBoxClick} />}
         >
           <Tooltip content={<GroupTooltip />} />
         </Treemap>

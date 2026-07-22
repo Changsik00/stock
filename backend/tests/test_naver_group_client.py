@@ -256,3 +256,100 @@ def test_fetch_group_value_raises_on_no_constituent_rows(monkeypatch):
 def test_fetch_group_value_rejects_unknown_group_type():
     with pytest.raises(ValueError):
         naver_group.fetch_group_value("sector", 1)
+
+
+def test_fetch_group_constituents_parses_code_name_rate_value_sorted_desc(monkeypatch):
+    captured = {}
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        captured["url"] = url
+        captured["params"] = params
+        return _FakeResponse(DETAIL_BODY_UPJONG)
+
+    monkeypatch.setattr(naver_group.requests, "get", fake_get)
+
+    rows = naver_group.fetch_group_constituents("upjong", 278)
+
+    assert captured["url"] == naver_group.DETAIL_URL
+    assert captured["params"] == {"type": "upjong", "no": 278}
+    # 거래대금(8076) 내림차순 — DETAIL_BODY_UPJONG 소스 순서와 반대다.
+    assert rows == [
+        {"code": "413300", "name": "티엘엔지니어링", "change_rate": 10.19, "value": 8076},
+        {"code": "365590", "name": "하이딥", "change_rate": 10.56, "value": 122},
+    ]
+
+
+def test_fetch_group_constituents_respects_limit(monkeypatch):
+    def fake_get(url, params=None, headers=None, timeout=None):
+        return _FakeResponse(DETAIL_BODY_UPJONG)
+
+    monkeypatch.setattr(naver_group.requests, "get", fake_get)
+
+    rows = naver_group.fetch_group_constituents("upjong", 278, limit=1)
+
+    assert rows == [
+        {"code": "413300", "name": "티엘엔지니어링", "change_rate": 10.19, "value": 8076},
+    ]
+
+
+def test_fetch_group_constituents_ignores_theme_reason_column(monkeypatch):
+    def fake_get(url, params=None, headers=None, timeout=None):
+        return _FakeResponse(DETAIL_BODY_THEME)
+
+    monkeypatch.setattr(naver_group.requests, "get", fake_get)
+
+    rows = naver_group.fetch_group_constituents("theme", 30)
+
+    assert rows == [
+        {"code": "023790", "name": "동일스틸럭스", "change_rate": 29.97, "value": 8076},
+    ]
+
+
+def test_fetch_group_constituents_raises_on_no_constituent_rows(monkeypatch):
+    def fake_get(url, params=None, headers=None, timeout=None):
+        return _FakeResponse("<div>no data here</div>")
+
+    monkeypatch.setattr(naver_group.requests, "get", fake_get)
+
+    with pytest.raises(naver_group.NaverGroupError):
+        naver_group.fetch_group_constituents("upjong", 999999)
+
+
+def test_fetch_group_constituents_skips_row_missing_value_column(monkeypatch):
+    # 숫자 컬럼이 거래대금 인덱스(6)까지 없는 행(예: 파싱 실패)은 건너뛰고 나머지는
+    # 계속 파싱한다 — fetch_group_value의 관용과 동일.
+    body = """
+<table>
+<tbody>
+<tr onMouseOver="mouseOver(this)" onMouseOut="mouseOut(this)" >
+	<td class="name"><div class="name_area"><a href="/item/main.naver?code=000001">부실행</a></div></td>
+	<td class="number">1,000</td>
+</tr>
+<tr onMouseOver="mouseOver(this)" onMouseOut="mouseOut(this)" >
+	<td class="name"><div class="name_area"><a href="/item/main.naver?code=365590">하이딥</a></div></td>
+	<td class="number">1,068</td>
+	<td class="number">102</td>
+	<td class="number"><span class="tah p11 red01">+10.56%</span></td>
+	<td class="number">1,048</td>
+	<td class="number">1,068</td>
+	<td class="number">124,044</td>
+	<td class="number">122</td>
+	<td class="number">136,604</td>
+</tr>
+</tbody>
+</table>
+"""
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        return _FakeResponse(body)
+
+    monkeypatch.setattr(naver_group.requests, "get", fake_get)
+
+    rows = naver_group.fetch_group_constituents("upjong", 1)
+
+    assert rows == [{"code": "365590", "name": "하이딥", "change_rate": 10.56, "value": 122}]
+
+
+def test_fetch_group_constituents_rejects_unknown_group_type():
+    with pytest.raises(ValueError):
+        naver_group.fetch_group_constituents("sector", 1)

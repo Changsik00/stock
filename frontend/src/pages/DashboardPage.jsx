@@ -16,6 +16,7 @@ import {
   fetchFxLive,
   fetchGroups,
   fetchGroupsLive,
+  fetchGroupTopStocks,
   fetchIndexTilesLive,
   fetchMacroSeries,
   fetchMarketIntraday,
@@ -1281,6 +1282,66 @@ function ScalpCandidatesFullModal({ onSelectStock }) {
   )
 }
 
+// 업종·테마 트리맵 박스 클릭 → 대장 종목 TOP10(PLAN.md §5.12). AttentionFullModal/
+// ScalpCandidatesFullModal과 동일하게 마운트 시(모달이 열릴 때) 자기 데이터를 불러오는
+// 자기완결 컴포넌트다 — groupType/name이 바뀌면(트리맵의 다른 박스를 클릭) 다시
+// 불러온다. 기준은 거래대금 내림차순(시가총액 컬럼이 소스에 없음, naver_group.py
+// 모듈 docstring 참고)이라 "대장 종목"은 순위 나열이지 매매 추천이 아니다(§5 "중립
+// 계기판" 원칙 — 문구에 매수/추천 뉘앙스를 넣지 않는다).
+function GroupTopStocksModal({ groupType, name, onSelectStock }) {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    fetchGroupTopStocks(groupType, name, 10)
+      .then((body) => {
+        if (!cancelled) setData(body)
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [groupType, name])
+
+  const rows = data?.rows || []
+
+  return (
+    <div>
+      <div className="toggle-hint" style={{ marginBottom: 8 }}>
+        거래대금 상위 10종목 · 참고용 순위 (시가총액 데이터 없음, 매매 추천 아님)
+      </div>
+      {loading && <div className="state">불러오는 중…</div>}
+      {error && <div className="state error">{error}</div>}
+      {!loading && !error && rows.length === 0 && <div className="state">표시할 데이터가 없습니다.</div>}
+      {!loading && !error && rows.length > 0 && (
+        <div>
+          {rows.map((row, i) => (
+            <Top5RowTile key={row.code} clickable={!STATIC_DATA} onClick={() => onSelectStock(row)}>
+              <span className="top5-row-name">
+                <span className="top5-row-label">
+                  {i + 1}. {row.name || row.code}
+                </span>
+              </span>
+              <span className={`top5-row-value ${rateClass(row.change_rate)}`}>
+                {rateLabel(row.change_rate)} · {eokLabel(row.value)}
+              </span>
+            </Top5RowTile>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // TOP5 카드 행 — clickable=true면 <button>(hover 배경 + 클릭), false면 기존과 동일한
 // <div>(정적 텍스트). 모든 랭킹 행 클릭 → 종목 상세 모달 통일(사용자 요구, 이전엔
@@ -2474,7 +2535,16 @@ export default function DashboardPage() {
       </div>
       {groupLoading && <div className="state">불러오는 중…</div>}
       {groupError && <div className="state error">{groupError}</div>}
-      {!groupLoading && !groupError && <GroupTreemap items={groupTreemapItems} sizeBy="value" height={200} />}
+      {!groupLoading && !groupError && (
+        <GroupTreemap
+          items={groupTreemapItems}
+          sizeBy="value"
+          height={200}
+          onBoxClick={(name) =>
+            setModal({ type: 'groupTopStocks', title: `${name} · 대장 종목`, groupType, name })
+          }
+        />
+      )}
 
       {/* 5. TOP5 요약 3열 — "…기준" 라벨은 대표 기준일(baseDate)과 같으면 생략, 다르면
           MM-DD만 붙인다(staleHintLabel, 대시보드 상단 표시와 동일 규칙). 정확한 날짜는
@@ -2666,6 +2736,13 @@ export default function DashboardPage() {
         {modal?.type === 'scalp' && (
           <ScalpCandidatesFullModal
             onSelectStock={(row) => openStockModal(row.code, row.name, { market: row.market })}
+          />
+        )}
+        {modal?.type === 'groupTopStocks' && (
+          <GroupTopStocksModal
+            groupType={modal.groupType}
+            name={modal.name}
+            onSelectStock={(row) => openStockModal(row.code, row.name)}
           />
         )}
         {modal?.type === 'stock' && <StockDetailModal code={modal.code} initial={modal.stock} />}

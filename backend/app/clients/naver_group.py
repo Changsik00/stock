@@ -85,6 +85,20 @@ _DETAIL_ROW_RE = re.compile(r'<tr onMouseOver="mouseOver\(this\)".*?</tr>', re.D
 _NUMBER_TD_RE = re.compile(r'<td class="number"[^>]*>(.*?)</td>', re.DOTALL)
 _NUMERIC_TOKEN_RE = re.compile(r"[\d,]+\.?\d*")
 _VALUE_COLUMN_INDEX = 6  # 현재가,전일비,등락률,매수호가,매도호가,거래량,거래대금(6),전일거래량
+_CHANGE_RATE_COLUMN_INDEX = 2  # 현재가,전일비,등락률(2),...
+
+# 상세 페이지 행의 종목코드·종목명 — <td class="name"><div class="name_area">
+# <a href="/item/main.naver?code=131400">이브이첨단소재</a> ... 형태(PLAN.md §5.12
+# 실측, 2026-07-22). 테마 타입은 이 뒤에 "테마 편입 사유" 칸이 하나 더 있지만
+# name_area는 두 타입 모두 동일하게 첫 <td class="name">에 있다.
+_NAME_CODE_RE = re.compile(
+    r'<td class="name">\s*<div class="name_area">\s*'
+    r'<a href="/item/main\.naver\?code=(?P<code>\d+)">(?P<name>[^<]*)</a>',
+    re.DOTALL,
+)
+# 등락률 셀 안의 부호 있는 숫자 — sise_group.naver 목록 페이지의 _ROW_RE와 동일한
+# 관용(부호 텍스트에 이미 포함, 0.00%도 허용).
+_CHANGE_RATE_CELL_RE = re.compile(r"([+-]?[\d.]+)%")
 
 
 class NaverGroupError(Exception):
@@ -161,3 +175,77 @@ def fetch_group_value(group_type: str, no: int, timeout: int = 15) -> int:
             continue
         total += int(tokens[-1].replace(",", ""))
     return total
+
+
+def fetch_group_constituents(
+    group_type: str, no: int, limit: int = 10, timeout: int = 15
+) -> list[dict]:
+    """그룹 상세 페이지(``sise_group_detail.naver``)의 구성 종목을 종목별로 파싱해
+    거래대금 상위 ``limit``개를 반환한다(PLAN.md §5.12 "업종·테마 트리맵 클릭 →
+    대장 종목 TOP10"). ``fetch_group_value``와 같은 URL/행 파싱 골격
+    (``_DETAIL_ROW_RE``/``_NUMBER_TD_RE``/``_VALUE_COLUMN_INDEX``)을 재사용하되
+    합계 대신 종목코드·종목명·등락률·거래대금을 행별로 뽑는다.
+
+    Returns ``[{"code": str, "name": str, "change_rate": float, "value": int}, ...]``
+    — 거래대금(백만원) 내림차순, 상위 ``limit``개. 시가총액 컬럼이 이 소스에 없어
+    (모듈 docstring 참고) "대장 종목" 판정 기준은 거래대금이다.
+
+    구성 종목 한 행에서 종목코드/종목명/등락률/거래대금 중 하나라도 파싱에
+    실패하면(거래정지 등) 그 행만 건너뛰고 나머지로 계속 진행한다
+    (``fetch_group_value``와 동일한 관용) — 구성 종목이 하나도 파싱되지 않을
+    때만 NaverGroupError를 던진다.
+    """
+    if group_type not in GROUP_TYPES:
+        raise ValueError(f"unknown group_type {group_type!r}, expected one of {GROUP_TYPES}")
+
+    resp = requests.get(
+        DETAIL_URL,
+        params={"type": group_type, "no": no},
+        headers={"User-Agent": USER_AGENT},
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    text = resp.text
+
+    detail_rows = _DETAIL_ROW_RE.findall(text)
+    if not detail_rows:
+        raise NaverGroupError(
+            f"no constituent rows parsed for group_type={group_type} no={no}; "
+            f"response head: {text[:200]!r}"
+        )
+
+    constituents = []
+    for row in detail_rows:
+        name_code_match = _NAME_CODE_RE.search(row)
+        if not name_code_match:
+            continue
+
+        number_cells = _NUMBER_TD_RE.findall(row)
+        if len(number_cells) <= _VALUE_COLUMN_INDEX:
+            continue
+
+        rate_match = _CHANGE_RATE_CELL_RE.search(number_cells[_CHANGE_RATE_COLUMN_INDEX])
+        if not rate_match:
+            continue
+
+        value_tokens = _NUMERIC_TOKEN_RE.findall(number_cells[_VALUE_COLUMN_INDEX])
+        if not value_tokens:
+            continue
+
+        constituents.append(
+            {
+                "code": name_code_match.group("code"),
+                "name": name_code_match.group("name"),
+                "change_rate": float(rate_match.group(1)),
+                "value": int(value_tokens[-1].replace(",", "")),
+            }
+        )
+
+    if not constituents:
+        raise NaverGroupError(
+            f"no constituent details parsed for group_type={group_type} no={no}; "
+            f"response head: {text[:200]!r}"
+        )
+
+    constituents.sort(key=lambda c: c["value"], reverse=True)
+    return constituents[:limit]

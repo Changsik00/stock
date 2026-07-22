@@ -228,6 +228,16 @@ export async function fetchValueRankLive() {
   return getJson('/api/markets/value-rank/live')
 }
 
+// GET /api/groups/top-stocks?type=upjong|theme&name=...&limit=10 -> { type, name,
+// rows: [{code, name, change_rate, value}], cached_at } (PLAN.md §5.12 "업종·테마
+// 트리맵 클릭 → 대장 종목 TOP10") — 트리맵 박스를 클릭했을 때 그 그룹 구성 종목 중
+// 거래대금 상위를 보여주는 참고용 탐색 기능이다(순위 나열, 매매 추천 아님). 장
+// 마감 여부와 무관하게 캐시를 재사용해도 되는 로컬 전용 기능, STATIC_DATA 대상
+// 아님(fetchGroupsLive와 동일한 관례).
+export async function fetchGroupTopStocks(type, name, limit = 10) {
+  return getJson(`/api/groups/top-stocks?type=${type}&name=${encodeURIComponent(name)}&limit=${limit}`)
+}
+
 // GET /api/groups/live?type=upjong|theme -> { type, rows: [{name, change_rate,
 // value: null, market_sum: null}], market_closed, cached_at } (PLAN.md §4.7) — 목록
 // 페이지만 재조회해 등락률만 장중 갱신한다(거래대금 합산은 그룹당 상세 페이지 345회
