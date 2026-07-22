@@ -2204,7 +2204,15 @@ export default function DashboardPage() {
               (basisLiveActive ? basisLive.backwardation : basisLatest?.backwardation) === null ? (
                 '-'
               ) : (basisLiveActive ? basisLive.backwardation : basisLatest?.backwardation) ? (
-                <Badge kind="info">백워데이션 · 차익 매도 유의</Badge>
+                // 2026-07-22 수정 — "차익 매도 유의"는 basis<0(부호)만 보고 뜨는데
+                // 실제 청산 가능한 매수차익잔고 규모는 확인하지 않는다. 사용자 지적:
+                // 외인 현물·선물이 둘 다 매수 중인데도 뜰 수 있고, 지수가 오히려
+                // 오를 때도 "유의"라는 문구 때문에 소극 대응을 유도할 수 있다 —
+                // §4.5 "중립 계기판, 함정 탐지기 아님" 원칙에서 벗어난 표현이었다.
+                // 관찰 사실(선물<현물)만 남기고 방향성 판단은 하지 않는다.
+                <Badge kind="info" title="선물이 현물보다 저평가된 상태 — 매수차익잔고 청산과 연관되기도 하나 지수 방향을 결정하지는 않습니다.">
+                  백워데이션(선물&lt;현물)
+                </Badge>
               ) : (
                 '콘탱고'
               )}
