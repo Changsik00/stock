@@ -156,7 +156,14 @@ export default function EtfDirectionCard({ loading, error, universe, latest, ser
           margin-top: 4px;
         }
         .etf-direction-bar-col {
-          flex: 1 1 auto;
+          /* 2026-07-22 수정 — flex:1로 무제한 늘어나면 데이터가 며칠치뿐일 때
+             (예: 2일) 막대 하나가 카드 폭의 절반을 차지해 차트처럼 안 보였다
+             (사용자 지적: "차트 크기도 안 맞아"). max-width로 막대 하나의
+             최대 폭을 제한해 포인트 수와 무관하게 항상 "얇은 막대들" 모양을
+             유지한다 — 포인트가 적으면 왼쪽에 모여 남는 공간은 그냥 비운다. */
+          flex: 0 1 auto;
+          width: 16px;
+          max-width: 16px;
           height: 100%;
           display: flex;
           align-items: center;
@@ -236,7 +243,16 @@ export default function EtfDirectionCard({ loading, error, universe, latest, ser
 
           {rows.length > 0 && (
             <div>
-              <div className="etf-direction-subtitle">최근 {rows.length}일 순베팅</div>
+              {/* 2026-07-22 수정 — "최근 N일"은 달력상 연속 N일처럼 읽히지만
+                  실제로는 ETF 순유입 소스가 매일 갱신되지 않아(모듈 상단 라우터
+                  docstring 참고) 관측치 사이에 며칠씩 공백이 있을 수 있다.
+                  포인트가 1개뿐이 아니면 실제 관측 날짜 범위를 같이 보여줘
+                  "연속 며칠"로 오해하지 않게 한다. */}
+              <div className="etf-direction-subtitle">
+                {rows.length === 1
+                  ? `관측 ${rows.length}건`
+                  : `관측 ${rows.length}건 순베팅 (${formatDate(rows[0].date)} ~ ${formatDate(rows[rows.length - 1].date)})`}
+              </div>
               <MiniBars series={rows} />
             </div>
           )}
