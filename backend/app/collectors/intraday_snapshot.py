@@ -50,14 +50,16 @@ from ..market_hours import KST, is_market_closed
 
 MAX_POINTS_PER_SERIES = 500
 
-# flow/live에서 다루는 투자자 3종 (kospi+kosdaq 합산 대상)
+# flow/live에서 다루는 투자자 3종
 _FLOW_INVESTORS = ("개인", "외국인", "기관계")
+_FLOW_MARKETS = ("kospi", "kosdaq")
 
-# 시리즈 이름 -> [{"time": "HH:MM", "value": float}, ...] (시간순 append)
-_buffers: dict[str, list[dict[str, object]]] = {
-    "개인": [],
-    "외국인": [],
-    "기관계": [],
+# 시장별 투자자 3종을 각자 따로 적립한다(PLAN.md §5.10 — 코스피/코스닥 분리).
+# "외인선물"만 시장 구분이 없는 단일 시리즈로 남는다(코스피200 선물이라 시장별
+# 개념이 없음). 시리즈 이름 -> [{"time": "HH:MM", "value": float}, ...] (시간순 append)
+_buffers: dict[str, dict[str, list[dict[str, object]]] | list[dict[str, object]]] = {
+    "kospi": {"개인": [], "외국인": [], "기관계": []},
+    "kosdaq": {"개인": [], "외국인": [], "기관계": []},
     "외인선물": [],
 }
 
@@ -79,57 +81,67 @@ def _reset_if_new_day() -> None:
     """오늘 KST 날짜가 마지막 적립 날짜와 다르면 모든 버퍼를 비운다(자정 리셋,
     모듈 docstring 참고). append 계열 함수 진입 시마다 호출한다 — 실시간
     타이머가 아니라 "다음 append 때 지연 감지"하는 방식이라 장중에만 실질적으로
-    발동한다."""
+    발동한다. 구조가 시장별로 한 단계 더 깊어져도(§5.10) "모든 series list를
+    찾아서 비운다"는 개념은 그대로라, dict 값이 list(외인선물)든 시장별 dict
+    (kospi/kosdaq)든 재귀적으로 순회한다."""
     global _buffer_date
     today = _today_kst()
     if _buffer_date != today:
-        for series in _buffers.values():
-            series.clear()
+        for value in _buffers.values():
+            if isinstance(value, list):
+                value.clear()
+            else:
+                for series in value.values():
+                    series.clear()
         _buffer_date = today
 
 
-def _append_point(series_name: str, value: float) -> None:
-    series = _buffers[series_name]
+def _append_point(series: list[dict[str, object]], value: float) -> None:
+    """``series``(버퍼 안의 특정 시리즈 list)에 지금 시각 포인트를 append하고
+    500포인트 캡을 적용한다. 시장별로 구조가 나뉘면서(§5.10) 이름으로 버퍼를
+    다시 찾기보다 호출부가 이미 들고 있는 list 참조를 직접 넘기는 편이 더
+    단순하다."""
     series.append({"time": _now_hhmm_kst(), "value": value})
     if len(series) > MAX_POINTS_PER_SERIES:
         del series[: len(series) - MAX_POINTS_PER_SERIES]
 
 
 def record_flow_snapshot(payload: dict) -> None:
-    """`routers.markets._warm_flow_live`가 이미 반환한 값을 받아 개인/외국인/
-    기관계 3개 시리즈에 kospi+kosdaq 합산 순매수대금(net_value, 백만원)을
-    append한다. 새 외부 호출은 전혀 없다 — 인자는 warm 함수가 이미 fetch를
-    끝내고 반환한 dict 그대로다.
+    """`routers.markets._warm_flow_live`가 이미 반환한 값을 받아 kospi/kosdaq
+    각 시장의 개인/외국인/기관계 3개 시리즈에 순매수대금(net_value, 백만원)을
+    각자 append한다(PLAN.md §5.10 — 더 이상 두 시장을 합산하지 않는다). 새
+    외부 호출은 전혀 없다 — 인자는 warm 함수가 이미 fetch를 끝내고 반환한
+    dict 그대로다.
 
     ``payload["market_closed"]``가 true면 아무 것도 하지 않는다 — 이 경우
     warm 함수 자체가 키움 라이브 호출을 생략하고 DB 확정치/직전 캐시를 재사용
     중이라(routers/markets.py `_warm_flow_live` docstring 참고), 그 값을
     "장중 새 스냅샷"인 것처럼 적립하면 잘못된 시계열이 된다.
 
-    kospi/kosdaq 중 한쪽이 None이거나 해당 투자자 키가 없으면 있는 쪽만 더한다
-    (둘 다 없으면 그 투자자는 이번 틱에 아예 append하지 않는다 — 다른 투자자는
-    영향받지 않는다)."""
+    한 시장이 None이거나 해당 투자자 키가 없으면 그 시장의 그 투자자만
+    append하지 않는다(다른 시장/다른 투자자는 영향받지 않는다) — 두 시장이
+    항상 같은 warm 호출에서 함께 오므로(같은 payload), 같은 틱에 대해 한쪽만
+    빠지는 상황이라도 시간(time) 키는 두 시장 다 지금 시각으로 동일하게
+    찍힌다(get_foreign_position_series의 시간 매칭 전제와 일관)."""
     if payload.get("market_closed"):
         return
 
     _reset_if_new_day()
 
-    for investor in _FLOW_INVESTORS:
-        total: float | None = None
-        for market_key in ("kospi", "kosdaq"):
-            market_data = payload.get(market_key)
-            if not market_data:
-                continue
-            investors = market_data.get("investors") or {}
+    for market_key in _FLOW_MARKETS:
+        market_data = payload.get(market_key)
+        if not market_data:
+            continue
+        investors = market_data.get("investors") or {}
+        market_buffer = _buffers[market_key]
+        for investor in _FLOW_INVESTORS:
             entry = investors.get(investor)
             if not entry:
                 continue
             net_value = entry.get("net_value")
             if net_value is None:
                 continue
-            total = (total or 0.0) + net_value
-        if total is not None:
-            _append_point(investor, total)
+            _append_point(market_buffer[investor], net_value)
 
 
 def record_futures_flow_snapshot(payload: dict) -> None:
@@ -146,7 +158,7 @@ def record_futures_flow_snapshot(payload: dict) -> None:
     entry = investors.get("외국인") or {}
     net_value = entry.get("net_value")
     if net_value is not None:
-        _append_point("외인선물", net_value)
+        _append_point(_buffers["외인선물"], net_value)
 
 
 def get_flow_series() -> dict:
@@ -156,13 +168,17 @@ def get_flow_series() -> dict:
     `_buffer_date`가 아직 None이거나 리셋 직후라도 이 값은 흔들리지 않는다).
     ``market_closed``는 저장된 값이 아니라 호출 시점에 새로 계산한다(버퍼에
     마지막으로 찍힌 시점의 장 상태가 아니라 "지금" 장이 열려 있는지가 프런트가
-    알고 싶은 정보이기 때문)."""
+    알고 싶은 정보이기 때문).
+
+    **PLAN.md §5.10**: ``series``는 더 이상 투자자 3종을 바로 담지 않고,
+    ``kospi``/``kosdaq`` 두 시장 블록 아래에 각각 투자자 3종을 담는다 —
+    코스피에 수급이 쏠려 있어 코스닥만의 흐름을 못 보던 문제를 해소하기 위해
+    합산을 프런트로 미뤘다(백엔드는 "합계" 블록을 미리 계산해 얹지 않는다)."""
     return {
         "date": _today_kst().isoformat(),
         "series": {
-            "개인": list(_buffers["개인"]),
-            "외국인": list(_buffers["외국인"]),
-            "기관계": list(_buffers["기관계"]),
+            market_key: {investor: list(_buffers[market_key][investor]) for investor in _FLOW_INVESTORS}
+            for market_key in _FLOW_MARKETS
         },
         "market_closed": is_market_closed(dt.datetime.now(KST)),
     }
@@ -170,13 +186,35 @@ def get_flow_series() -> dict:
 
 def get_foreign_position_series() -> dict:
     """1D 조회 API(`GET /api/markets/foreign-position/intraday-accumulated`)가
-    그대로 반환할 payload. ``spot``은 `record_flow_snapshot`이 채우는 "외국인"
-    시리즈를 재사용한다(외인 양손 모달의 "현물" 쪽은 flow/live의 외국인
-    투자자와 동일한 지표라 별도 버퍼를 두지 않는다) — ``futures``는
-    `record_futures_flow_snapshot`이 채우는 "외인선물" 시리즈."""
+    그대로 반환할 payload. ``spot``은 kospi/kosdaq 버퍼의 "외국인" 시리즈를
+    시간(time) 키 기준으로 매칭해 합산한 값이다(외인 양손 모달의 "현물" 쪽은
+    flow/live의 외국인 투자자 kospi+kosdaq 합계와 동일한 지표라 §5.10 분리
+    이후에도 이 모달은 회귀 없이 그대로 유지 — PLAN.md §5.10 참고). 두 시장은
+    항상 같은 warm 호출(`record_flow_snapshot`)에서 함께 append되므로 같은
+    시각 문자열끼리 짝을 맞추면 된다 — 한쪽 시장에만 찍힌 시각이 있으면(예:
+    한쪽 fetch만 실패) 있는 쪽 값 그대로 사용한다. ``futures``는
+    `record_futures_flow_snapshot`이 채우는 "외인선물" 시리즈(그대로, 시장
+    구분 없음)."""
     return {
         "date": _today_kst().isoformat(),
-        "spot": list(_buffers["외국인"]),
+        "spot": _merge_foreign_spot_series(),
         "futures": list(_buffers["외인선물"]),
         "market_closed": is_market_closed(dt.datetime.now(KST)),
     }
+
+
+def _merge_foreign_spot_series() -> list[dict[str, object]]:
+    """kospi/kosdaq 버퍼의 "외국인" 시리즈를 time 키로 매칭해 값을 더한다.
+    두 시리즈는 항상 같은 warm 호출에서 함께 append되어 인덱스/개수가 보통
+    일치하지만, 시간 문자열을 키로 매칭해 순서에 의존하지 않고 합산한다
+    (원래 등장 순서를 보존하기 위해 먼저 등장한 time 순서를 따른다)."""
+    order: list[str] = []
+    totals: dict[str, float] = {}
+    for market_key in _FLOW_MARKETS:
+        for point in _buffers[market_key]["외국인"]:
+            time_key = point["time"]
+            if time_key not in totals:
+                order.append(time_key)
+                totals[time_key] = 0.0
+            totals[time_key] += point["value"]
+    return [{"time": t, "value": totals[t]} for t in order]

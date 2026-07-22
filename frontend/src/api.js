@@ -260,12 +260,15 @@ export async function fetchFxLive() {
   return getJson('/api/markets/fx/live')
 }
 
-// GET /api/markets/flow/intraday-accumulated -> { date, series: {개인, 외국인,
-// 기관계: [{time: "HH:MM", value}]}, market_closed } (PLAN.md §5.4-2/3) — 새 외부
-// 호출 없이 서버가 이미 60초마다 flow/live를 워밍하는 김에 그 결과를 그날 메모리
-// 버퍼에 적립해 둔 "오늘 장중 누적" 시계열. 투자자별 수급 요약 모달의 1D 탭 전용.
-// 로컬 전용 기능(flowLive와 동일한 이유 — "오늘 장중" 자체가 정적 스냅샷으로 남길
-// 개념이 아니다), STATIC_DATA 대상 아님.
+// GET /api/markets/flow/intraday-accumulated -> { date, series: { kospi: {개인,
+// 외국인, 기관계: [{time: "HH:MM", value}]}, kosdaq: {...} }, market_closed }
+// (PLAN.md §5.4-2/3, §5.10 — 2026-07-22부터 kospi/kosdaq이 분리돼 응답 온다,
+// 예전엔 series가 바로 투자자 3종이었다) — 새 외부 호출 없이 서버가 이미 60초마다
+// flow/live를 워밍하는 김에 그 결과를 그날 메모리 버퍼에 적립해 둔 "오늘 장중 누적"
+// 시계열. 투자자별 수급 요약 모달의 1D 탭 전용, 코스피+코스닥 "합계"는 프런트가
+// 필요할 때 두 시장을 더한다(DashboardPage.jsx FlowSummaryModal 참고). 로컬 전용
+// 기능(flowLive와 동일한 이유 — "오늘 장중" 자체가 정적 스냅샷으로 남길 개념이
+// 아니다), STATIC_DATA 대상 아님.
 export async function fetchFlowIntradayAccumulated() {
   return getJson('/api/markets/flow/intraday-accumulated')
 }

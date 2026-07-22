@@ -104,6 +104,17 @@ const CHART_MODE_OPTIONS = [
   { key: '1D', label: '1D' },
   { key: '3M', label: '3M' },
 ]
+// FlowSummaryModal(투자자별 수급 요약) 3M/1D 공통 시장 필터(PLAN.md §5.10,
+// 2026-07-22) — "코스피로 다 몰려 있어서 코스닥이 주목 받는 날을 못 본다"는
+// 사용자 요구로 코스피/코스닥을 분리해 볼 수 있게 한 토글. VALUE_RANK_MARKET_OPTIONS와
+// 같은 3분기 패턴이지만 라벨만 "합계"로 다르다(거래대금 상위는 "전체"가 더
+// 자연스럽고, 여기는 두 시장을 더한 값이라 "합계"가 더 정확한 표현). 기본값은
+// 지금까지의 동작과 동일한 'all'(합계).
+const FLOW_MARKET_FILTER_OPTIONS = [
+  { key: 'all', label: '합계' },
+  { key: 'kospi', label: '코스피' },
+  { key: 'kosdaq', label: '코스닥' },
+]
 // 프로그램매매 차익 순매수(macro_series prog_arb_*, PLAN.md §4.5-4) — 코스피+코스닥
 // 합산해서 "프로그램 차익 순매수" 타일 하나로 보여준다(신용융자 타일의 creditLoanSum과
 // 동일한 관례).
@@ -307,6 +318,27 @@ function mergeFlows(flowsA, flowsB) {
     merged[inv] = [...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : 1))
   }
   return merged
+}
+
+// 1D(오늘 장중 누적) 두 시장의 단일 투자자 시리즈([{time, value}])를 시간(time) 키
+// 기준으로 합산한다(PLAN.md §5.10) — 위 mergeFlows는 3M(EOD, {date, net_value,
+// net_volume}) 전용이라 재사용할 수 없어 더 단순한 1D 전용 버전을 따로 둔다.
+// 백엔드 intraday_snapshot._merge_foreign_spot_series와 동일한 방식(시간 문자열
+// 매칭, 먼저 등장한 순서 보존) — 두 시장이 항상 같은 warm 틱에서 함께 append되므로
+// 보통 인덱스도 일치하지만, 한쪽만 있는 시각이 있어도 그 값 그대로 반영된다.
+function mergeIntradayByTime(seriesA, seriesB) {
+  const order = []
+  const totals = new Map()
+  for (const arr of [seriesA || [], seriesB || []]) {
+    for (const p of arr) {
+      if (!totals.has(p.time)) {
+        order.push(p.time)
+        totals.set(p.time, 0)
+      }
+      totals.set(p.time, totals.get(p.time) + (p.value || 0))
+    }
+  }
+  return order.map((time) => ({ time, value: totals.get(time) }))
 }
 
 // flows(투자자 -> [{date, net_value, net_volume}])에서 특정 투자자의 가장 최근 행을
@@ -688,8 +720,13 @@ function MacroModal() {
 
 function FlowSummaryModal() {
   const [chartMode, setChartMode] = useState(STATIC_DATA ? '3M' : '1D')
+  // 코스피/코스닥 분리 토글(PLAN.md §5.10, 2026-07-22) — 기본은 지금까지의
+  // 동작과 동일한 'all'(합계), 3M/1D 두 탭 모두 이 필터를 공유한다.
+  const [marketFilter, setMarketFilter] = useState('all')
   const [days, setDays] = useState(DEFAULT_FLOW_DAYS)
-  const [flows, setFlows] = useState({})
+  // 3M: 코스피/코스닥 원본 flows를 각각 보관해 두고(이미 두 번 fetch하던 그대로),
+  // marketFilter가 바뀔 때 재요청 없이 즉시 합계/개별로 다시 계산한다.
+  const [flowsByMarket, setFlowsByMarket] = useState({ kospi: {}, kosdaq: {} })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
@@ -704,7 +741,7 @@ function FlowSummaryModal() {
     setError(null)
     Promise.all([fetchMarketSeries('kospi', days), fetchMarketSeries('kosdaq', days)])
       .then(([kospiBody, kosdaqBody]) => {
-        if (!cancelled) setFlows(mergeFlows(kospiBody.flows, kosdaqBody.flows))
+        if (!cancelled) setFlowsByMarket({ kospi: kospiBody.flows || {}, kosdaq: kosdaqBody.flows || {} })
       })
       .catch((e) => {
         if (!cancelled) setError(e.message)
@@ -741,19 +778,42 @@ function FlowSummaryModal() {
     }
   }, [chartMode])
 
+  // marketFilter에 따라 3M flows를 합계/코스피/코스닥으로 분기(PLAN.md §5.10) —
+  // 'all'은 지금까지와 동일한 mergeFlows, 나머지는 fetch해 둔 원본을 그대로 쓴다.
+  const flows =
+    marketFilter === 'kospi'
+      ? flowsByMarket.kospi
+      : marketFilter === 'kosdaq'
+        ? flowsByMarket.kosdaq
+        : mergeFlows(flowsByMarket.kospi, flowsByMarket.kosdaq)
   const hasFlows = Object.keys(flows || {}).length > 0
 
   // net_value는 백만원 단위(market_flow와 동일) — FlowChart.jsx eok() 관례와
-  // 통일해 억원으로 변환한 뒤 IntradayFlowChart에 넘긴다.
+  // 통일해 억원으로 변환한 뒤 IntradayFlowChart에 넘긴다. 1D 응답이 이제
+  // series.kospi/series.kosdaq로 나뉘어 오므로(§5.10) marketFilter에 따라 한쪽만
+  // 쓰거나 mergeIntradayByTime으로 시간 키 기준 합산한다.
   const intradaySeries = {}
   for (const name of ['개인', '외국인', '기관계']) {
-    intradaySeries[name] = (intraday?.series?.[name] || []).map((p) => ({ time: p.time, value: p.value / 100 }))
+    const kospiPoints = (intraday?.series?.kospi?.[name] || []).map((p) => ({ time: p.time, value: p.value / 100 }))
+    const kosdaqPoints = (intraday?.series?.kosdaq?.[name] || []).map((p) => ({
+      time: p.time,
+      value: p.value / 100,
+    }))
+    intradaySeries[name] =
+      marketFilter === 'kospi'
+        ? kospiPoints
+        : marketFilter === 'kosdaq'
+          ? kosdaqPoints
+          : mergeIntradayByTime(kospiPoints, kosdaqPoints)
   }
+
+  const marketFilterLabel =
+    marketFilter === 'kospi' ? '코스피' : marketFilter === 'kosdaq' ? '코스닥' : '코스피+코스닥 합계'
 
   return (
     <div>
       <div className="toggle-hint" style={{ marginBottom: 8 }}>
-        코스피+코스닥 합계 (선물 제외 — 투자자별 수급 미수집)
+        {marketFilterLabel} (선물 제외 — 투자자별 수급 미수집)
       </div>
       {!STATIC_DATA && (
         <div className="toggle-row">
@@ -772,6 +832,18 @@ function FlowSummaryModal() {
           </span>
         </div>
       )}
+      <div className="toggle-row">
+        {FLOW_MARKET_FILTER_OPTIONS.map((opt) => (
+          <button
+            key={opt.key}
+            type="button"
+            className={`toggle-chip ${marketFilter === opt.key ? 'active' : ''}`}
+            onClick={() => setMarketFilter(opt.key)}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
 
       {chartMode === '3M' && (
         <>

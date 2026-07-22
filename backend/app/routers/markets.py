@@ -790,11 +790,14 @@ async def flow_intraday_accumulated():
     됐으면 각 시리즈가 빈 리스트로 온다 — 프런트는 이를 "적립 중" 상태로
     표시한다.
 
-    Returns ``{"date": "YYYY-MM-DD", "series": {"개인": [...], "외국인": [...],
-    "기관계": [...]}, "market_closed": bool}`` — 각 시리즈 원소는
+    Returns ``{"date": "YYYY-MM-DD", "series": {"kospi": {"개인": [...],
+    "외국인": [...], "기관계": [...]}, "kosdaq": {...}}, "market_closed": bool}``
+    (PLAN.md §5.10 — 코스피/코스닥 분리, 2026-07-22) — 각 시리즈 원소는
     ``{"time": "HH:MM", "value": float}``(net_value, 백만원 단위 — 다른 flow
-    엔드포인트와 동일한 단위, 프런트에서 억원 변환). ``market_closed``는 저장된
-    값이 아니라 호출 시점 기준으로 새로 계산한다.
+    엔드포인트와 동일한 단위, 프런트에서 억원 변환). 코스피+코스닥 "합계"는
+    백엔드가 미리 계산해 얹지 않는다 — 프런트가 필요하면 그때그때 두 시장을
+    더한다. ``market_closed``는 저장된 값이 아니라 호출 시점 기준으로 새로
+    계산한다.
     """
     return intraday_snapshot.get_flow_series()
 
@@ -804,11 +807,14 @@ async def foreign_position_intraday_accumulated():
     """오늘 외인 현물·선물 순매수 누적 스냅샷 시계열(PLAN.md §5.4-2/3).
 
     "외인 양손" 상세 모달의 1D 탭 전용 — `flow_intraday_accumulated`와 같은
-    버퍼를 공유한다(현물 쪽은 정확히 같은 "외국인" 시리즈를 재사용, 별도로
-    적립하지 않는다). 선물 쪽("외인선물")은 `_run_live_refresh_extra`(7분 잡)가
-    `_warm_futures_flow_live` 반환값을 적립한 것이라 현물(60초 틱)과 실제 갱신
-    간격이 다르다 — 억지로 맞추지 않는다(collectors/intraday_snapshot.py 모듈
-    docstring 참고). 이 엔드포인트도 새 외부 호출이 전혀 없다.
+    버퍼를 공유한다(현물 쪽은 kospi/kosdaq 버퍼의 "외국인" 시리즈를 시간 키로
+    매칭해 합산한 값 — §5.10로 두 시장 버퍼가 분리된 뒤에도 이 모달은 회귀
+    없이 코스피+코스닥 합산 그대로 유지된다, collectors/intraday_snapshot.py
+    `_merge_foreign_spot_series` 참고). 선물 쪽("외인선물")은
+    `_run_live_refresh_extra`(7분 잡)가 `_warm_futures_flow_live` 반환값을
+    적립한 것이라 현물(60초 틱)과 실제 갱신 간격이 다르다 — 억지로 맞추지
+    않는다(collectors/intraday_snapshot.py 모듈 docstring 참고). 이 엔드포인트도
+    새 외부 호출이 전혀 없다.
 
     Returns ``{"date": "YYYY-MM-DD", "spot": [...], "futures": [...],
     "market_closed": bool}`` — ``spot``/``futures`` 원소는 각각
