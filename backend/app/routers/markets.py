@@ -823,6 +823,31 @@ async def foreign_position_intraday_accumulated():
     return intraday_snapshot.get_foreign_position_series()
 
 
+@router.get("/api/markets/breadth/intraday-accumulated")
+async def breadth_intraday_accumulated():
+    """오늘 장중 등락비율(상승 대 하락 비율, %) 누적 스냅샷 시계열(PLAN.md §5.13).
+
+    "등락 종목수" 타일은 순간 스냅샷(현재 상승/하락 개수)만 보여줘 시간 흐름을
+    놓친다는 사용자 지적으로 추가됐다 — `flow_intraday_accumulated`와 완전히
+    같은 패턴이다: 새로 소스를 호출하지 않고, `collectors/live_refresh.py`의
+    60초 잡이 `_warm_breadth_live`를 호출할 때마다 그 반환값을
+    `collectors.intraday_snapshot.record_breadth_snapshot`에 넘겨 이미 메모리
+    버퍼에 적립해 둔 것을 그대로 읽어서 반환할 뿐이다(이 엔드포인트 자체는
+    키움/네이버를 전혀 두드리지 않고, DB 세션도 필요 없다).
+
+    자정이 지나 오늘 KST 날짜가 바뀌면(다음 거래일 첫 워밍 시점에) 버퍼가
+    비워지고 새로 쌓인다. 스케줄러가 꺼져 있거나 앱이 막 기동해 아직 한 번도
+    워밍이 안 됐으면 빈 리스트로 온다 — 프런트는 이를 "적립 중" 상태로 표시한다.
+
+    Returns ``{"date": "YYYY-MM-DD", "series": [{"time": "HH:MM", "value": float}, ...],
+    "market_closed": bool}`` — ``value``는 상승비율(%, 0~100), 코스피+코스닥
+    합산 상승/하락 종목수만으로 계산하고 보합은 분모에서 제외한다(50%가 중립
+    기준선). ``market_closed``는 저장된 값이 아니라 호출 시점 기준으로 새로
+    계산한다.
+    """
+    return intraday_snapshot.get_breadth_series()
+
+
 # GET /api/markets/{market}/intraday — 지수 분봉(PLAN.md §5.1). kospi/kosdaq은
 # 키움 ka20005(업종분봉차트요청)를 온디맨드로 호출해 "오늘"(최신 거래일) 하루치만
 # 반환한다(DB 미저장 — §5 원칙, stocks.py의 종목 분봉과 동일한 캐시 패턴이지만

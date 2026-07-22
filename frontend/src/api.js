@@ -292,6 +292,17 @@ export async function fetchForeignPositionIntradayAccumulated() {
   return getJson('/api/markets/foreign-position/intraday-accumulated')
 }
 
+// GET /api/markets/breadth/intraday-accumulated -> { date, series: [{time, value}],
+// market_closed } (PLAN.md §5.13 — 등락 종목수 1D 상승비율 추이) — 새 외부 호출 없이
+// 서버가 이미 60초마다 breadth/live를 워밍하는 김에 그 결과(코스피+코스닥 상승/하락
+// 종목수)로 상승비율(%, 보합 제외)을 계산해 그날 메모리 버퍼에 적립해 둔 "오늘 장중
+// 누적" 시계열. 단일 시리즈(flow처럼 투자자/시장별 중첩 없음). "등락 종목수" 상세
+// 모달(BreadthModal)의 1D 탭 전용. 로컬 전용 기능(위 두 intraday-accumulated와 동일한
+// 이유), STATIC_DATA 대상 아님.
+export async function fetchBreadthIntradayAccumulated() {
+  return getJson('/api/markets/breadth/intraday-accumulated')
+}
+
 // GET /api/markets/basis?days=N -> { days, series: [{date, futures_close, kospi200_close,
 // basis, basis_pct}], latest: {date, backwardation, basis, basis_pct}, expiry: {date, d_day,
 // quadruple} } (PLAN.md §4.5-3/4.5-5) — K200 선물-현물 베이시스 + 다음 만기. latest/expiry는

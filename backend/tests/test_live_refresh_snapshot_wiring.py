@@ -20,6 +20,7 @@ from app.routers import markets
 
 FLOW_PAYLOAD = {"kospi": None, "kosdaq": None, "market_closed": False, "cached_at": "x"}
 FUTURES_PAYLOAD = {"date": "2026-07-21", "investors": {}, "market_closed": False, "cached_at": "x"}
+BREADTH_PAYLOAD = {"kospi": None, "kosdaq": None, "market_closed": False, "cached_at": "x"}
 
 
 @pytest.fixture(autouse=True)
@@ -78,6 +79,28 @@ async def test_run_live_refresh_feeds_futures_flow_payload_into_recorder(monkeyp
     await live_refresh._run_live_refresh()
 
     assert recorded == [FUTURES_PAYLOAD]
+
+
+async def test_run_live_refresh_feeds_breadth_payload_into_recorder(monkeypatch):
+    """PLAN.md §5.13 — breadth/live 워밍 직후 그 반환값이 그대로
+    record_breadth_snapshot에 전달돼야 한다(등락비율 1D 누적 차트의 배선)."""
+    recorded = []
+    from app.routers import basis as basis_router
+    from app.routers import groups as groups_router
+
+    monkeypatch.setattr(markets, "_warm_breadth_live", lambda session: _async_return(BREADTH_PAYLOAD))
+    monkeypatch.setattr(markets, "_warm_flow_live", lambda session: _async_return(None))
+    monkeypatch.setattr(markets, "_warm_attention", lambda session: _async_return(None))
+    monkeypatch.setattr(markets, "_warm_index_tiles_live", lambda session: _async_return(None))
+    monkeypatch.setattr(markets, "_warm_fx_live", lambda session: _async_return(None))
+    monkeypatch.setattr(basis_router, "_warm_basis_live", lambda: _async_return(None))
+    monkeypatch.setattr(groups_router, "_warm_groups_live", lambda group_type: _async_return(None))
+    monkeypatch.setattr(markets, "_warm_futures_flow_live", lambda: _async_return(FUTURES_PAYLOAD))
+    monkeypatch.setattr(intraday_snapshot, "record_breadth_snapshot", lambda payload: recorded.append(payload))
+
+    await live_refresh._run_live_refresh()
+
+    assert recorded == [BREADTH_PAYLOAD]
 
 
 async def test_run_live_refresh_extra_only_warms_value_rank(monkeypatch):

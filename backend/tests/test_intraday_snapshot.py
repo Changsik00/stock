@@ -84,6 +84,15 @@ def _futures_payload(net_value, market_closed=False):
     }
 
 
+def _breadth_payload(kospi=None, kosdaq=None, market_closed=False):
+    return {
+        "kospi": kospi,
+        "kosdaq": kosdaq,
+        "market_closed": market_closed,
+        "cached_at": "2026-07-21T03:00:00+00:00",
+    }
+
+
 # ---------------------------------------------------------------------------
 # record_flow_snapshot
 # ---------------------------------------------------------------------------
@@ -188,6 +197,162 @@ def test_record_futures_flow_snapshot_missing_investor_appends_nothing(monkeypat
     snap.record_futures_flow_snapshot({"date": "2026-07-21", "investors": {}, "market_closed": False})
 
     assert snap._buffers["외인선물"] == []
+
+
+# ---------------------------------------------------------------------------
+# record_breadth_snapshot (PLAN.md §5.13)
+# ---------------------------------------------------------------------------
+
+
+def test_record_breadth_snapshot_computes_ratio_excluding_flat(monkeypatch):
+    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
+    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
+
+    payload = _breadth_payload(
+        kospi={"date": "2026-07-21", "adv": 500, "dec": 400, "flat": 50, "limit_up": 0, "limit_down": 0},
+        kosdaq={"date": "2026-07-21", "adv": 500, "dec": 600, "flat": 30, "limit_up": 0, "limit_down": 0},
+    )
+    snap.record_breadth_snapshot(payload)
+
+    # total_adv=1000, total_dec=1000, flat 무시 -> 50.0%
+    assert snap._buffers["등락비율"] == [{"time": "10:00", "value": 50.0}]
+
+
+def test_record_breadth_snapshot_grows_series_across_multiple_calls(monkeypatch):
+    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
+
+    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
+    snap.record_breadth_snapshot(
+        _breadth_payload(
+            kospi={"adv": 600, "dec": 400, "flat": 0},
+            kosdaq={"adv": 400, "dec": 600, "flat": 0},
+        )
+    )
+    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:01")
+    snap.record_breadth_snapshot(
+        _breadth_payload(
+            kospi={"adv": 700, "dec": 300, "flat": 0},
+            kosdaq={"adv": 300, "dec": 700, "flat": 0},
+        )
+    )
+
+    assert [p["time"] for p in snap._buffers["등락비율"]] == ["10:00", "10:01"]
+    assert [p["value"] for p in snap._buffers["등락비율"]] == [50.0, 50.0]
+
+
+def test_record_breadth_snapshot_market_closed_appends_nothing(monkeypatch):
+    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
+    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
+
+    payload = _breadth_payload(
+        kospi={"adv": 600, "dec": 400, "flat": 0},
+        kosdaq={"adv": 400, "dec": 600, "flat": 0},
+        market_closed=True,
+    )
+    snap.record_breadth_snapshot(payload)
+
+    assert snap._buffers["등락비율"] == []
+
+
+def test_record_breadth_snapshot_one_market_missing_uses_available_side(monkeypatch):
+    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
+    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
+
+    payload = _breadth_payload(
+        kospi={"adv": 700, "dec": 300, "flat": 20},
+        kosdaq=None,
+    )
+    snap.record_breadth_snapshot(payload)
+
+    # kosdaq이 없으니 kospi만으로 계산: 700 / (700+300) * 100 = 70.0
+    assert snap._buffers["등락비율"] == [{"time": "10:00", "value": 70.0}]
+
+
+def test_record_breadth_snapshot_both_markets_missing_appends_nothing(monkeypatch):
+    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
+    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
+
+    snap.record_breadth_snapshot(_breadth_payload(kospi=None, kosdaq=None))
+
+    assert snap._buffers["등락비율"] == []
+
+
+def test_record_breadth_snapshot_zero_adv_and_dec_appends_nothing(monkeypatch):
+    # 극단적 예외: adv+dec 합이 0이면(둘 다 0) 이번 틱은 건너뛴다(0으로 나누기 방지).
+    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
+    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
+
+    payload = _breadth_payload(
+        kospi={"adv": 0, "dec": 0, "flat": 900},
+        kosdaq={"adv": 0, "dec": 0, "flat": 800},
+    )
+    snap.record_breadth_snapshot(payload)
+
+    assert snap._buffers["등락비율"] == []
+
+
+# ---------------------------------------------------------------------------
+# get_breadth_series
+# ---------------------------------------------------------------------------
+
+
+def test_get_breadth_series_shape_and_date_when_empty(monkeypatch):
+    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
+    monkeypatch.setattr(snap, "is_market_closed", lambda now_kst: False)
+
+    result = snap.get_breadth_series()
+
+    assert result == {"date": "2026-07-21", "series": [], "market_closed": False}
+
+
+def test_get_breadth_series_reflects_appended_points(monkeypatch):
+    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
+    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
+    monkeypatch.setattr(snap, "is_market_closed", lambda now_kst: False)
+
+    snap.record_breadth_snapshot(
+        _breadth_payload(
+            kospi={"adv": 600, "dec": 400, "flat": 0},
+            kosdaq={"adv": 400, "dec": 600, "flat": 0},
+        )
+    )
+    result = snap.get_breadth_series()
+
+    assert result["series"] == [{"time": "10:00", "value": 50.0}]
+    assert result["market_closed"] is False
+
+
+def test_get_breadth_series_market_closed_reflects_current_clock_not_stored_value(monkeypatch):
+    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
+    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
+    monkeypatch.setattr(snap, "is_market_closed", lambda now_kst: False)
+    snap.record_breadth_snapshot(
+        _breadth_payload(kospi={"adv": 600, "dec": 400, "flat": 0}, kosdaq={"adv": 400, "dec": 600, "flat": 0})
+    )
+
+    monkeypatch.setattr(snap, "is_market_closed", lambda now_kst: True)
+    result = snap.get_breadth_series()
+
+    assert result["market_closed"] is True
+    assert result["series"] == [{"time": "10:00", "value": 50.0}]
+
+
+def test_breadth_date_rollover_clears_buffer_on_next_append(monkeypatch):
+    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
+    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "15:29")
+    snap.record_breadth_snapshot(
+        _breadth_payload(kospi={"adv": 600, "dec": 400, "flat": 0}, kosdaq={"adv": 400, "dec": 600, "flat": 0})
+    )
+    assert snap._buffers["등락비율"] != []
+
+    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 22))
+    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "09:00")
+    snap.record_breadth_snapshot(
+        _breadth_payload(kospi={"adv": 700, "dec": 300, "flat": 0}, kosdaq={"adv": 300, "dec": 700, "flat": 0})
+    )
+
+    assert snap._buffers["등락비율"] == [{"time": "09:00", "value": 50.0}]
+    assert snap._buffer_date == dt.date(2026, 7, 22)
 
 
 # ---------------------------------------------------------------------------

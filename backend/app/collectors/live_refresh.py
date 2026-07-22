@@ -131,9 +131,14 @@ async def _run_live_refresh() -> None:
             # 수정 — routers/markets.py `_warm_breadth_live` docstring 참고) — flow/attention과
             # 같은 세션 블록 안으로 옮겼다(예전엔 세션 없이 별도로 호출했다).
             try:
-                await markets._warm_breadth_live(session)
+                breadth_payload = await markets._warm_breadth_live(session)
+                # 2026-07-22(PLAN.md §5.13): 방금 fetch한 값을 그대로 장중 등락비율
+                # 누적 스냅샷 버퍼에 적립한다 — 새 외부 호출 없음(flow와 동일한 패턴,
+                # 같은 try 블록 안에 둬서 적립 실패가 breadth 워밍 자체의 성공을
+                # 되돌리지 않는다).
+                intraday_snapshot.record_breadth_snapshot(breadth_payload)
             except Exception as e:  # noqa: BLE001 - 한 캐시 실패가 나머지 워밍을 막지 않도록
-                logger.warning("live-refresh: breadth 워밍 실패: %s", e)
+                logger.warning("live-refresh: breadth 워밍/스냅샷 적립 실패: %s", e)
 
             try:
                 flow_payload = await markets._warm_flow_live(session)

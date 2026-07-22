@@ -112,3 +112,34 @@ async def test_foreign_position_intraday_accumulated_empty_buffer_returns_empty_
     body = resp.json()
     assert body["spot"] == []
     assert body["futures"] == []
+
+
+async def test_breadth_intraday_accumulated_returns_current_buffer(monkeypatch):
+    # PLAN.md §5.13 — 등락 종목수 1D 상승비율 추이.
+    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
+    monkeypatch.setattr(snap, "is_market_closed", lambda now_kst: False)
+    snap._buffers["등락비율"].append({"time": "10:00", "value": 50.0})
+    snap._buffers["등락비율"].append({"time": "10:01", "value": 62.5})
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/breadth/intraday-accumulated")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["date"] == "2026-07-21"
+    assert body["series"] == [
+        {"time": "10:00", "value": 50.0},
+        {"time": "10:01", "value": 62.5},
+    ]
+    assert body["market_closed"] is False
+
+
+async def test_breadth_intraday_accumulated_empty_buffer_returns_empty_list():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/breadth/intraday-accumulated")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["series"] == []
+    assert "date" in body
+    assert "market_closed" in body

@@ -5,6 +5,7 @@ import {
   fetchBasis,
   fetchBasisLive,
   fetchBreadth,
+  fetchBreadthIntradayAccumulated,
   fetchBreadthLive,
   fetchDerivativeFlow,
   fetchFlowIntradayAccumulated,
@@ -28,6 +29,7 @@ import {
 } from '../api'
 import Badge from '../components/Badge'
 import BreadthBadge from '../components/BreadthBadge'
+import BreadthRatioChart from '../components/BreadthRatioChart'
 import CandleChart from '../components/CandleChart'
 import EtfDirectionCard from '../components/EtfDirectionCard'
 import ForeignPositionChart from '../components/ForeignPositionChart'
@@ -104,6 +106,16 @@ const DEFAULT_FOREIGN_POSITION_DAYS = 90
 const CHART_MODE_OPTIONS = [
   { key: '1D', label: '1D' },
   { key: '3M', label: '3M' },
+]
+// BreadthModal("등락 종목수") 전용 토글(PLAN.md §5.13) — 이 모달은 3M(일별 히스토리)
+// 차트가 없고 원래부터 "현재"(breadth/live 60초 스냅샷 배지)만 보여줬다. 여기에 순간
+// 스냅샷만으로는 놓치는 시간 흐름을 볼 수 있는 "1D 추이"(상승비율 라인차트) 탭을
+// 추가한다 — CHART_MODE_OPTIONS(1D/3M)를 그대로 재사용하면 존재하지 않는 3M 탭처럼
+// 보이므로 이 모달 전용 옵션을 별도로 둔다(toggle-row/toggle-chip 패턴은 동일하게
+// 재사용).
+const BREADTH_MODE_OPTIONS = [
+  { key: 'live', label: '현재' },
+  { key: '1D', label: '1D 추이' },
 ]
 // FlowSummaryModal(투자자별 수급 요약) 3M/1D 공통 시장 필터(PLAN.md §5.10,
 // 2026-07-22) — "코스피로 다 몰려 있어서 코스닥이 주목 받는 날을 못 본다"는
@@ -542,10 +554,21 @@ function SentimentModal() {
 }
 
 function BreadthModal() {
+  // PLAN.md §5.13 — "오늘 오르는 종목이 많은지 적은지를 시간순으로 보고 싶다"는
+  // 요청으로 기존 "현재"(순간 스냅샷) 탭에 "1D 추이"(상승비율 라인차트) 탭을
+  // 추가했다. FlowSummaryModal의 chartMode/toggle-row 패턴을 재사용하되, 이 모달은
+  // 3M 히스토리 차트가 없어 CHART_MODE_OPTIONS(1D/3M) 대신 BREADTH_MODE_OPTIONS
+  // (현재/1D 추이)를 쓴다.
+  const [chartMode, setChartMode] = useState('live')
   const [breadth, setBreadth] = useState(null)
   const [error, setError] = useState(null)
 
+  const [intraday, setIntraday] = useState(null)
+  const [intradayLoading, setIntradayLoading] = useState(false)
+  const [intradayError, setIntradayError] = useState(null)
+
   useEffect(() => {
+    if (chartMode !== 'live') return undefined
     let cancelled = false
     const toCamel = (row) =>
       row
@@ -603,24 +626,80 @@ function BreadthModal() {
     // 모달이 열려 있는 동안에도 백엔드 60초 캐시와 맞춰 계속 갱신한다 — 이전에는
     // 최초 1회만 fetch하고 끝나서 모달을 오래 띄워둬도 값이 갱신되지 않았다
     // (DashboardPage 본문의 동일 패턴 useEffect와 같은 수정, PLAN.md 서버 측 능동
-    // 60초 갱신 작업 참고).
+    // 60초 갱신 작업 참고). "1D 추이" 탭을 보는 동안에는 이 폴링이 필요 없으므로
+    // chartMode가 'live'일 때만 돈다.
     const intervalId = setInterval(load, BREADTH_LIVE_POLL_MS)
     return () => {
       cancelled = true
       clearInterval(intervalId)
     }
-  }, [])
+  }, [chartMode])
+
+  // 1D(오늘 장중 누적 등락비율) — PLAN.md §5.13, FlowSummaryModal의 1D 탭과 동일한
+  // 패턴(STATIC_DATA에는 로컬 전용 라이브 폴링이 없어 탭 자체를 숨기고 요청하지
+  // 않는다, 모달이 열려 있는 동안 재폴링 없음).
+  useEffect(() => {
+    if (STATIC_DATA || chartMode !== '1D') return undefined
+    let cancelled = false
+    setIntradayLoading(true)
+    setIntradayError(null)
+    fetchBreadthIntradayAccumulated()
+      .then((body) => {
+        if (!cancelled) setIntraday(body)
+      })
+      .catch((e) => {
+        if (!cancelled) setIntradayError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setIntradayLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [chartMode])
 
   return (
     <div>
-      {breadth && (
-        <div className="toggle-hint" style={{ marginBottom: 8 }}>
-          등락 종목수 — {breadth.live ? '장중 잠정치 (60초 캐시)' : '일별 확정치'}
+      {!STATIC_DATA && (
+        <div className="toggle-row">
+          {BREADTH_MODE_OPTIONS.map((opt) => (
+            <button
+              key={opt.key}
+              type="button"
+              className={`toggle-chip ${chartMode === opt.key ? 'active' : ''}`}
+              onClick={() => setChartMode(opt.key)}
+            >
+              {opt.label}
+            </button>
+          ))}
+          <span className="toggle-hint">
+            {chartMode === '1D' ? '오늘 장중 누적(참고용) · 상승 대 하락 비율 60초 틱, 보합 제외' : '실시간 스냅샷'}
+          </span>
         </div>
       )}
-      {error && <div className="state error">{error}</div>}
-      {breadth && <BreadthBadge kospi={breadth.kospi} kosdaq={breadth.kosdaq} date={breadth.live ? null : breadth.date} />}
-      {!breadth && !error && <div className="state">불러오는 중…</div>}
+
+      {chartMode === 'live' && (
+        <>
+          {breadth && (
+            <div className="toggle-hint" style={{ marginBottom: 8 }}>
+              등락 종목수 — {breadth.live ? '장중 잠정치 (60초 캐시)' : '일별 확정치'}
+            </div>
+          )}
+          {error && <div className="state error">{error}</div>}
+          {breadth && (
+            <BreadthBadge kospi={breadth.kospi} kosdaq={breadth.kosdaq} date={breadth.live ? null : breadth.date} />
+          )}
+          {!breadth && !error && <div className="state">불러오는 중…</div>}
+        </>
+      )}
+
+      {chartMode === '1D' && (
+        <>
+          {intradayLoading && !intraday && <div className="state">불러오는 중…</div>}
+          {intradayError && <div className="state error">{intradayError}</div>}
+          {!intradayError && intraday && <BreadthRatioChart series={intraday.series} />}
+        </>
+      )}
     </div>
   )
 }

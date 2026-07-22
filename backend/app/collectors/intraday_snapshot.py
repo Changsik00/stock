@@ -56,11 +56,15 @@ _FLOW_MARKETS = ("kospi", "kosdaq")
 
 # 시장별 투자자 3종을 각자 따로 적립한다(PLAN.md §5.10 — 코스피/코스닥 분리).
 # "외인선물"만 시장 구분이 없는 단일 시리즈로 남는다(코스피200 선물이라 시장별
-# 개념이 없음). 시리즈 이름 -> [{"time": "HH:MM", "value": float}, ...] (시간순 append)
+# 개념이 없음). "등락비율"도 시장 구분 없는 단일 시리즈다(PLAN.md §5.13 —
+# 사용자가 원한 건 "오늘 오르는 종목이 많은지"라는 전체 시장 관점이라 코스피/
+# 코스닥을 합산해서 하나의 지표로만 적립한다). 시리즈 이름 -> [{"time": "HH:MM",
+# "value": float}, ...] (시간순 append)
 _buffers: dict[str, dict[str, list[dict[str, object]]] | list[dict[str, object]]] = {
     "kospi": {"개인": [], "외국인": [], "기관계": []},
     "kosdaq": {"개인": [], "외국인": [], "기관계": []},
     "외인선물": [],
+    "등락비율": [],
 }
 
 # 이 버퍼들이 속한 KST 캘린더 날짜. None이면 아직 한 번도 append되지 않은 상태
@@ -161,6 +165,44 @@ def record_futures_flow_snapshot(payload: dict) -> None:
         _append_point(_buffers["외인선물"], net_value)
 
 
+def record_breadth_snapshot(payload: dict) -> None:
+    """`routers.markets._warm_breadth_live`가 이미 반환한 값을 받아 "등락비율"
+    시리즈(코스피+코스닥 합산, 시장 구분 없는 단일 시리즈)에 상승비율(%)을
+    append한다. PLAN.md §5.13 지표 정의: ``ratio = total_adv / (total_adv +
+    total_dec) * 100`` — 보합(flat)은 분모에서 제외한다("50% 기준"이 자연스러운
+    중립점이 되려면 상승 대 하락만의 비율이어야 한다는 사용자 요청 그대로).
+
+    `record_flow_snapshot`과 동일하게 ``market_closed``면 스킵한다(장 마감
+    시엔 warm 함수가 DB 확정치/직전 캐시를 재사용 중이라 "장중 새 스냅샷"으로
+    적립하면 잘못된 시계열이 된다). kospi/kosdaq 중 한쪽이 None이면 있는 쪽만으로
+    계산한다(다른 record_* 함수들의 "있는 쪽만" 관례와 동일). 둘 다 없거나
+    adv+dec 합이 0이면(극단적 예외) 이번 틱은 append하지 않는다."""
+    if payload.get("market_closed"):
+        return
+
+    _reset_if_new_day()
+
+    total_adv = 0
+    total_dec = 0
+    for market_key in _FLOW_MARKETS:
+        market_data = payload.get(market_key)
+        if not market_data:
+            continue
+        adv = market_data.get("adv")
+        dec = market_data.get("dec")
+        if adv is not None:
+            total_adv += adv
+        if dec is not None:
+            total_dec += dec
+
+    denom = total_adv + total_dec
+    if denom <= 0:
+        return
+
+    ratio = total_adv / denom * 100
+    _append_point(_buffers["등락비율"], ratio)
+
+
 def get_flow_series() -> dict:
     """1D 조회 API(`GET /api/markets/flow/intraday-accumulated`)가 그대로
     반환할 payload. ``date``는 오늘 KST 날짜(버퍼가 비어 있어도 항상 오늘
@@ -199,6 +241,18 @@ def get_foreign_position_series() -> dict:
         "date": _today_kst().isoformat(),
         "spot": _merge_foreign_spot_series(),
         "futures": list(_buffers["외인선물"]),
+        "market_closed": is_market_closed(dt.datetime.now(KST)),
+    }
+
+
+def get_breadth_series() -> dict:
+    """1D 조회 API(`GET /api/markets/breadth/intraday-accumulated`)가 그대로
+    반환할 payload(PLAN.md §5.13). `get_flow_series`와 동일한 모양이지만
+    ``series``가 투자자별 중첩이 아니라 바로 포인트 리스트다(단일 시리즈라서).
+    ``date``/``market_closed`` 계산 방식은 `get_flow_series`와 동일하다."""
+    return {
+        "date": _today_kst().isoformat(),
+        "series": list(_buffers["등락비율"]),
         "market_closed": is_market_closed(dt.datetime.now(KST)),
     }
 
