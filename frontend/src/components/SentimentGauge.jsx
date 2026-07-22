@@ -40,7 +40,7 @@ function scoreClass(score) {
 function scoreLabel(score) {
   if (score === null || score === undefined) return '데이터 없음'
   const sign = score > 0 ? '+' : ''
-  return `${sign}${scoreFmt.format(score)}`
+  return `${sign}${scoreFmt.format(score)}%`
 }
 
 const COMPONENT_META = {

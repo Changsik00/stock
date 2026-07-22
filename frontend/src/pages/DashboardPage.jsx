@@ -193,7 +193,7 @@ function scoreClass(score) {
 function scoreLabel(score) {
   if (score === null || score === undefined) return '-'
   const sign = score > 0 ? '+' : ''
-  return `${sign}${scoreFmt.format(score)}`
+  return `${sign}${scoreFmt.format(score)}%`
 }
 
 function rateClass(rate) {
