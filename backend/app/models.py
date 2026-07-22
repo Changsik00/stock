@@ -338,3 +338,28 @@ class CollectLog(Base):
     ran_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class IntradaySample(Base):
+    """장중 누적 스냅샷 영속화 (PLAN.md §5.14) — collectors/intraday_snapshot.py의
+    옛 순수 메모리 버퍼(재배포마다 소실, §5.6 사고 원인)를 대체한다.
+
+    ``series_key``는 8종 고정 문자열: 투자자별 수급 6개(``flow_kospi_개인``/
+    ``flow_kospi_외국인``/``flow_kospi_기관계``/``flow_kosdaq_개인``/
+    ``flow_kosdaq_외국인``/``flow_kosdaq_기관계``) + 외인선물 1개
+    (``futures_외국인``) + 등락비율 1개(``breadth_ratio``). "외인 양손"의 현물
+    시리즈는 별도 저장하지 않는다 — 조회 시 flow_kospi_외국인+flow_kosdaq_외국인을
+    시간 매칭으로 합산한다(collectors/intraday_snapshot.get_foreign_position_series
+    참고).
+
+    PK는 ``(series_key, time)`` — 같은 series_key+time에 원본(resolution_seconds=0)과
+    압축본(900)이 동시에 존재할 일은 없다는 전제(다운샘플링 배치가 원본을 압축한
+    뒤 즉시 삭제하므로, collectors/intraday_compaction.py 참고). ``resolution_seconds``는
+    원본 0, 15분 압축 후 900."""
+
+    __tablename__ = "intraday_sample"
+
+    series_key: Mapped[str] = mapped_column(String(50), primary_key=True)
+    time: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    value: Mapped[float] = mapped_column(Numeric(14, 4), nullable=False)
+    resolution_seconds: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)

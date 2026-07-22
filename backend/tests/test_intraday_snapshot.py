@@ -1,22 +1,13 @@
-"""Unit tests for app.collectors.intraday_snapshot — the in-memory "오늘 장중
-누적" buffer (PLAN.md §5.4-2/3, §5.10) that collectors/live_refresh.py's 60초/7분
-잡이 feeds with the already-fetched return values of routers.markets._warm_flow_live
-/ _warm_futures_flow_live (no new HTTP/kiwoom/naver calls, tested elsewhere).
+"""Unit/integration tests for app.collectors.intraday_snapshot — DB-backed 장중
+누적 스냅샷(PLAN.md §5.14, DB 영속화로 전면 재작성. 이전 순수 인메모리 버퍼 버전의
+테스트는 §5.4-2/5.10/5.13이었다).
 
-house convention for faking "now" (see test_market_hours.py): that module tests
-market_hours.is_market_closed by constructing explicit datetimes. This module
-computes "today"/"HH:MM" via two tiny private helpers (_today_kst/_now_hhmm_kst)
-specifically so tests can monkeypatch just those instead of freezing global
-time — module-level state (_buffers/_buffer_date) is reset directly between
-tests via an autouse fixture rather than relying on real day rollovers.
-
-**PLAN.md §5.10 (2026-07-22)**: `_buffers` is no longer a flat dict of 3
-investor series — kospi/kosdaq now each keep their own 개인/외국인/기관계
-series (`record_flow_snapshot` no longer sums the two markets). `get_flow_series`
-reflects this split. `get_foreign_position_series` must still return the
-kospi+kosdaq *sum* for its "spot" series (regression coverage for the "외인
-양손" modal, which is out of scope for §5.10 and must keep working exactly as
-before).
+Same house pattern as tests/test_scalp_tracker.py/test_basis_router.py: real dev
+Postgres via app.db.async_session_factory, test rows isolated by using a
+"test_"-prefixed series_key set that never collides with the 8 real series_key
+values, and a monkeypatched `snap._now_kst` seam (module docstring "단일 시간
+seam" 참고) so timestamps are deterministic without touching real system time.
+Rows are cleaned up in teardown.
 """
 
 from __future__ import annotations
@@ -24,34 +15,47 @@ from __future__ import annotations
 import datetime as dt
 
 import pytest
+from sqlalchemy import select
 
 from app.collectors import intraday_snapshot as snap
+from app.db import async_session_factory, engine
+from app.models import IntradaySample
+
+KST = dt.timezone(dt.timedelta(hours=9))
+TEST_DAY = dt.date(2099, 1, 5)  # 실 데이터와 절대 겹치지 않는 먼 미래
+
+
+def _kst(hour, minute, day=TEST_DAY):
+    return dt.datetime(day.year, day.month, day.day, hour, minute, tzinfo=KST)
+
+
+def _cleanup_floor():
+    # 며칠 전 날짜(days>1 창 테스트가 TEST_DAY-1에 행을 쓴다)까지 넉넉히 덮어야
+    # 그 행도 다음 테스트로 새지 않고 지워진다.
+    return _kst(0, 0) - dt.timedelta(days=3)
+
+
+async def _clear_test_rows() -> None:
+    async with async_session_factory() as session:
+        await session.execute(IntradaySample.__table__.delete().where(IntradaySample.time >= _cleanup_floor()))
+        await session.commit()
 
 
 @pytest.fixture(autouse=True)
-def _reset_buffers():
-    """Every test starts from a clean slate — module-level dicts/lists are
-    process-global, so a previous test's points must not leak into the next."""
-
-    def _clear_all():
-        for value in snap._buffers.values():
-            if isinstance(value, list):
-                value.clear()
-            else:
-                for series in value.values():
-                    series.clear()
-
-    _clear_all()
-    snap._buffer_date = None
+async def _clean_intraday_sample():
+    # 단일 autouse 픽스처로 정리+엔진 dispose(tests/test_scalp_tracker.py의
+    # `_clean_scalp_pick` 패턴과 동일 — 별도 async fixture 두 개를 두면 이벤트 루프
+    # 경계에서 커넥션 풀이 꼬이는 문제를 실제로 겪었다는 house 관례를 따른다).
+    await _clear_test_rows()
     yield
-    _clear_all()
-    snap._buffer_date = None
+    await _clear_test_rows()
+    await engine.dispose()
 
 
 def _flow_payload(kospi_gaein, kosdaq_gaein, market_closed=False):
     return {
         "kospi": {
-            "date": "2026-07-21",
+            "date": "2099-01-05",
             "investors": {
                 "개인": {"net_value": kospi_gaein, "net_volume": None},
                 "외국인": {"net_value": 100, "net_volume": None},
@@ -61,7 +65,7 @@ def _flow_payload(kospi_gaein, kosdaq_gaein, market_closed=False):
             "source": "kiwoom_live",
         },
         "kosdaq": {
-            "date": "2026-07-21",
+            "date": "2099-01-05",
             "investors": {
                 "개인": {"net_value": kosdaq_gaein, "net_volume": None},
                 "외국인": {"net_value": 10, "net_volume": None},
@@ -71,16 +75,16 @@ def _flow_payload(kospi_gaein, kosdaq_gaein, market_closed=False):
             "source": "kiwoom_live",
         },
         "market_closed": market_closed,
-        "cached_at": "2026-07-21T03:00:00+00:00",
+        "cached_at": "2099-01-05T03:00:00+00:00",
     }
 
 
 def _futures_payload(net_value, market_closed=False):
     return {
-        "date": "2026-07-21",
+        "date": "2099-01-05",
         "investors": {"외국인": {"net_value": net_value, "net_volume": None}},
         "market_closed": market_closed,
-        "cached_at": "2026-07-21T03:00:00+00:00",
+        "cached_at": "2099-01-05T03:00:00+00:00",
     }
 
 
@@ -89,8 +93,16 @@ def _breadth_payload(kospi=None, kosdaq=None, market_closed=False):
         "kospi": kospi,
         "kosdaq": kosdaq,
         "market_closed": market_closed,
-        "cached_at": "2026-07-21T03:00:00+00:00",
+        "cached_at": "2099-01-05T03:00:00+00:00",
     }
+
+
+async def _all_rows() -> list[IntradaySample]:
+    async with async_session_factory() as session:
+        rows = (
+            await session.execute(select(IntradaySample).where(IntradaySample.time >= _kst(0, 0)))
+        ).scalars().all()
+        return rows
 
 
 # ---------------------------------------------------------------------------
@@ -98,70 +110,92 @@ def _breadth_payload(kospi=None, kosdaq=None, market_closed=False):
 # ---------------------------------------------------------------------------
 
 
-def test_record_flow_snapshot_keeps_kospi_and_kosdaq_separate(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
+async def test_record_flow_snapshot_writes_six_series_keys(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
 
-    snap.record_flow_snapshot(_flow_payload(kospi_gaein=100, kosdaq_gaein=20))
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, _flow_payload(kospi_gaein=100, kosdaq_gaein=20))
 
-    assert snap._buffers["kospi"]["개인"] == [{"time": "10:00", "value": 100}]
-    assert snap._buffers["kospi"]["외국인"] == [{"time": "10:00", "value": 100}]
-    assert snap._buffers["kospi"]["기관계"] == [{"time": "10:00", "value": -50}]
-    assert snap._buffers["kosdaq"]["개인"] == [{"time": "10:00", "value": 20}]
-    assert snap._buffers["kosdaq"]["외국인"] == [{"time": "10:00", "value": 10}]
-    assert snap._buffers["kosdaq"]["기관계"] == [{"time": "10:00", "value": -5}]
-    # futures 시리즈는 record_flow_snapshot과 무관 — 건드리지 않는다.
-    assert snap._buffers["외인선물"] == []
-
-
-def test_record_flow_snapshot_grows_series_across_multiple_calls(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
-    snap.record_flow_snapshot(_flow_payload(kospi_gaein=100, kosdaq_gaein=20))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:01")
-    snap.record_flow_snapshot(_flow_payload(kospi_gaein=200, kosdaq_gaein=30))
-
-    assert [p["time"] for p in snap._buffers["kospi"]["개인"]] == ["10:00", "10:01"]
-    assert [p["value"] for p in snap._buffers["kospi"]["개인"]] == [100, 200]
-    assert [p["value"] for p in snap._buffers["kosdaq"]["개인"]] == [20, 30]
+    rows = await _all_rows()
+    by_key = {r.series_key: r for r in rows}
+    assert set(by_key) == {
+        "flow_kospi_개인",
+        "flow_kospi_외국인",
+        "flow_kospi_기관계",
+        "flow_kosdaq_개인",
+        "flow_kosdaq_외국인",
+        "flow_kosdaq_기관계",
+    }
+    assert float(by_key["flow_kospi_개인"].value) == 100
+    assert float(by_key["flow_kospi_외국인"].value) == 100
+    assert float(by_key["flow_kospi_기관계"].value) == -50
+    assert float(by_key["flow_kosdaq_개인"].value) == 20
+    assert float(by_key["flow_kosdaq_외국인"].value) == 10
+    assert float(by_key["flow_kosdaq_기관계"].value) == -5
+    for row in rows:
+        assert row.time == _kst(10, 0)
+        assert row.resolution_seconds == 0
 
 
-def test_record_flow_snapshot_market_closed_appends_nothing(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
+async def test_record_flow_snapshot_grows_series_across_multiple_calls(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, _flow_payload(kospi_gaein=100, kosdaq_gaein=20))
 
-    snap.record_flow_snapshot(_flow_payload(kospi_gaein=100, kosdaq_gaein=20, market_closed=True))
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 1))
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, _flow_payload(kospi_gaein=200, kosdaq_gaein=30))
 
-    assert snap._buffers["kospi"]["개인"] == []
-    assert snap._buffers["kosdaq"]["개인"] == []
+    rows = await _all_rows()
+    kospi_gaein_rows = sorted((r for r in rows if r.series_key == "flow_kospi_개인"), key=lambda r: r.time)
+    assert [float(r.value) for r in kospi_gaein_rows] == [100, 200]
 
 
-def test_record_flow_snapshot_one_market_missing_only_appends_the_other(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
+async def test_record_flow_snapshot_market_closed_writes_nothing(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, _flow_payload(kospi_gaein=100, kosdaq_gaein=20, market_closed=True))
 
+    assert await _all_rows() == []
+
+
+async def test_record_flow_snapshot_one_market_missing_only_writes_the_other(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
     payload = _flow_payload(kospi_gaein=100, kosdaq_gaein=20)
     payload["kosdaq"] = None
 
-    snap.record_flow_snapshot(payload)
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, payload)
 
-    assert snap._buffers["kospi"]["개인"] == [{"time": "10:00", "value": 100}]
-    assert snap._buffers["kosdaq"]["개인"] == []
+    rows = await _all_rows()
+    keys = {r.series_key for r in rows}
+    assert keys == {"flow_kospi_개인", "flow_kospi_외국인", "flow_kospi_기관계"}
 
 
-def test_record_flow_snapshot_both_markets_missing_skips_everything(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
-
+async def test_record_flow_snapshot_both_markets_missing_writes_nothing(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
     payload = _flow_payload(kospi_gaein=100, kosdaq_gaein=20)
     payload["kospi"] = None
     payload["kosdaq"] = None
 
-    snap.record_flow_snapshot(payload)
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, payload)
 
-    assert snap._buffers["kospi"]["개인"] == []
-    assert snap._buffers["kosdaq"]["개인"] == []
+    assert await _all_rows() == []
+
+
+async def test_record_flow_snapshot_same_time_conflict_does_not_raise(monkeypatch):
+    """60초 잡이 정확히 60초 간격이 아니라 같은 timestamp로 두 번 불릴 수도 있다
+    (예: 재시도) — ON CONFLICT DO NOTHING으로 조용히 무시돼야 한다(예외 없음)."""
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, _flow_payload(kospi_gaein=100, kosdaq_gaein=20))
+        await snap.record_flow_snapshot(session, _flow_payload(kospi_gaein=999, kosdaq_gaein=999))
+
+    rows = await _all_rows()
+    kospi_gaein_rows = [r for r in rows if r.series_key == "flow_kospi_개인"]
+    assert len(kospi_gaein_rows) == 1
+    assert float(kospi_gaein_rows[0].value) == 100  # 두 번째 호출 값으로 덮이지 않는다
 
 
 # ---------------------------------------------------------------------------
@@ -169,34 +203,34 @@ def test_record_flow_snapshot_both_markets_missing_skips_everything(monkeypatch)
 # ---------------------------------------------------------------------------
 
 
-def test_record_futures_flow_snapshot_appends_foreign_net_value(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:07")
+async def test_record_futures_flow_snapshot_writes_foreign_net_value(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 7))
+    async with async_session_factory() as session:
+        await snap.record_futures_flow_snapshot(session, _futures_payload(456))
 
-    snap.record_futures_flow_snapshot(_futures_payload(456))
-
-    assert snap._buffers["외인선물"] == [{"time": "10:07", "value": 456}]
-    # flow 시리즈는 건드리지 않는다.
-    assert snap._buffers["kospi"]["개인"] == []
-    assert snap._buffers["kosdaq"]["개인"] == []
-
-
-def test_record_futures_flow_snapshot_market_closed_appends_nothing(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:07")
-
-    snap.record_futures_flow_snapshot(_futures_payload(456, market_closed=True))
-
-    assert snap._buffers["외인선물"] == []
+    rows = await _all_rows()
+    assert len(rows) == 1
+    assert rows[0].series_key == "futures_외국인"
+    assert float(rows[0].value) == 456
+    assert rows[0].time == _kst(10, 7)
 
 
-def test_record_futures_flow_snapshot_missing_investor_appends_nothing(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:07")
+async def test_record_futures_flow_snapshot_market_closed_writes_nothing(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 7))
+    async with async_session_factory() as session:
+        await snap.record_futures_flow_snapshot(session, _futures_payload(456, market_closed=True))
 
-    snap.record_futures_flow_snapshot({"date": "2026-07-21", "investors": {}, "market_closed": False})
+    assert await _all_rows() == []
 
-    assert snap._buffers["외인선물"] == []
+
+async def test_record_futures_flow_snapshot_missing_investor_writes_nothing(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 7))
+    async with async_session_factory() as session:
+        await snap.record_futures_flow_snapshot(
+            session, {"date": "2099-01-05", "investors": {}, "market_closed": False}
+        )
+
+    assert await _all_rows() == []
 
 
 # ---------------------------------------------------------------------------
@@ -204,91 +238,160 @@ def test_record_futures_flow_snapshot_missing_investor_appends_nothing(monkeypat
 # ---------------------------------------------------------------------------
 
 
-def test_record_breadth_snapshot_computes_ratio_excluding_flat(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
-
+async def test_record_breadth_snapshot_computes_ratio_excluding_flat(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
     payload = _breadth_payload(
-        kospi={"date": "2026-07-21", "adv": 500, "dec": 400, "flat": 50, "limit_up": 0, "limit_down": 0},
-        kosdaq={"date": "2026-07-21", "adv": 500, "dec": 600, "flat": 30, "limit_up": 0, "limit_down": 0},
+        kospi={"date": "2099-01-05", "adv": 500, "dec": 400, "flat": 50, "limit_up": 0, "limit_down": 0},
+        kosdaq={"date": "2099-01-05", "adv": 500, "dec": 600, "flat": 30, "limit_up": 0, "limit_down": 0},
     )
-    snap.record_breadth_snapshot(payload)
+    async with async_session_factory() as session:
+        await snap.record_breadth_snapshot(session, payload)
 
+    rows = await _all_rows()
+    assert len(rows) == 1
+    assert rows[0].series_key == "breadth_ratio"
     # total_adv=1000, total_dec=1000, flat 무시 -> 50.0%
-    assert snap._buffers["등락비율"] == [{"time": "10:00", "value": 50.0}]
+    assert float(rows[0].value) == 50.0
 
 
-def test_record_breadth_snapshot_grows_series_across_multiple_calls(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
-    snap.record_breadth_snapshot(
-        _breadth_payload(
-            kospi={"adv": 600, "dec": 400, "flat": 0},
-            kosdaq={"adv": 400, "dec": 600, "flat": 0},
-        )
-    )
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:01")
-    snap.record_breadth_snapshot(
-        _breadth_payload(
-            kospi={"adv": 700, "dec": 300, "flat": 0},
-            kosdaq={"adv": 300, "dec": 700, "flat": 0},
-        )
-    )
-
-    assert [p["time"] for p in snap._buffers["등락비율"]] == ["10:00", "10:01"]
-    assert [p["value"] for p in snap._buffers["등락비율"]] == [50.0, 50.0]
-
-
-def test_record_breadth_snapshot_market_closed_appends_nothing(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
-
+async def test_record_breadth_snapshot_market_closed_writes_nothing(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
     payload = _breadth_payload(
-        kospi={"adv": 600, "dec": 400, "flat": 0},
-        kosdaq={"adv": 400, "dec": 600, "flat": 0},
-        market_closed=True,
+        kospi={"adv": 600, "dec": 400, "flat": 0}, kosdaq={"adv": 400, "dec": 600, "flat": 0}, market_closed=True
     )
-    snap.record_breadth_snapshot(payload)
+    async with async_session_factory() as session:
+        await snap.record_breadth_snapshot(session, payload)
 
-    assert snap._buffers["등락비율"] == []
+    assert await _all_rows() == []
 
 
-def test_record_breadth_snapshot_one_market_missing_uses_available_side(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
+async def test_record_breadth_snapshot_one_market_missing_uses_available_side(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    payload = _breadth_payload(kospi={"adv": 700, "dec": 300, "flat": 20}, kosdaq=None)
+    async with async_session_factory() as session:
+        await snap.record_breadth_snapshot(session, payload)
 
-    payload = _breadth_payload(
-        kospi={"adv": 700, "dec": 300, "flat": 20},
-        kosdaq=None,
-    )
-    snap.record_breadth_snapshot(payload)
-
+    rows = await _all_rows()
+    assert len(rows) == 1
     # kosdaq이 없으니 kospi만으로 계산: 700 / (700+300) * 100 = 70.0
-    assert snap._buffers["등락비율"] == [{"time": "10:00", "value": 70.0}]
+    assert float(rows[0].value) == 70.0
 
 
-def test_record_breadth_snapshot_both_markets_missing_appends_nothing(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
+async def test_record_breadth_snapshot_zero_adv_and_dec_writes_nothing(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    payload = _breadth_payload(kospi={"adv": 0, "dec": 0, "flat": 900}, kosdaq={"adv": 0, "dec": 0, "flat": 800})
+    async with async_session_factory() as session:
+        await snap.record_breadth_snapshot(session, payload)
 
-    snap.record_breadth_snapshot(_breadth_payload(kospi=None, kosdaq=None))
-
-    assert snap._buffers["등락비율"] == []
+    assert await _all_rows() == []
 
 
-def test_record_breadth_snapshot_zero_adv_and_dec_appends_nothing(monkeypatch):
-    # 극단적 예외: adv+dec 합이 0이면(둘 다 0) 이번 틱은 건너뛴다(0으로 나누기 방지).
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
+# ---------------------------------------------------------------------------
+# get_flow_series
+# ---------------------------------------------------------------------------
 
-    payload = _breadth_payload(
-        kospi={"adv": 0, "dec": 0, "flat": 900},
-        kosdaq={"adv": 0, "dec": 0, "flat": 800},
-    )
-    snap.record_breadth_snapshot(payload)
 
-    assert snap._buffers["등락비율"] == []
+async def test_get_flow_series_shape_when_empty(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+
+    async with async_session_factory() as session:
+        result = await snap.get_flow_series(session, days=1)
+
+    assert result["date"] == TEST_DAY.isoformat()
+    assert result["series"] == {
+        "kospi": {"개인": [], "외국인": [], "기관계": []},
+        "kosdaq": {"개인": [], "외국인": [], "기관계": []},
+    }
+    assert isinstance(result["market_closed"], bool)
+
+
+async def test_get_flow_series_reflects_written_points_split_by_market(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, _flow_payload(kospi_gaein=100, kosdaq_gaein=20))
+        result = await snap.get_flow_series(session, days=1)
+
+    assert result["series"]["kospi"]["개인"] == [{"time": "10:00", "value": 100.0}]
+    assert result["series"]["kosdaq"]["개인"] == [{"time": "10:00", "value": 20.0}]
+
+
+async def test_get_flow_series_days_greater_than_one_formats_with_date(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, _flow_payload(kospi_gaein=100, kosdaq_gaein=20))
+        result = await snap.get_flow_series(session, days=7)
+
+    assert result["series"]["kospi"]["개인"] == [{"time": "01/05 10:00", "value": 100.0}]
+
+
+async def test_get_flow_series_days_excludes_points_before_cutoff(monkeypatch):
+    # days=1은 오늘(마지막 호출 시점 KST 날짜) 00:00부터만 본다 — 어제 찍힌 점은
+    # days=1일 때는 안 보이고 days=2로 늘리면 보여야 한다.
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(23, 0, day=TEST_DAY - dt.timedelta(days=1)))
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, _flow_payload(kospi_gaein=100, kosdaq_gaein=20))
+
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(9, 0))
+    async with async_session_factory() as session:
+        result_1d = await snap.get_flow_series(session, days=1)
+        result_2d = await snap.get_flow_series(session, days=2)
+
+    assert result_1d["series"]["kospi"]["개인"] == []
+    assert len(result_2d["series"]["kospi"]["개인"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# get_foreign_position_series — regression: kospi+kosdaq 외국인 합산(§5.10)
+# ---------------------------------------------------------------------------
+
+
+async def test_get_foreign_position_series_sums_kospi_and_kosdaq_by_exact_time(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, _flow_payload(kospi_gaein=100, kosdaq_gaein=20))
+        await snap.record_futures_flow_snapshot(session, _futures_payload(456))
+        result = await snap.get_foreign_position_series(session, days=1)
+
+    # kospi 외국인(100) + kosdaq 외국인(10) = 110 (기존 합산 동작과 동일).
+    assert result["spot"] == [{"time": "10:00", "value": 110.0}]
+    assert result["futures"] == [{"time": "10:00", "value": 456.0}]
+
+
+async def test_get_foreign_position_series_sums_across_multiple_ticks(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, _flow_payload(kospi_gaein=100, kosdaq_gaein=20))
+
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 1))
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, _flow_payload(kospi_gaein=200, kosdaq_gaein=30))
+        result = await snap.get_foreign_position_series(session, days=1)
+
+    assert result["spot"] == [
+        {"time": "10:00", "value": 110.0},
+        {"time": "10:01", "value": 110.0},
+    ]
+
+
+async def test_get_foreign_position_series_one_market_missing_uses_available_side(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    payload = _flow_payload(kospi_gaein=100, kosdaq_gaein=20)
+    payload["kosdaq"] = None
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, payload)
+        result = await snap.get_foreign_position_series(session, days=1)
+
+    assert result["spot"] == [{"time": "10:00", "value": 100.0}]
+
+
+async def test_get_series_reports_today_even_with_no_rows(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    async with async_session_factory() as session:
+        result = await snap.get_foreign_position_series(session, days=1)
+
+    assert result["date"] == TEST_DAY.isoformat()
+    assert result["spot"] == []
+    assert result["futures"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -296,221 +399,59 @@ def test_record_breadth_snapshot_zero_adv_and_dec_appends_nothing(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_get_breadth_series_shape_and_date_when_empty(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "is_market_closed", lambda now_kst: False)
-
-    result = snap.get_breadth_series()
-
-    assert result == {"date": "2026-07-21", "series": [], "market_closed": False}
-
-
-def test_get_breadth_series_reflects_appended_points(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
-    monkeypatch.setattr(snap, "is_market_closed", lambda now_kst: False)
-
-    snap.record_breadth_snapshot(
-        _breadth_payload(
-            kospi={"adv": 600, "dec": 400, "flat": 0},
-            kosdaq={"adv": 400, "dec": 600, "flat": 0},
-        )
-    )
-    result = snap.get_breadth_series()
-
-    assert result["series"] == [{"time": "10:00", "value": 50.0}]
-    assert result["market_closed"] is False
-
-
-def test_get_breadth_series_market_closed_reflects_current_clock_not_stored_value(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
-    monkeypatch.setattr(snap, "is_market_closed", lambda now_kst: False)
-    snap.record_breadth_snapshot(
-        _breadth_payload(kospi={"adv": 600, "dec": 400, "flat": 0}, kosdaq={"adv": 400, "dec": 600, "flat": 0})
-    )
-
-    monkeypatch.setattr(snap, "is_market_closed", lambda now_kst: True)
-    result = snap.get_breadth_series()
-
-    assert result["market_closed"] is True
-    assert result["series"] == [{"time": "10:00", "value": 50.0}]
-
-
-def test_breadth_date_rollover_clears_buffer_on_next_append(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "15:29")
-    snap.record_breadth_snapshot(
-        _breadth_payload(kospi={"adv": 600, "dec": 400, "flat": 0}, kosdaq={"adv": 400, "dec": 600, "flat": 0})
-    )
-    assert snap._buffers["등락비율"] != []
-
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 22))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "09:00")
-    snap.record_breadth_snapshot(
-        _breadth_payload(kospi={"adv": 700, "dec": 300, "flat": 0}, kosdaq={"adv": 300, "dec": 700, "flat": 0})
-    )
-
-    assert snap._buffers["등락비율"] == [{"time": "09:00", "value": 50.0}]
-    assert snap._buffer_date == dt.date(2026, 7, 22)
-
-
-# ---------------------------------------------------------------------------
-# 자정 리셋 (다음 append 때 지연 감지)
-# ---------------------------------------------------------------------------
-
-
-def test_date_rollover_clears_all_buffers_on_next_append(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "15:29")
-    snap.record_flow_snapshot(_flow_payload(kospi_gaein=100, kosdaq_gaein=20))
-    snap.record_futures_flow_snapshot(_futures_payload(456))
-    assert snap._buffers["kospi"]["개인"] != []
-    assert snap._buffers["kosdaq"]["개인"] != []
-    assert snap._buffers["외인선물"] != []
-
-    # 다음 거래일 첫 워밍 — 날짜가 바뀌었으니 append 전에 전부 비워져야 한다.
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 22))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "09:00")
-    snap.record_flow_snapshot(_flow_payload(kospi_gaein=5, kosdaq_gaein=1))
-
-    assert snap._buffers["kospi"]["개인"] == [{"time": "09:00", "value": 5}]
-    assert snap._buffers["kosdaq"]["개인"] == [{"time": "09:00", "value": 1}]
-    # 어제 쌓인 외인선물 포인트도 함께 비워졌다 — 아직 오늘 futures 워밍(7분 잡)은
-    # 안 돌았으니 빈 채로.
-    assert snap._buffers["외인선물"] == []
-    assert snap._buffer_date == dt.date(2026, 7, 22)
-
-
-# ---------------------------------------------------------------------------
-# 500포인트 캡
-# ---------------------------------------------------------------------------
-
-
-def test_max_points_per_series_drops_oldest(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-
-    for i in range(snap.MAX_POINTS_PER_SERIES + 10):
-        monkeypatch.setattr(snap, "_now_hhmm_kst", lambda i=i: f"{i:04d}")
-        snap.record_futures_flow_snapshot(_futures_payload(i))
-
-    series = snap._buffers["외인선물"]
-    assert len(series) == snap.MAX_POINTS_PER_SERIES
-    # 가장 오래된 10개(값 0..9)가 버려지고, 마지막 점은 최신 값이어야 한다.
-    assert series[0]["value"] == 10
-    assert series[-1]["value"] == snap.MAX_POINTS_PER_SERIES + 9
-
-
-# ---------------------------------------------------------------------------
-# get_flow_series / get_foreign_position_series
-# ---------------------------------------------------------------------------
-
-
-def test_get_flow_series_shape_and_date_when_empty(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "is_market_closed", lambda now_kst: False)
-
-    result = snap.get_flow_series()
+async def test_get_breadth_series_shape_when_empty(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    async with async_session_factory() as session:
+        result = await snap.get_breadth_series(session, days=1)
 
     assert result == {
-        "date": "2026-07-21",
-        "series": {
-            "kospi": {"개인": [], "외국인": [], "기관계": []},
-            "kosdaq": {"개인": [], "외국인": [], "기관계": []},
-        },
-        "market_closed": False,
+        "date": TEST_DAY.isoformat(),
+        "series": [],
+        "market_closed": result["market_closed"],
     }
 
 
-def test_get_flow_series_reflects_appended_points_split_by_market(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
-    monkeypatch.setattr(snap, "is_market_closed", lambda now_kst: False)
+async def test_get_breadth_series_reflects_written_points(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    async with async_session_factory() as session:
+        await snap.record_breadth_snapshot(
+            session, _breadth_payload(kospi={"adv": 600, "dec": 400, "flat": 0}, kosdaq={"adv": 400, "dec": 600, "flat": 0})
+        )
+        result = await snap.get_breadth_series(session, days=1)
 
-    snap.record_flow_snapshot(_flow_payload(kospi_gaein=100, kosdaq_gaein=20))
-    result = snap.get_flow_series()
-
-    assert result["series"]["kospi"]["개인"] == [{"time": "10:00", "value": 100}]
-    assert result["series"]["kosdaq"]["개인"] == [{"time": "10:00", "value": 20}]
-    assert result["market_closed"] is False
+    assert result["series"] == [{"time": "10:00", "value": 50.0}]
 
 
-def test_get_flow_series_market_closed_reflects_current_clock_not_stored_value(monkeypatch):
-    # market_closed는 저장된 값이 아니라 호출 시점에 새로 계산한다(모듈 docstring).
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
-    monkeypatch.setattr(snap, "is_market_closed", lambda now_kst: False)
-    snap.record_flow_snapshot(_flow_payload(kospi_gaein=100, kosdaq_gaein=20))
+# ---------------------------------------------------------------------------
+# market_closed — 저장된 값이 아니라 호출 시점에 새로 계산
+# ---------------------------------------------------------------------------
 
-    monkeypatch.setattr(snap, "is_market_closed", lambda now_kst: True)
-    result = snap.get_flow_series()
+
+async def test_market_closed_reflects_current_clock_not_stored_payload(monkeypatch):
+    # payload["market_closed"]=False였던 틱을 적립했더라도, 조회 시점에 장이
+    # 마감돼 있으면 market_closed=True를 반환해야 한다(is_market_closed 재계산).
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    async with async_session_factory() as session:
+        await snap.record_breadth_snapshot(
+            session, _breadth_payload(kospi={"adv": 600, "dec": 400, "flat": 0}, kosdaq={"adv": 400, "dec": 600, "flat": 0})
+        )
+
+    # 10:00은 장중, 20:00은 장 마감(is_market_closed는 실제 함수 그대로 사용).
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(20, 0))
+    async with async_session_factory() as session:
+        result = await snap.get_breadth_series(session, days=1)
 
     assert result["market_closed"] is True
-    # 이미 적립된 점은 그대로 남아 있다 — market_closed 재계산이 버퍼를 지우지 않는다.
-    assert result["series"]["kospi"]["개인"] == [{"time": "10:00", "value": 100}]
+    assert result["series"] == [{"time": "10:00", "value": 50.0}]
 
 
-def test_get_foreign_position_series_sums_kospi_and_kosdaq_by_time(monkeypatch):
-    # 회귀 테스트(PLAN.md §5.10 필수 요구): §5.10로 kospi/kosdaq 버퍼가 분리된
-    # 뒤에도 "외인 양손" 모달의 현물 시리즈는 여전히 두 시장 합산값이어야 한다.
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
-    monkeypatch.setattr(snap, "is_market_closed", lambda now_kst: False)
-
-    snap.record_flow_snapshot(_flow_payload(kospi_gaein=100, kosdaq_gaein=20))
-    snap.record_futures_flow_snapshot(_futures_payload(456))
-
-    result = snap.get_foreign_position_series()
-
-    assert result["date"] == "2026-07-21"
-    # kospi 외국인(100) + kosdaq 외국인(10) = 110 (기존 합산 동작과 동일).
-    assert result["spot"] == [{"time": "10:00", "value": 110}]
-    assert result["futures"] == [{"time": "10:00", "value": 456}]
-    assert result["market_closed"] is False
+# ---------------------------------------------------------------------------
+# days 파라미터 클램핑
+# ---------------------------------------------------------------------------
 
 
-def test_get_foreign_position_series_sums_across_multiple_ticks(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "is_market_closed", lambda now_kst: False)
-
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
-    snap.record_flow_snapshot(_flow_payload(kospi_gaein=100, kosdaq_gaein=20))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:01")
-    snap.record_flow_snapshot(_flow_payload(kospi_gaein=200, kosdaq_gaein=30))
-
-    result = snap.get_foreign_position_series()
-
-    # 두 틱 모두 kospi 외국인(100)+kosdaq 외국인(10) = 110씩(payload가 외국인
-    # net_value를 고정값으로 쓰므로 두 틱 다 동일).
-    assert result["spot"] == [
-        {"time": "10:00", "value": 110},
-        {"time": "10:01", "value": 110},
-    ]
-
-
-def test_get_foreign_position_series_one_market_missing_uses_available_side(monkeypatch):
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "_now_hhmm_kst", lambda: "10:00")
-    monkeypatch.setattr(snap, "is_market_closed", lambda now_kst: False)
-
-    payload = _flow_payload(kospi_gaein=100, kosdaq_gaein=20)
-    payload["kosdaq"] = None
-    snap.record_flow_snapshot(payload)
-
-    result = snap.get_foreign_position_series()
-
-    # kosdaq이 통째로 빠졌으니 kospi 외국인(100)만 반영된다.
-    assert result["spot"] == [{"time": "10:00", "value": 100}]
-
-
-def test_get_series_reports_today_even_with_empty_buffer(monkeypatch):
-    # _buffer_date가 아직 None이어도(한 번도 append 안 됨) date는 오늘을 보고한다.
-    monkeypatch.setattr(snap, "_today_kst", lambda: dt.date(2026, 7, 21))
-    monkeypatch.setattr(snap, "is_market_closed", lambda now_kst: False)
-    assert snap._buffer_date is None
-
-    result = snap.get_foreign_position_series()
-
-    assert result["date"] == "2026-07-21"
-    assert result["spot"] == []
-    assert result["futures"] == []
+async def test_clamp_days_bounds():
+    assert snap._clamp_days(0) == snap.DAYS_MIN
+    assert snap._clamp_days(1) == 1
+    assert snap._clamp_days(30) == 30
+    assert snap._clamp_days(999) == snap.DAYS_MAX

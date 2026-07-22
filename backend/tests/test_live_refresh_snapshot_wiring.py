@@ -1,4 +1,4 @@
-"""Thin wiring test for PLAN.md §5.4-2: collectors/live_refresh.py's two jobs
+"""Thin wiring test for PLAN.md §5.4-2/§5.14: collectors/live_refresh.py's jobs
 must pass the warm functions' already-fetched return value straight into the
 matching collectors.intraday_snapshot recorder, with no extra transformation.
 
@@ -8,7 +8,12 @@ refactor that accidentally drops the recorder call or feeds it the wrong
 object gets caught. Uses a real DB session via app.db.async_session_factory
 for _run_live_refresh (same house pattern as test_basis_router.py etc.) since
 markets._warm_breadth_live/_warm_flow_live are monkeypatched away entirely —
-the session is opened/closed but never queried.
+the session is opened/closed but never queried by those.
+
+§5.14 changed the three record_* functions from sync in-memory appenders to
+`async def record_x(session, payload)` DB writers — this file's assertions
+now capture ``(session, payload)`` tuples instead of bare payloads, and the
+fake recorders must be async (live_refresh awaits them).
 """
 
 from __future__ import annotations
@@ -50,7 +55,11 @@ async def test_run_live_refresh_feeds_flow_payload_into_recorder(monkeypatch):
     monkeypatch.setattr(basis_router, "_warm_basis_live", lambda: _async_return(None))
     monkeypatch.setattr(groups_router, "_warm_groups_live", lambda group_type: _async_return(None))
     monkeypatch.setattr(markets, "_warm_futures_flow_live", lambda: _async_return(FUTURES_PAYLOAD))
-    monkeypatch.setattr(intraday_snapshot, "record_flow_snapshot", lambda payload: recorded.append(payload))
+
+    async def _fake_record_flow(session, payload):
+        recorded.append(payload)
+
+    monkeypatch.setattr(intraday_snapshot, "record_flow_snapshot", _fake_record_flow)
 
     await live_refresh._run_live_refresh()
 
@@ -72,9 +81,11 @@ async def test_run_live_refresh_feeds_futures_flow_payload_into_recorder(monkeyp
     monkeypatch.setattr(basis_router, "_warm_basis_live", lambda: _async_return(None))
     monkeypatch.setattr(groups_router, "_warm_groups_live", lambda group_type: _async_return(None))
     monkeypatch.setattr(markets, "_warm_futures_flow_live", lambda: _async_return(FUTURES_PAYLOAD))
-    monkeypatch.setattr(
-        intraday_snapshot, "record_futures_flow_snapshot", lambda payload: recorded.append(payload)
-    )
+
+    async def _fake_record_futures(session, payload):
+        recorded.append(payload)
+
+    monkeypatch.setattr(intraday_snapshot, "record_futures_flow_snapshot", _fake_record_futures)
 
     await live_refresh._run_live_refresh()
 
@@ -96,7 +107,11 @@ async def test_run_live_refresh_feeds_breadth_payload_into_recorder(monkeypatch)
     monkeypatch.setattr(basis_router, "_warm_basis_live", lambda: _async_return(None))
     monkeypatch.setattr(groups_router, "_warm_groups_live", lambda group_type: _async_return(None))
     monkeypatch.setattr(markets, "_warm_futures_flow_live", lambda: _async_return(FUTURES_PAYLOAD))
-    monkeypatch.setattr(intraday_snapshot, "record_breadth_snapshot", lambda payload: recorded.append(payload))
+
+    async def _fake_record_breadth(session, payload):
+        recorded.append(payload)
+
+    monkeypatch.setattr(intraday_snapshot, "record_breadth_snapshot", _fake_record_breadth)
 
     await live_refresh._run_live_refresh()
 

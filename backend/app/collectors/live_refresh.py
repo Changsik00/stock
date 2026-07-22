@@ -34,10 +34,12 @@
    발견했다. 지금 이 셋을 실제로 60초 잡으로 옮기고 각 TTL도 60초로 맞춘다.
 
 `collectors/intraday_snapshot.py`는 위 두 잡이 이미 끝낸 fetch 결과를 그대로
-받아 메모리 리스트에 적립만 하는 순수 저장소다 — "오늘 장중 수급 추이" 1D
-차트(PLAN.md §5.4-3/4, `GET /api/markets/flow/intraday-accumulated` 및
+받아 ``intraday_sample`` 테이블에 INSERT만 하는 저장소다(PLAN.md §5.14, 2026-07-22
+DB 영속화 — 예전엔 순수 메모리 리스트였으나 재배포마다 소실되는 §5.6 사고 원인이라
+DB로 옮겼다) — "오늘 장중 수급 추이" 1D 차트(PLAN.md §5.4-3/4, `GET
+/api/markets/flow/intraday-accumulated` 및
 `GET /api/markets/foreign-position/intraday-accumulated`)의 데이터 소스가
-된다. 이 스케줄러가 없으면(``ENABLE_LIVE_REFRESH`` 꺼짐) 그 버퍼도 전혀
+된다. 이 스케줄러가 없으면(``ENABLE_LIVE_REFRESH`` 꺼짐) 그 적립도 전혀
 쌓이지 않는다 — 라우트 핸들러 쪽 온디맨드 호출은 warm 함수만 부르고
 intraday_snapshot 기록은 하지 않으므로(routers/markets.py 참고), 1D 누적은
 전적으로 이 스케줄러가 살아있어야 동작하는 기능이다.
@@ -132,21 +134,24 @@ async def _run_live_refresh() -> None:
             # 같은 세션 블록 안으로 옮겼다(예전엔 세션 없이 별도로 호출했다).
             try:
                 breadth_payload = await markets._warm_breadth_live(session)
-                # 2026-07-22(PLAN.md §5.13): 방금 fetch한 값을 그대로 장중 등락비율
-                # 누적 스냅샷 버퍼에 적립한다 — 새 외부 호출 없음(flow와 동일한 패턴,
-                # 같은 try 블록 안에 둬서 적립 실패가 breadth 워밍 자체의 성공을
-                # 되돌리지 않는다).
-                intraday_snapshot.record_breadth_snapshot(breadth_payload)
+                # 2026-07-22(PLAN.md §5.13, §5.14): 방금 fetch한 값을 그대로 장중
+                # 등락비율 누적 스냅샷에 적립한다 — 새 외부 호출 없음(flow와 동일한
+                # 패턴, 같은 try 블록 안에 둬서 적립 실패가 breadth 워밍 자체의 성공을
+                # 되돌리지 않는다). §5.14부터 DB 영속화라 세션을 넘긴다(즉시 자체
+                # commit — intraday_snapshot.py 모듈 docstring 참고, 이 세션 블록의
+                # 다른 warm 호출들과 커밋 경계가 섞이지 않는다).
+                await intraday_snapshot.record_breadth_snapshot(session, breadth_payload)
             except Exception as e:  # noqa: BLE001 - 한 캐시 실패가 나머지 워밍을 막지 않도록
                 logger.warning("live-refresh: breadth 워밍/스냅샷 적립 실패: %s", e)
 
             try:
                 flow_payload = await markets._warm_flow_live(session)
-                # 2026-07-21(PLAN.md §5.4-2): 방금 fetch한 값을 그대로 장중 누적
-                # 스냅샷 버퍼에 적립한다 — 새 외부 호출 없음. 같은 try 블록 안에 둬서
-                # 적립 실패가 flow 워밍 자체의 성공을 되돌리지 않는다(이미 캐시에는
-                # 반영된 뒤이므로 여기서 예외가 나도 무해하게 로깅만 하면 된다).
-                intraday_snapshot.record_flow_snapshot(flow_payload)
+                # 2026-07-21(PLAN.md §5.4-2), 2026-07-22(§5.14 DB 영속화): 방금
+                # fetch한 값을 그대로 장중 누적 스냅샷에 적립한다 — 새 외부 호출 없음.
+                # 같은 try 블록 안에 둬서 적립 실패가 flow 워밍 자체의 성공을 되돌리지
+                # 않는다(이미 캐시에는 반영된 뒤이므로 여기서 예외가 나도 무해하게
+                # 로깅만 하면 된다).
+                await intraday_snapshot.record_flow_snapshot(session, flow_payload)
             except Exception as e:  # noqa: BLE001
                 logger.warning("live-refresh: flow 워밍/스냅샷 적립 실패: %s", e)
 
@@ -180,7 +185,13 @@ async def _run_live_refresh() -> None:
 
         try:
             futures_flow_payload = await markets._warm_futures_flow_live()
-            intraday_snapshot.record_futures_flow_snapshot(futures_flow_payload)
+            # §5.14 DB 영속화 — 이 warm 호출 자체는 세션이 필요 없지만(위 주석
+            # 참고), 적립은 이제 DB에 쓰므로 여기서 새로 세션을 연다. warm 함수
+            # 성공 이후에만 세션을 여는 게 낭비처럼 보일 수 있지만, futures-flow는
+            # 7분이 아니라 이 60초 잡 안에서 이미 한 번 도는 잡이라(§5.6 회귀 수정)
+            # 매 분 호출 비용이 크지 않다.
+            async with async_session_factory() as futures_session:
+                await intraday_snapshot.record_futures_flow_snapshot(futures_session, futures_flow_payload)
         except Exception as e:  # noqa: BLE001
             logger.warning("live-refresh: futures-flow 워밍/스냅샷 적립 실패: %s", e)
 

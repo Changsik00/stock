@@ -19,6 +19,7 @@ def register_all() -> None:
     from . import flow_rank as _flow_rank_collector  # noqa: F401
     from . import futures_flow as _futures_flow_collector  # noqa: F401
     from . import group_snapshot as _group_snapshot_collector  # noqa: F401
+    from . import intraday_compaction as _intraday_compaction_collector  # noqa: F401
     from . import macro as _macro_collector  # noqa: F401
     from . import market_flow as _market_flow_collector  # noqa: F401
     from . import ohlcv as _ohlcv_collector  # noqa: F401

@@ -771,73 +771,82 @@ async def market_fx_live(session: AsyncSession = Depends(get_session)):
 
 
 @router.get("/api/markets/flow/intraday-accumulated")
-async def flow_intraday_accumulated():
-    """오늘 장중 개인·외국인·기관계 순매수 누적 스냅샷 시계열(PLAN.md §5.4-2/3).
+async def flow_intraday_accumulated(
+    days: int = Query(1, ge=1, le=30),
+    session: AsyncSession = Depends(get_session),
+):
+    """장중 개인·외국인·기관계 순매수 누적 스냅샷 시계열(PLAN.md §5.4-2/3, §5.14).
 
     새로 소스를 호출하지 않는다 — `collectors/live_refresh.py`의 60초 잡이
     `_warm_flow_live`를 호출할 때마다 그 반환값을 `collectors.intraday_snapshot.
-    record_flow_snapshot`에 넘겨 이미 메모리 버퍼에 적립해 둔 것을 그대로
-    읽어서 반환할 뿐이다(이 엔드포인트 자체는 키움/네이버를 전혀 두드리지
-    않고, DB 세션도 필요 없다). ka10051에는 분단위 이력이 없어 "3M"(EOD
-    히스토리, `GET /api/markets/flow/history` 계열)과 별개로 "1D"(오늘 장중
-    누적)를 자체 생성하는 절충안이다(모듈 상단 collectors/intraday_snapshot.py
-    docstring 참고).
+    record_flow_snapshot`에 넘겨 이미 ``intraday_sample`` 테이블에 적립해 둔
+    것을 그대로 읽어서 반환할 뿐이다(이 엔드포인트 자체는 키움/네이버를 전혀
+    두드리지 않는다). ka10051에는 분단위 이력이 없어 "3M"(EOD 히스토리, `GET
+    /api/markets/flow/history` 계열)과 별개로 "1D"(장중 누적)를 자체 생성하는
+    절충안이다(모듈 상단 collectors/intraday_snapshot.py docstring 참고).
 
-    자정이 지나 오늘 KST 날짜가 바뀌면(다음 거래일 첫 워밍 시점에) 버퍼가
-    비워지고 새로 쌓인다(자정 즉시가 아니라 "다음 append 때 지연 리셋" —
-    intraday_snapshot.py 모듈 docstring 참고). 스케줄러가 꺼져 있거나(
-    ``ENABLE_LIVE_REFRESH`` 미설정) 앱이 막 기동해 아직 한 번도 워밍이 안
-    됐으면 각 시리즈가 빈 리스트로 온다 — 프런트는 이를 "적립 중" 상태로
-    표시한다.
+    ``days``(기본 1=오늘만, 최대 30)로 과거 구간까지 조회할 수 있다(§5.14 —
+    DB 영속화 이전에는 재배포마다 그날 적립분이 사라져 과거 조회 자체가
+    불가능했다). 최근 7일은 60초 원본, 8일 전부터는 15분 단위로 압축된 값이
+    섞여 나온다(collectors/intraday_compaction.py 배치, 해상도가 달라도 값은
+    그대로 표시). 스케줄러가 꺼져 있거나(``ENABLE_LIVE_REFRESH`` 미설정) 앱이
+    막 기동해 아직 한 번도 워밍이 안 됐으면 각 시리즈가 빈 리스트로 온다 —
+    프런트는 이를 "적립 중" 상태로 표시한다.
 
     Returns ``{"date": "YYYY-MM-DD", "series": {"kospi": {"개인": [...],
     "외국인": [...], "기관계": [...]}, "kosdaq": {...}}, "market_closed": bool}``
-    (PLAN.md §5.10 — 코스피/코스닥 분리, 2026-07-22) — 각 시리즈 원소는
-    ``{"time": "HH:MM", "value": float}``(net_value, 백만원 단위 — 다른 flow
-    엔드포인트와 동일한 단위, 프런트에서 억원 변환). 코스피+코스닥 "합계"는
-    백엔드가 미리 계산해 얹지 않는다 — 프런트가 필요하면 그때그때 두 시장을
-    더한다. ``market_closed``는 저장된 값이 아니라 호출 시점 기준으로 새로
-    계산한다.
+    (PLAN.md §5.10 — 코스피/코스닥 분리) — 각 시리즈 원소는 ``{"time": "HH:MM",
+    "value": float}``(``days>1``이면 ``"MM/DD HH:MM"``, net_value, 백만원 단위 —
+    다른 flow 엔드포인트와 동일한 단위, 프런트에서 억원 변환). 코스피+코스닥
+    "합계"는 백엔드가 미리 계산해 얹지 않는다. ``market_closed``는 저장된 값이
+    아니라 호출 시점 기준으로 새로 계산한다.
     """
-    return intraday_snapshot.get_flow_series()
+    return await intraday_snapshot.get_flow_series(session, days)
 
 
 @router.get("/api/markets/foreign-position/intraday-accumulated")
-async def foreign_position_intraday_accumulated():
-    """오늘 외인 현물·선물 순매수 누적 스냅샷 시계열(PLAN.md §5.4-2/3).
+async def foreign_position_intraday_accumulated(
+    days: int = Query(1, ge=1, le=30),
+    session: AsyncSession = Depends(get_session),
+):
+    """장중 외인 현물·선물 순매수 누적 스냅샷 시계열(PLAN.md §5.4-2/3, §5.14).
 
     "외인 양손" 상세 모달의 1D 탭 전용 — `flow_intraday_accumulated`와 같은
-    버퍼를 공유한다(현물 쪽은 kospi/kosdaq 버퍼의 "외국인" 시리즈를 시간 키로
-    매칭해 합산한 값 — §5.10로 두 시장 버퍼가 분리된 뒤에도 이 모달은 회귀
+    테이블을 공유한다(현물 쪽은 ``flow_kospi_외국인``/``flow_kosdaq_외국인``을
+    시간 키로 매칭해 합산한 값 — §5.10로 두 시장이 분리된 뒤에도 이 모달은 회귀
     없이 코스피+코스닥 합산 그대로 유지된다, collectors/intraday_snapshot.py
-    `_merge_foreign_spot_series` 참고). 선물 쪽("외인선물")은
-    `_run_live_refresh_extra`(7분 잡)가 `_warm_futures_flow_live` 반환값을
-    적립한 것이라 현물(60초 틱)과 실제 갱신 간격이 다르다 — 억지로 맞추지
-    않는다(collectors/intraday_snapshot.py 모듈 docstring 참고). 이 엔드포인트도
-    새 외부 호출이 전혀 없다.
+    `get_foreign_position_series` 참고). 선물 쪽("외인선물")은
+    `_run_live_refresh`(60초 잡, §5.6 회귀 수정으로 이 잡에 합류)가
+    `_warm_futures_flow_live` 반환값을 적립한 것이라 현물과 실제 갱신 간격이
+    미묘하게 다를 수 있다 — 억지로 맞추지 않는다. 이 엔드포인트도 새 외부
+    호출이 전혀 없다.
+
+    ``days``(기본 1, 최대 30) — 위 flow_intraday_accumulated와 동일한 의미.
 
     Returns ``{"date": "YYYY-MM-DD", "spot": [...], "futures": [...],
     "market_closed": bool}`` — ``spot``/``futures`` 원소는 각각
-    ``{"time": "HH:MM", "value": float}``(net_value, 백만원 단위).
+    ``{"time": "HH:MM"|"MM/DD HH:MM", "value": float}``(net_value, 백만원 단위).
     """
-    return intraday_snapshot.get_foreign_position_series()
+    return await intraday_snapshot.get_foreign_position_series(session, days)
 
 
 @router.get("/api/markets/breadth/intraday-accumulated")
-async def breadth_intraday_accumulated():
-    """오늘 장중 등락비율(상승 대 하락 비율, %) 누적 스냅샷 시계열(PLAN.md §5.13).
+async def breadth_intraday_accumulated(
+    days: int = Query(1, ge=1, le=30),
+    session: AsyncSession = Depends(get_session),
+):
+    """장중 등락비율(상승 대 하락 비율, %) 누적 스냅샷 시계열(PLAN.md §5.13, §5.14).
 
     "등락 종목수" 타일은 순간 스냅샷(현재 상승/하락 개수)만 보여줘 시간 흐름을
     놓친다는 사용자 지적으로 추가됐다 — `flow_intraday_accumulated`와 완전히
     같은 패턴이다: 새로 소스를 호출하지 않고, `collectors/live_refresh.py`의
     60초 잡이 `_warm_breadth_live`를 호출할 때마다 그 반환값을
-    `collectors.intraday_snapshot.record_breadth_snapshot`에 넘겨 이미 메모리
-    버퍼에 적립해 둔 것을 그대로 읽어서 반환할 뿐이다(이 엔드포인트 자체는
-    키움/네이버를 전혀 두드리지 않고, DB 세션도 필요 없다).
+    `collectors.intraday_snapshot.record_breadth_snapshot`에 넘겨 이미
+    ``intraday_sample`` 테이블에 적립해 둔 것을 그대로 읽어서 반환할 뿐이다.
 
-    자정이 지나 오늘 KST 날짜가 바뀌면(다음 거래일 첫 워밍 시점에) 버퍼가
-    비워지고 새로 쌓인다. 스케줄러가 꺼져 있거나 앱이 막 기동해 아직 한 번도
-    워밍이 안 됐으면 빈 리스트로 온다 — 프런트는 이를 "적립 중" 상태로 표시한다.
+    ``days``(기본 1, 최대 30) — 위 flow_intraday_accumulated와 동일한 의미
+    (과거 조회, 7일 초과 시 15분 압축본 포함). 스케줄러가 꺼져 있거나 앱이 막
+    기동해 아직 한 번도 워밍이 안 됐으면 빈 리스트로 온다.
 
     Returns ``{"date": "YYYY-MM-DD", "series": [{"time": "HH:MM", "value": float}, ...],
     "market_closed": bool}`` — ``value``는 상승비율(%, 0~100), 코스피+코스닥
@@ -845,7 +854,7 @@ async def breadth_intraday_accumulated():
     기준선). ``market_closed``는 저장된 값이 아니라 호출 시점 기준으로 새로
     계산한다.
     """
-    return intraday_snapshot.get_breadth_series()
+    return await intraday_snapshot.get_breadth_series(session, days)
 
 
 # GET /api/markets/{market}/intraday — 지수 분봉(PLAN.md §5.1). kospi/kosdaq은

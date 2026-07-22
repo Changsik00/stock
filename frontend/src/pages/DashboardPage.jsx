@@ -128,6 +128,17 @@ const FLOW_MARKET_FILTER_OPTIONS = [
   { key: 'kospi', label: '코스피' },
   { key: 'kosdaq', label: '코스닥' },
 ]
+// 1D 탭 기간 선택(PLAN.md §5.14, 2026-07-22) — intraday-accumulated가 순수
+// 메모리 버퍼에서 DB(intraday_sample) 영속화로 바뀌면서 재배포에도 데이터가
+// 남고 과거 조회도 가능해졌다. FlowSummaryModal/ForeignPositionModal/
+// BreadthModal의 1D 탭이 모두 공유하는 토글 — 최근 7일은 60초 원본, 8일 전부터는
+// 15분 압축본이 섞여 나온다(collectors/intraday_compaction.py 배치). 기본값은
+// 지금까지의 동작과 동일한 1일.
+const INTRADAY_DAYS_OPTIONS = [
+  { key: 1, label: '1일' },
+  { key: 7, label: '7일' },
+  { key: 30, label: '30일' },
+]
 // 프로그램매매 차익 순매수(macro_series prog_arb_*, PLAN.md §4.5-4) — 코스피+코스닥
 // 합산해서 "프로그램 차익 순매수" 타일 하나로 보여준다(신용융자 타일의 creditLoanSum과
 // 동일한 관례).
@@ -566,6 +577,7 @@ function BreadthModal() {
   const [intraday, setIntraday] = useState(null)
   const [intradayLoading, setIntradayLoading] = useState(false)
   const [intradayError, setIntradayError] = useState(null)
+  const [intradayDays, setIntradayDays] = useState(1)
 
   useEffect(() => {
     if (chartMode !== 'live') return undefined
@@ -643,7 +655,7 @@ function BreadthModal() {
     let cancelled = false
     setIntradayLoading(true)
     setIntradayError(null)
-    fetchBreadthIntradayAccumulated()
+    fetchBreadthIntradayAccumulated(intradayDays)
       .then((body) => {
         if (!cancelled) setIntraday(body)
       })
@@ -656,7 +668,7 @@ function BreadthModal() {
     return () => {
       cancelled = true
     }
-  }, [chartMode])
+  }, [chartMode, intradayDays])
 
   return (
     <div>
@@ -695,6 +707,18 @@ function BreadthModal() {
 
       {chartMode === '1D' && (
         <>
+          <div className="toggle-row">
+            {INTRADAY_DAYS_OPTIONS.map((opt) => (
+              <button
+                key={opt.key}
+                type="button"
+                className={`toggle-chip ${intradayDays === opt.key ? 'active' : ''}`}
+                onClick={() => setIntradayDays(opt.key)}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
           {intradayLoading && !intraday && <div className="state">불러오는 중…</div>}
           {intradayError && <div className="state error">{intradayError}</div>}
           {!intradayError && intraday && <BreadthRatioChart series={intraday.series} />}
@@ -813,6 +837,7 @@ function FlowSummaryModal() {
   const [intraday, setIntraday] = useState(null)
   const [intradayLoading, setIntradayLoading] = useState(false)
   const [intradayError, setIntradayError] = useState(null)
+  const [intradayDays, setIntradayDays] = useState(1)
 
   useEffect(() => {
     if (chartMode !== '3M') return undefined
@@ -843,7 +868,7 @@ function FlowSummaryModal() {
     let cancelled = false
     setIntradayLoading(true)
     setIntradayError(null)
-    fetchFlowIntradayAccumulated()
+    fetchFlowIntradayAccumulated(intradayDays)
       .then((body) => {
         if (!cancelled) setIntraday(body)
       })
@@ -856,7 +881,7 @@ function FlowSummaryModal() {
     return () => {
       cancelled = true
     }
-  }, [chartMode])
+  }, [chartMode, intradayDays])
 
   // marketFilter에 따라 3M flows를 합계/코스피/코스닥으로 분기(PLAN.md §5.10) —
   // 'all'은 지금까지와 동일한 mergeFlows, 나머지는 fetch해 둔 원본을 그대로 쓴다.
@@ -937,6 +962,18 @@ function FlowSummaryModal() {
 
       {chartMode === '1D' && (
         <>
+          <div className="toggle-row">
+            {INTRADAY_DAYS_OPTIONS.map((opt) => (
+              <button
+                key={opt.key}
+                type="button"
+                className={`toggle-chip ${intradayDays === opt.key ? 'active' : ''}`}
+                onClick={() => setIntradayDays(opt.key)}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
           {intradayLoading && !intraday && <div className="state">불러오는 중…</div>}
           {intradayError && <div className="state error">{intradayError}</div>}
           {!intradayError && intraday && <IntradayFlowChart series={intradaySeries} />}
@@ -960,6 +997,7 @@ function ForeignPositionModal() {
   const [intraday, setIntraday] = useState(null)
   const [intradayLoading, setIntradayLoading] = useState(false)
   const [intradayError, setIntradayError] = useState(null)
+  const [intradayDays, setIntradayDays] = useState(1)
 
   useEffect(() => {
     if (chartMode !== '3M') return undefined
@@ -1000,13 +1038,13 @@ function ForeignPositionModal() {
     }
   }, [chartMode, days])
 
-  // 1D(오늘 장중 누적) — PLAN.md §5.4-3/4, FlowSummaryModal과 동일한 패턴.
+  // 1D(장중 누적) — PLAN.md §5.4-3/4, FlowSummaryModal과 동일한 패턴.
   useEffect(() => {
     if (STATIC_DATA || chartMode !== '1D') return undefined
     let cancelled = false
     setIntradayLoading(true)
     setIntradayError(null)
-    fetchForeignPositionIntradayAccumulated()
+    fetchForeignPositionIntradayAccumulated(intradayDays)
       .then((body) => {
         if (!cancelled) setIntraday(body)
       })
@@ -1019,7 +1057,7 @@ function ForeignPositionModal() {
     return () => {
       cancelled = true
     }
-  }, [chartMode])
+  }, [chartMode, intradayDays])
 
   // net_value는 백만원 단위 — ForeignPositionChart.jsx가 이미 하던 /100 변환과
   // 동일하게 억원으로 바꿔서 IntradayFlowChart에 넘긴다. 키를 "외국인"(현물)/
@@ -1068,6 +1106,18 @@ function ForeignPositionModal() {
 
       {chartMode === '1D' && (
         <>
+          <div className="toggle-row">
+            {INTRADAY_DAYS_OPTIONS.map((opt) => (
+              <button
+                key={opt.key}
+                type="button"
+                className={`toggle-chip ${intradayDays === opt.key ? 'active' : ''}`}
+                onClick={() => setIntradayDays(opt.key)}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
           {intradayLoading && !intraday && <div className="state">불러오는 중…</div>}
           {intradayError && <div className="state error">{intradayError}</div>}
           {!intradayError && intraday && <IntradayFlowChart series={intradaySeries} />}

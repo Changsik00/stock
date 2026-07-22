@@ -270,37 +270,43 @@ export async function fetchFxLive() {
   return getJson('/api/markets/fx/live')
 }
 
-// GET /api/markets/flow/intraday-accumulated -> { date, series: { kospi: {개인,
-// 외국인, 기관계: [{time: "HH:MM", value}]}, kosdaq: {...} }, market_closed }
+// GET /api/markets/flow/intraday-accumulated?days=N -> { date, series: { kospi: {개인,
+// 외국인, 기관계: [{time: "HH:MM"|"MM/DD HH:MM", value}]}, kosdaq: {...} }, market_closed }
 // (PLAN.md §5.4-2/3, §5.10 — 2026-07-22부터 kospi/kosdaq이 분리돼 응답 온다,
 // 예전엔 series가 바로 투자자 3종이었다) — 새 외부 호출 없이 서버가 이미 60초마다
-// flow/live를 워밍하는 김에 그 결과를 그날 메모리 버퍼에 적립해 둔 "오늘 장중 누적"
+// flow/live를 워밍하는 김에 그 결과를 DB(intraday_sample)에 적립해 둔 "장중 누적"
 // 시계열. 투자자별 수급 요약 모달의 1D 탭 전용, 코스피+코스닥 "합계"는 프런트가
 // 필요할 때 두 시장을 더한다(DashboardPage.jsx FlowSummaryModal 참고). 로컬 전용
 // 기능(flowLive와 동일한 이유 — "오늘 장중" 자체가 정적 스냅샷으로 남길 개념이
 // 아니다), STATIC_DATA 대상 아님.
-export async function fetchFlowIntradayAccumulated() {
-  return getJson('/api/markets/flow/intraday-accumulated')
+// §5.14(2026-07-22, DB 영속화 + 다운샘플링) — 이제 재배포에도 데이터가 사라지지
+// 않고, `days`(기본 1=오늘만, 최대 30)로 과거 구간까지 조회할 수 있다. 최근 7일은
+// 60초 원본, 8일 전부터는 15분 압축본이 섞여 나오는데(백엔드 배치가 매일 압축),
+// 이때는 각 포인트의 time이 "MM/DD HH:MM"로 온다(날짜 구분 필요 — days=1이면
+// 지금까지처럼 "HH:MM"만).
+export async function fetchFlowIntradayAccumulated(days = 1) {
+  return getJson(`/api/markets/flow/intraday-accumulated?days=${days}`)
 }
 
-// GET /api/markets/foreign-position/intraday-accumulated -> { date, spot: [{time,
+// GET /api/markets/foreign-position/intraday-accumulated?days=N -> { date, spot: [{time,
 // value}], futures: [{time, value}], market_closed } (PLAN.md §5.4-2/3) — 외인
 // 현물(flow/live의 "외국인" 시리즈 재사용)·선물(futures-flow/live, 7분 틱) 순매수
-// 오늘 장중 누적. 외인 양손 상세 모달의 1D 탭 전용. 로컬 전용 기능, STATIC_DATA
-// 대상 아님(위 fetchFlowIntradayAccumulated와 동일한 이유).
-export async function fetchForeignPositionIntradayAccumulated() {
-  return getJson('/api/markets/foreign-position/intraday-accumulated')
+// 장중 누적. 외인 양손 상세 모달의 1D 탭 전용. 로컬 전용 기능, STATIC_DATA
+// 대상 아님(위 fetchFlowIntradayAccumulated와 동일한 이유). §5.14 — `days` 파라미터
+// 의미는 위 fetchFlowIntradayAccumulated와 동일(기본 1, 최대 30).
+export async function fetchForeignPositionIntradayAccumulated(days = 1) {
+  return getJson(`/api/markets/foreign-position/intraday-accumulated?days=${days}`)
 }
 
-// GET /api/markets/breadth/intraday-accumulated -> { date, series: [{time, value}],
+// GET /api/markets/breadth/intraday-accumulated?days=N -> { date, series: [{time, value}],
 // market_closed } (PLAN.md §5.13 — 등락 종목수 1D 상승비율 추이) — 새 외부 호출 없이
 // 서버가 이미 60초마다 breadth/live를 워밍하는 김에 그 결과(코스피+코스닥 상승/하락
-// 종목수)로 상승비율(%, 보합 제외)을 계산해 그날 메모리 버퍼에 적립해 둔 "오늘 장중
+// 종목수)로 상승비율(%, 보합 제외)을 계산해 DB(intraday_sample)에 적립해 둔 "장중
 // 누적" 시계열. 단일 시리즈(flow처럼 투자자/시장별 중첩 없음). "등락 종목수" 상세
 // 모달(BreadthModal)의 1D 탭 전용. 로컬 전용 기능(위 두 intraday-accumulated와 동일한
-// 이유), STATIC_DATA 대상 아님.
-export async function fetchBreadthIntradayAccumulated() {
-  return getJson('/api/markets/breadth/intraday-accumulated')
+// 이유), STATIC_DATA 대상 아님. §5.14 — `days` 파라미터 의미는 위와 동일.
+export async function fetchBreadthIntradayAccumulated(days = 1) {
+  return getJson(`/api/markets/breadth/intraday-accumulated?days=${days}`)
 }
 
 // GET /api/markets/basis?days=N -> { days, series: [{date, futures_close, kospi200_close,

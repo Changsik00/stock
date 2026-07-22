@@ -1288,10 +1288,10 @@ Prometheus/Grafana도 최근 데이터는 원본, 오래된 건 시간당 평균
 
 | # | 작업 | 내용 | 완료 기준 |
 |---|---|---|---|
-| 5.14-1 | DB 스키마 | `intraday_sample` 모델 + 마이그레이션 | 테이블 생성 확인 |
-| 5.14-2 | 기록/조회 재작성 | 세 record_*/get_*가 메모리 대신 DB 사용 | 재배포해도 오늘치 데이터 안 사라짐(핵심 검증) |
-| 5.14-3 | 다운샘플링 배치 | 7일 지난 원본을 15분 단위로 압축 | 배치 실행 후 오래된 원본 삭제 + 압축본 존재 확인 |
-| 5.14-4 | API + 프런트 기간 선택 | `days` 파라미터, 3개 모달에 기간 선택 UI | 7일/30일 선택 시 과거 데이터 표시 |
+| 5.14-1 ✅ | DB 스키마 | `intraday_sample` 모델(models.py) + 마이그레이션(`a22f6b66dffe_intraday_sample_table.py`) | 테이블 생성 확인 — **완료(2026-07-22)**, `\d intraday_sample`로 PK(series_key, time) 확인 |
+| 5.14-2 ✅ | 기록/조회 재작성 | 세 record_*/get_*가 메모리 대신 DB 사용(collectors/intraday_snapshot.py 전면 재작성, live_refresh.py 세션 배선) | 재배포해도 오늘치 데이터 안 사라짐(핵심 검증) — **완료(2026-07-22)**, `docker compose restart backend` 전후로 `GET .../intraday-accumulated` 응답이 동일함을 실측 확인 |
+| 5.14-3 ✅ | 다운샘플링 배치 | 7일 지난 원본을 15분 단위로 압축(collectors/intraday_compaction.py 신규, REGISTRY 등록) | 배치 실행 후 오래된 원본 삭제 + 압축본 존재 확인 — **완료(2026-07-22)**, `/api/admin/collect/intraday_compaction` 실행으로 4행(60초틱)→2행(15분 평균) 압축 + 원본 삭제 + 재실행 시 멱등(0행) 확인 |
+| 5.14-4 ✅ | API + 프런트 기간 선택 | `days` 파라미터(routers/markets.py), 3개 모달(FlowSummaryModal/ForeignPositionModal/BreadthModal)에 1일/7일/30일 토글칩 | 7일/30일 선택 시 과거 데이터 표시 — **완료(2026-07-22)**, Playwright로 세 모달 모두 토글 클릭 시 재조회 + "MM/DD HH:MM" 포맷 렌더 확인 |
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
