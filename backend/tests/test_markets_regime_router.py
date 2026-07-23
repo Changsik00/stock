@@ -79,9 +79,10 @@ def _all_buckets(filled: dict[str, dict]) -> list[dict]:
 
 def _patch_backtest(monkeypatch, *, streaks: dict[tuple[str, str], int], buckets: dict[tuple[str, str], list[dict]]):
     """(market, investor) -> confirmed_streak / bucket 리스트를 그대로 돌려주는
-    가짜 regime_backtest 함수로 교체한다. compute_baseline은 이 라우터 테스트의
-    관심사가 아니라(판정에 안 쓰임, 응답에 참고용으로만 실림) 고정값 하나로
-    충분하다. 호출 인자를 calls 리스트에 기록해 캐싱 테스트에서 재사용한다."""
+    가짜 regime_backtest 함수로 교체한다. compute_baseline/compute_activity_baseline은
+    이 라우터 테스트의 관심사가 아니라(판정에 안 쓰임, 응답에 참고용으로만 실림)
+    고정값 하나로 충분하다(실제 계산 검증은 tests/test_regime_backtest.py 몫).
+    호출 인자를 calls 리스트에 기록해 캐싱 테스트에서 재사용한다."""
     calls: list[tuple[str, str, str]] = []
 
     async def fake_current_streak(session, market, investor):
@@ -96,9 +97,18 @@ def _patch_backtest(monkeypatch, *, streaks: dict[tuple[str, str], int], buckets
         calls.append(("baseline", market, ""))
         return {"n": 100, "avg_return_pct": 0.01, "positive_rate_pct": 50.0}
 
+    async def fake_activity_baseline(session, market):
+        calls.append(("activity_baseline", market, ""))
+        # PLAN.md §5.19 — 코스피/코스닥이 서로 다른 고정값을 갖게 해, 응답에서
+        # 시장별로 올바른 값이 매핑되는지(뒤섞이지 않는지) 구분할 수 있게 한다.
+        return {"kospi": {"n": 20, "avg_daily_activity": 1000.0}, "kosdaq": {"n": 20, "avg_daily_activity": 200.0}}[
+            market
+        ]
+
     monkeypatch.setattr(regime_backtest, "compute_current_streak", fake_current_streak)
     monkeypatch.setattr(regime_backtest, "compute_streak_buckets", fake_streak_buckets)
     monkeypatch.setattr(regime_backtest, "compute_baseline", fake_baseline)
+    monkeypatch.setattr(regime_backtest, "compute_activity_baseline", fake_activity_baseline)
     return calls
 
 
@@ -149,6 +159,11 @@ async def test_kosdaq_foreign_buy_streak_yields_kosdaq_advantage(monkeypatch):
         for investor in ("외국인", "기관계"):
             assert "acceleration" in body[market][investor]
             assert body[market][investor]["acceleration"] is None
+
+    # PLAN.md §5.19 — 쏠림 비율 시총 편향 보정용 activity_baseline이 kospi/kosdaq
+    # 각각에 실려야 하고, 시장별로 서로 다른 고정값이 뒤섞이지 않아야 한다.
+    assert body["kospi"]["activity_baseline"] == {"n": 20, "avg_daily_activity": 1000.0}
+    assert body["kosdaq"]["activity_baseline"] == {"n": 20, "avg_daily_activity": 200.0}
 
 
 async def test_kospi_streak_never_yields_kospi_advantage_even_when_bullish(monkeypatch):

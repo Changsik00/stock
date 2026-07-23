@@ -936,8 +936,14 @@ async def _warm_regime(session: AsyncSession) -> dict:
 
         combos: dict[str, dict[str, dict]] = {}
         baselines: dict[str, dict] = {}
+        activity_baselines: dict[str, dict] = {}
         for market in REGIME_MARKETS:
             baselines[market] = await regime_backtest.compute_baseline(session, market)
+            # PLAN.md §5.19 — §5.18 쏠림 비율 지표의 시총 편향을 보정하려면 각
+            # 시장의 "평소 활동량"이 필요하다. 이미 이 루프가 시장별로 1분 TTL
+            # 캐시를 도는 중이니 같이 계산해 얹는다(중복 계산 방지, 프런트는 이미
+            # 폴링 중인 regime 응답을 그대로 재사용).
+            activity_baselines[market] = await regime_backtest.compute_activity_baseline(session, market)
             market_flow_live = flow_live_payload.get(market)
             combos[market] = {}
             for investor in REGIME_INVESTORS:
@@ -950,8 +956,8 @@ async def _warm_regime(session: AsyncSession) -> dict:
             "reason": reason,
             "reliable_signal": "kosdaq_foreign",
             "market_closed": market_closed,
-            "kospi": {**combos["kospi"], "baseline": baselines["kospi"]},
-            "kosdaq": {**combos["kosdaq"], "baseline": baselines["kosdaq"]},
+            "kospi": {**combos["kospi"], "baseline": baselines["kospi"], "activity_baseline": activity_baselines["kospi"]},
+            "kosdaq": {**combos["kosdaq"], "baseline": baselines["kosdaq"], "activity_baseline": activity_baselines["kosdaq"]},
             "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         }
         _regime_cache["data"] = payload
@@ -973,11 +979,18 @@ async def markets_regime(session: AsyncSession = Depends(get_session)):
 
     Returns ``{"regime": "코스닥우세"|"중립", "reason": str, "reliable_signal":
     "kosdaq_foreign", "market_closed": bool, "kospi": {"외국인": {...}, "기관계":
-    {...}, "baseline": {...}}, "kosdaq": {...}, "cached_at": iso8601}`` — 각
-    투자자 값은 ``{"streak", "confirmed_streak", "live_applied", "bucket",
-    "bucket_stats", "reliable", "acceleration"}``(``bucket_stats``는
-    ``{"bucket", "n", "avg_return_pct", "positive_rate_pct"}`` | None). "코스피우세"는
-    설계상 나오지 않는다(§5.15 원칙 — 코스피 신호가 약하다는 걸 감추지 않는다).
+    {...}, "baseline": {...}, "activity_baseline": {...}}, "kosdaq": {...},
+    "cached_at": iso8601}`` — 각 투자자 값은 ``{"streak", "confirmed_streak",
+    "live_applied", "bucket", "bucket_stats", "reliable", "acceleration"}``
+    (``bucket_stats``는 ``{"bucket", "n", "avg_return_pct", "positive_rate_pct"}``
+    | None). "코스피우세"는 설계상 나오지 않는다(§5.15 원칙 — 코스피 신호가
+    약하다는 걸 감추지 않는다).
+
+    ``activity_baseline``(PLAN.md §5.19)은 ``{"n", "avg_daily_activity"}`` —
+    최근 20거래일 (|외국인 순매수|+|기관계 순매수|) 일평균으로, §5.18 쏠림 비율의
+    시총 편향(코스피가 원래 더 커서 평범한 날에도 쏠림%가 90%대로 나오는 문제)을
+    보정하는 데 쓰인다. 프런트는 이 값으로 "오늘 활동량 / 평소 활동량"(배율)을
+    계산해 배율끼리 비교한다.
 
     ``acceleration``(PLAN.md §5.17)은 스트릭과 별개로 계산되는 실시간 반응성
     지표 — ``intraday_sample`` 60초 틱에서 지금/30분전/60분전 순매수 누적치의
@@ -1081,28 +1094,43 @@ async def flow_concentration_intraday_accumulated(
     days: int = Query(1, ge=1, le=30),
     session: AsyncSession = Depends(get_session),
 ):
-    """장중 코스피/코스닥 "쏠림 비율" 누적 스냅샷 시계열(PLAN.md §5.18).
+    """장중 코스피/코스닥 "쏠림 비율" 누적 스냅샷 시계열(PLAN.md §5.18, 시총 편향
+    보정은 §5.19).
 
     사용자 관찰: "외인, 기관이 적극적으로 매수를 해야 코스피, 코스닥이 오르는거
     같아.. 코스피로 쏠리는지 코스닥으로 쏠리는지도 알아야 해" + "이게 추이 분석으로
-    가야해.. 순간 수치만 보여주면 안 된다". `flow_intraday_accumulated`/
-    `breadth_intraday_accumulated`와 완전히 같은 패턴 — 새로 소스를 호출하지 않고,
-    이미 60초 잡이 적립해 둔 ``flow_kospi_외국인``/``flow_kospi_기관계``/
-    ``flow_kosdaq_외국인``/``flow_kosdaq_기관계`` 4개 series_key를 시간매칭해 조회
-    시점에 쏠림%를 계산한다(collectors/intraday_snapshot.py
-    `get_market_concentration_series` 참고).
+    가야해.. 순간 수치만 보여주면 안 된다", 이후 "단순 쏠림 비교는 시총 차이가
+    너무 생겨서 코스피로만 발생할거야.. 쏠림 가중 차이를 알아야 해"(§5.19).
+    `flow_intraday_accumulated`/`breadth_intraday_accumulated`와 같은 패턴 —
+    새로 소스를 호출하지 않고, 이미 60초 잡이 적립해 둔 ``flow_kospi_외국인``/
+    ``flow_kospi_기관계``/``flow_kosdaq_외국인``/``flow_kosdaq_기관계`` 4개
+    series_key를 시간매칭해 조회 시점에 쏠림%를 계산한다(collectors/intraday_snapshot.py
+    `get_market_concentration_series` 참고). §5.19부터는 그 전에
+    `regime_backtest.compute_activity_baseline`로 코스피/코스닥 각각의 "평소
+    활동량"(최근 20거래일)을 구해 정규화 기준으로 넘긴다 — 절대 금액이 아니라
+    "오늘이 평소 대비 몇 배인지"로 정규화한 뒤 비교해, 코스피 시장 규모가
+    구조적으로 더 큰 데서 오는 편향(평범한 날에도 90%대 "쏠림"이 나오는 문제)을
+    없앤다.
 
     ``days``(기본 1, 최대 30) — 위 다른 intraday-accumulated 엔드포인트와 동일한
     의미(과거 조회, 7일 초과 시 15분 압축본 포함).
 
     Returns ``{"date": "YYYY-MM-DD", "series": [{"time": "HH:MM", "value": float}, ...],
-    "market_closed": bool}`` — ``value``는 쏠림%(0~100), 코스피 활동량 /
-    (코스피 활동량 + 코스닥 활동량) * 100(활동량 = |외국인 순매수| + |기관계
-    순매수|, 방향 무관 절댓값). 50%가 균등 분산 기준선, 100%=코스피 완전 쏠림,
-    0%=코스닥 완전 쏠림. ``market_closed``는 저장된 값이 아니라 호출 시점 기준으로
-    새로 계산한다.
+    "market_closed": bool}`` — ``value``는 가중쏠림%(0~100) = 코스피_배율 /
+    (코스피_배율 + 코스닥_배율) * 100, 배율 = 오늘_활동량 / 평소_활동량(활동량 =
+    |외국인 순매수| + |기관계 순매수|, 방향 무관 절댓값). 50%=양쪽 다 평소 대비
+    똑같이 늘거나 줄었다, 100%=코스피만 평소 대비 활발, 0%=코스닥만 평소 대비
+    활발. 베이스라인이 없으면(market_flow 데이터 전무) 그 시각은 건너뛴다.
+    ``market_closed``는 저장된 값이 아니라 호출 시점 기준으로 새로 계산한다.
     """
-    return await intraday_snapshot.get_market_concentration_series(session, days)
+    kospi_baseline = await regime_backtest.compute_activity_baseline(session, "kospi")
+    kosdaq_baseline = await regime_backtest.compute_activity_baseline(session, "kosdaq")
+    return await intraday_snapshot.get_market_concentration_series(
+        session,
+        days,
+        kospi_baseline=kospi_baseline["avg_daily_activity"],
+        kosdaq_baseline=kosdaq_baseline["avg_daily_activity"],
+    )
 
 
 # GET /api/markets/{market}/intraday — 지수 분봉(PLAN.md §5.1). kospi/kosdaq은

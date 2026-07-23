@@ -423,14 +423,14 @@ async def test_get_breadth_series_reflects_written_points(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# get_market_concentration_series (PLAN.md §5.18)
+# get_market_concentration_series (PLAN.md §5.18, 시총 편향 보정은 §5.19)
 # ---------------------------------------------------------------------------
 
 
 async def test_get_market_concentration_series_shape_when_empty(monkeypatch):
     monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
     async with async_session_factory() as session:
-        result = await snap.get_market_concentration_series(session, days=1)
+        result = await snap.get_market_concentration_series(session, days=1, kospi_baseline=100.0, kosdaq_baseline=50.0)
 
     assert result == {
         "date": TEST_DAY.isoformat(),
@@ -439,17 +439,23 @@ async def test_get_market_concentration_series_shape_when_empty(monkeypatch):
     }
 
 
-async def test_get_market_concentration_series_computes_ratio_from_fixed_values(monkeypatch):
+async def test_get_market_concentration_series_computes_normalized_ratio_from_baselines(monkeypatch):
     # _flow_payload 고정값: kospi 외국인=100/기관계=-50 -> 활동량 150,
-    # kosdaq 외국인=10/기관계=-5 -> 활동량 15. 쏠림% = 150/(150+15)*100.
+    # kosdaq 외국인=10/기관계=-5 -> 활동량 15(§5.18과 동일한 활동량 계산). §5.19부터는
+    # 이 절대값을 바로 비교하지 않고 baseline으로 나눠 배율로 정규화한 뒤 비교한다:
+    # kospi_multiple = 150/100 = 1.5, kosdaq_multiple = 15/5 = 3,
+    # 쏠림% = 1.5/(1.5+3)*100 = 33.333...(활동량만 보면 코스피가 훨씬 크지만,
+    # 코스피는 평소 대비 1.5배인데 코스닥은 평소 대비 3배라 정규화하면 코스닥
+    # 쪽이 오히려 "평소보다 더 활발"하다는 걸 보여준다 — 이게 §5.19가 고치려는
+    # 문제 그 자체다).
     monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
     async with async_session_factory() as session:
         await snap.record_flow_snapshot(session, _flow_payload(kospi_gaein=100, kosdaq_gaein=20))
-        result = await snap.get_market_concentration_series(session, days=1)
+        result = await snap.get_market_concentration_series(session, days=1, kospi_baseline=100.0, kosdaq_baseline=5.0)
 
     assert len(result["series"]) == 1
     assert result["series"][0]["time"] == "10:00"
-    assert result["series"][0]["value"] == pytest.approx(150 / 165 * 100)
+    assert result["series"][0]["value"] == pytest.approx(1.5 / 4.5 * 100)
 
 
 async def test_get_market_concentration_series_uses_absolute_value_regardless_of_direction(monkeypatch):
@@ -463,11 +469,13 @@ async def test_get_market_concentration_series_uses_absolute_value_regardless_of
     }
     async with async_session_factory() as session:
         await snap.record_flow_snapshot(session, payload)
-        result = await snap.get_market_concentration_series(session, days=1)
+        # kospi 활동량 = |-300|+|-100| = 400, kosdaq 활동량 = |50|+|50| = 100.
+        # baseline: kospi=200(배율 2), kosdaq=100(배율 1). 쏠림% = 2/(2+1)*100 = 66.666...
+        result = await snap.get_market_concentration_series(session, days=1, kospi_baseline=200.0, kosdaq_baseline=100.0)
 
-    # kospi 활동량 = |-300|+|-100| = 400, kosdaq 활동량 = |50|+|50| = 100.
-    # 쏠림% = 400/(400+100)*100 = 80.0
-    assert result["series"] == [{"time": "10:00", "value": 80.0}]
+    assert len(result["series"]) == 1
+    assert result["series"][0]["time"] == "10:00"
+    assert result["series"][0]["value"] == pytest.approx(2 / 3 * 100)
 
 
 async def test_get_market_concentration_series_one_market_missing_treats_it_as_zero_activity(monkeypatch):
@@ -479,9 +487,11 @@ async def test_get_market_concentration_series_one_market_missing_treats_it_as_z
     }
     async with async_session_factory() as session:
         await snap.record_flow_snapshot(session, payload)
-        result = await snap.get_market_concentration_series(session, days=1)
+        # 코스닥 쪽 series_key 자체가 안 쌓였으니 활동량 0 -> 배율도 0. 코스피 배율이
+        # 뭐든(0 초과) 분모에서 코스닥 배율(0)의 비중이 없어 쏠림 100%(코스피 완전
+        # 쏠림)가 그대로 유지된다.
+        result = await snap.get_market_concentration_series(session, days=1, kospi_baseline=50.0, kosdaq_baseline=10.0)
 
-    # 코스닥 쪽 series_key 자체가 안 쌓였으니 0으로 취급 -> 쏠림 100%(코스피 완전 쏠림).
     assert result["series"] == [{"time": "10:00", "value": 100.0}]
 
 
@@ -494,10 +504,28 @@ async def test_get_market_concentration_series_both_markets_zero_skips_the_tick(
     }
     async with async_session_factory() as session:
         await snap.record_flow_snapshot(session, payload)
-        result = await snap.get_market_concentration_series(session, days=1)
+        # baseline은 정상이어도(0 초과) 오늘 활동량 자체가 둘 다 0이라 배율도 둘 다
+        # 0 -> 정규화 후 분모(배율 합)가 0이라 쏠림을 정의할 수 없다 — 억지로 50%를
+        # 채우지 않고 건너뛴다.
+        result = await snap.get_market_concentration_series(session, days=1, kospi_baseline=50.0, kosdaq_baseline=10.0)
 
-    # 활동량 분모가 0이라 쏠림을 정의할 수 없다 — 억지로 50%를 채우지 않고 건너뛴다.
     assert result["series"] == []
+
+
+async def test_get_market_concentration_series_missing_baseline_skips_the_tick(monkeypatch):
+    # PLAN.md §5.19 — 베이스라인이 없으면(market_flow 데이터 전무) 절대금액
+    # 비교로 대체하지 않고 그 시각을 건너뛴다. kospi_baseline=None인 경우와
+    # kosdaq_baseline<=0인 경우 둘 다 스킵되는지 확인한다(둘 중 하나만
+    # 없어도 정규화 자체가 불가능하므로).
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, _flow_payload(kospi_gaein=100, kosdaq_gaein=20))
+
+        result_none = await snap.get_market_concentration_series(session, days=1, kospi_baseline=None, kosdaq_baseline=5.0)
+        assert result_none["series"] == []
+
+        result_zero = await snap.get_market_concentration_series(session, days=1, kospi_baseline=100.0, kosdaq_baseline=0.0)
+        assert result_zero["series"] == []
 
 
 async def test_get_market_concentration_series_multiple_ticks_ordered_by_time(monkeypatch):
@@ -508,11 +536,14 @@ async def test_get_market_concentration_series_multiple_ticks_ordered_by_time(mo
     monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 1))
     async with async_session_factory() as session:
         await snap.record_flow_snapshot(session, _flow_payload(kospi_gaein=200, kosdaq_gaein=30))
-        result = await snap.get_market_concentration_series(session, days=1)
+        # 두 틱 모두 kospi 활동량 150/kosdaq 활동량 15로 동일(_flow_payload가 개인
+        # net_value만 바꾸고 외국인/기관계는 고정값이라 — 모듈 상단 _flow_payload
+        # docstring 참고). baseline도 동일하게 적용되니 두 틱 모두 같은 쏠림%.
+        result = await snap.get_market_concentration_series(session, days=1, kospi_baseline=100.0, kosdaq_baseline=5.0)
 
     assert [p["time"] for p in result["series"]] == ["10:00", "10:01"]
     for point in result["series"]:
-        assert point["value"] == pytest.approx(150 / 165 * 100)
+        assert point["value"] == pytest.approx(1.5 / 4.5 * 100)
 
 
 # ---------------------------------------------------------------------------

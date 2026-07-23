@@ -385,15 +385,24 @@ function mergeIntradayByTime(seriesA, seriesB) {
   return order.map((time) => ({ time, value: totals.get(time) }))
 }
 
-// 코스피/코스닥 "쏠림" 비율(PLAN.md §5.18) — flow/live 응답(fetchFlowLive의
-// { kospi: {investors}, kosdaq: {investors} } 모양)에서 코스피·코스닥 각각의
-// "활동량"(|외국인 순매수|+|기관계 순매수|, 방향 무관 절댓값)을 계산해 쏠림%를
-// 구한다. 백엔드 collectors/intraday_snapshot.py의 get_market_concentration_series
-// 와 동일한 지표 정의 — 그쪽은 DB에 적립된 1D 시계열을 계산하고, 이 헬퍼는 KPI
-// 타일/모달의 "현재" 탭이 이미 폴링 중인 flow/live 스냅샷 하나로 즉석 계산한다
-// (새 API 호출 없음, breadthTotals와 동일한 "이미 fetch한 값을 프런트에서 합산"
-// 관례). 활동량 분모가 0이면(둘 다 활동 없음) 쏠림을 정의할 수 없어 null.
-function computeConcentration(flowLive) {
+// 코스피/코스닥 "쏠림" 비율(PLAN.md §5.18, 시총 편향 보정은 §5.19) — flow/live
+// 응답(fetchFlowLive의 { kospi: {investors}, kosdaq: {investors} } 모양)에서
+// 코스피·코스닥 각각의 "활동량"(|외국인 순매수|+|기관계 순매수|, 방향 무관
+// 절댓값)을 계산한 뒤, 절대금액을 그대로 비교하지 않고 각 시장 자신의 "평소
+// 활동량"(baseline — GET /api/markets/regime의 kospi/kosdaq.activity_baseline.
+// avg_daily_activity, 최근 20거래일 평균) 대비 "오늘 몇 배인지"로 먼저 정규화한
+// 뒤 그 배율끼리 비교한다. 절대금액 비교였던 §5.18 최초 버전은 코스피 시장
+// 규모가 구조적으로 훨씬 커서 평범한 날에도 90~100%가 나와 변별력이 없었다
+// (사용자 지적 — "시총 차이가 너무 생겨서 코스피로만 발생할거야").
+//
+// 백엔드 collectors/intraday_snapshot.py의 get_market_concentration_series와
+// 동일한 지표 정의 — 그쪽은 DB에 적립된 1D 시계열을 계산하고, 이 헬퍼는 KPI
+// 타일/모달의 "현재" 탭이 이미 폴링 중인 flow/live 스냅샷 + regime 스냅샷(둘 다
+// 새 API 호출 없음) 하나로 즉석 계산한다(breadthTotals와 동일한 "이미 fetch한
+// 값을 프런트에서 합산" 관례). baseline이 없거나(아직 못 불러옴) 두 시장 중
+// 하나라도 평소 활동량이 0 이하면 정규화할 기준이 없어 null(활동량 분모가
+// 0이어도 null — §5.18과 동일한 "억지로 채우지 않는다" 원칙).
+function computeConcentration(flowLive, baseline) {
   if (!flowLive) return null
   const activity = (market) => {
     const investors = flowLive[market]?.investors
@@ -403,10 +412,19 @@ function computeConcentration(flowLive) {
   }
   const kospiActivity = activity('kospi')
   const kosdaqActivity = activity('kosdaq')
-  const denom = kospiActivity + kosdaqActivity
+  if (!baseline || !(baseline.kospi > 0) || !(baseline.kosdaq > 0)) return null
+  const kospiMultiple = kospiActivity / baseline.kospi
+  const kosdaqMultiple = kosdaqActivity / baseline.kosdaq
+  const denom = kospiMultiple + kosdaqMultiple
   if (denom <= 0) return null
-  const kospiShare = (kospiActivity / denom) * 100
-  return { kospiShare, kosdaqShare: 100 - kospiShare, moreActive: kospiShare >= 50 ? '코스피' : '코스닥' }
+  const kospiShare = (kospiMultiple / denom) * 100
+  return {
+    kospiShare,
+    kosdaqShare: 100 - kospiShare,
+    moreActive: kospiShare >= 50 ? '코스피' : '코스닥',
+    kospiMultiple,
+    kosdaqMultiple,
+  }
 }
 
 // flows(투자자 -> [{date, net_value, net_volume}])에서 특정 투자자의 가장 최근 행을
@@ -782,7 +800,7 @@ function BreadthModal() {
   )
 }
 
-function ConcentrationModal() {
+function ConcentrationModal({ regime }) {
   // PLAN.md §5.18 — "외인, 기관이 적극 매수해야 코스피/코스닥이 오른다"는 관찰에서,
   // 그 돈이 어느 시장으로 쏠리는지를 "현재"(순간 관찰)와 "1D 추이"(BreadthModal과
   // 완전히 동일한 패턴, BreadthRatioChart 재사용) 두 탭으로 보여준다. "현재" 탭은
@@ -841,7 +859,15 @@ function ConcentrationModal() {
     }
   }, [chartMode, intradayDays])
 
-  const concentration = computeConcentration(flowLive)
+  // PLAN.md §5.19 — regime(이미 1분 티어에서 폴링 중, prop으로 전달됨)의
+  // activity_baseline으로 배율 정규화한다. regime이 아직 없거나 baseline이
+  // 없으면 computeConcentration이 null을 돌려주고, 아래 "적립 중" 분기로
+  // 그대로 흘러간다(별도 빈 상태 분기를 새로 만들지 않는다).
+  const concentrationBaseline = {
+    kospi: regime?.kospi?.activity_baseline?.avg_daily_activity ?? null,
+    kosdaq: regime?.kosdaq?.activity_baseline?.avg_daily_activity ?? null,
+  }
+  const concentration = computeConcentration(flowLive, concentrationBaseline)
 
   return (
     <div>
@@ -858,7 +884,8 @@ function ConcentrationModal() {
             </button>
           ))}
           <span className="toggle-hint">
-            쏠림% = 코스피 활동량 / (코스피+코스닥 활동량) × 100, 활동량 = |외국인 순매수|+|기관계 순매수|
+            쏠림% = 코스피 평소 대비 배율 / (코스피+코스닥 평소 대비 배율) × 100 — 각 시장을 자기 자신의 최근
+            20거래일 평소 활동량(활동량 = |외국인 순매수|+|기관계 순매수|)과 비교한 뒤 비교해 시장 규모 차이를 보정
           </span>
         </div>
       )}
@@ -873,6 +900,9 @@ function ConcentrationModal() {
             <div className="toggle-hint" style={{ marginBottom: 8 }}>
               코스피 활동 비중 {scoreFmt.format(concentration.kospiShare)}% · 코스닥{' '}
               {scoreFmt.format(concentration.kosdaqShare)}% — {concentration.moreActive} 쪽 활동이 더 많다
+              <br />
+              코스피 평소 대비 {scoreFmt.format(concentration.kospiMultiple)}배 · 코스닥 평소 대비{' '}
+              {scoreFmt.format(concentration.kosdaqMultiple)}배
             </div>
           )}
         </>
@@ -2217,10 +2247,15 @@ export default function DashboardPage() {
     )
   })()
 
-  // "코스피/코스닥 쏠림" KPI 타일(PLAN.md §5.18) — 이미 1분 티어에서 폴링 중인
-  // flowLive를 computeConcentration으로 즉석 계산한다(breadthTotals와 동일한
-  // 관례, 새 API 호출 없음).
-  const concentrationLive = computeConcentration(flowLive)
+  // "코스피/코스닥 쏠림" KPI 타일(PLAN.md §5.18, 시총 편향 보정은 §5.19) — 이미
+  // 1분 티어에서 폴링 중인 flowLive + regime을 computeConcentration으로 즉석
+  // 계산한다(breadthTotals와 동일한 관례, 새 API 호출 없음). regime이 아직 없거나
+  // activity_baseline이 없으면(로딩 중 등) computeConcentration이 null을 돌려준다.
+  const concentrationBaseline = {
+    kospi: regime?.kospi?.activity_baseline?.avg_daily_activity ?? null,
+    kosdaq: regime?.kosdaq?.activity_baseline?.avg_daily_activity ?? null,
+  }
+  const concentrationLive = computeConcentration(flowLive, concentrationBaseline)
 
   const fundLatest = (id) => {
     const points = fundSeries[id] || []
@@ -3179,7 +3214,7 @@ export default function DashboardPage() {
         {modal?.type === 'candle' && <CandleModal market={modal.market} />}
         {modal?.type === 'sentiment' && <SentimentModal />}
         {modal?.type === 'breadth' && <BreadthModal />}
-        {modal?.type === 'concentration' && <ConcentrationModal />}
+        {modal?.type === 'concentration' && <ConcentrationModal regime={regime} />}
         {modal?.type === 'fund' && <FundModal />}
         {modal?.type === 'macro' && <MacroModal />}
         {modal?.type === 'flowSummary' && <FlowSummaryModal />}

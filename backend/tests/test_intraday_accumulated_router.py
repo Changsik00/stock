@@ -24,6 +24,7 @@ from app.collectors import intraday_snapshot as snap
 from app.db import async_session_factory, engine
 from app.main import app
 from app.models import IntradaySample
+from app.quant import regime_backtest
 
 KST = dt.timezone(dt.timedelta(hours=9))
 TEST_DAY = dt.date(2099, 1, 5)  # 실 데이터와 겹치지 않는 먼 미래, 월요일(장중 검증용)
@@ -199,11 +200,32 @@ async def test_breadth_intraday_accumulated_empty_returns_empty_list(monkeypatch
     assert "market_closed" in body
 
 
+def _patch_activity_baseline(monkeypatch, *, kospi: float, kosdaq: float):
+    """PLAN.md §5.19 — 이 라우터는 이제 `regime_backtest.compute_activity_baseline`
+    을 직접 호출해 정규화 기준을 만든다. 그 함수 자체의 계산(market_flow 집계)은
+    tests/test_regime_backtest.py가 이미 별도로 검증하므로(house 관례 —
+    test_markets_regime_router.py가 regime_backtest를 monkeypatch로 가로채는
+    것과 동일한 관심사 분리), 여기서는 고정 baseline을 돌려주는 가짜로 교체해
+    이 라우터의 배선(compute_activity_baseline 결과를 get_market_concentration_series
+    에 정확히 전달하는지)만 검증한다. 실제 market_flow 테이블에 코스피/코스닥
+    이름으로 시드 데이터를 심는 방식은 실제(3년치) 운영 데이터와 뒤섞여 결정론이
+    깨지므로 피한다."""
+
+    async def fake_activity_baseline(session, market):
+        return {"kospi": {"n": 20, "avg_daily_activity": kospi}, "kosdaq": {"n": 20, "avg_daily_activity": kosdaq}}[
+            market
+        ]
+
+    monkeypatch.setattr(regime_backtest, "compute_activity_baseline", fake_activity_baseline)
+
+
 async def test_flow_concentration_intraday_accumulated_returns_computed_ratio(monkeypatch):
-    # PLAN.md §5.18 — 쏠림% = 코스피 활동량 / (코스피+코스닥 활동량) * 100,
-    # 활동량 = |외국인 순매수| + |기관계 순매수|. 아래 payload로 코스피 활동량
-    # 150, 코스닥 활동량 15 -> 쏠림 150/165*100.
+    # PLAN.md §5.19 — 쏠림% = 코스피_배율/(코스피_배율+코스닥_배율)*100, 배율 =
+    # 오늘_활동량/평소_활동량. 아래 payload로 코스피 활동량 150, 코스닥 활동량
+    # 15(§5.18과 동일한 활동량 정의)이고, baseline을 kospi=100/kosdaq=5로 고정하면
+    # kospi_multiple=1.5, kosdaq_multiple=3 -> 쏠림% = 1.5/4.5*100 = 33.333...
     monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    _patch_activity_baseline(monkeypatch, kospi=100.0, kosdaq=5.0)
     payload = {
         "kospi": {"investors": {"외국인": {"net_value": 100}, "기관계": {"net_value": -50}}},
         "kosdaq": {"investors": {"외국인": {"net_value": 10}, "기관계": {"net_value": -5}}},
@@ -220,8 +242,33 @@ async def test_flow_concentration_intraday_accumulated_returns_computed_ratio(mo
     assert body["date"] == TEST_DAY.isoformat()
     assert len(body["series"]) == 1
     assert body["series"][0]["time"] == "10:00"
-    assert body["series"][0]["value"] == pytest.approx(150 / 165 * 100)
+    assert body["series"][0]["value"] == pytest.approx(1.5 / 4.5 * 100)
     assert isinstance(body["market_closed"], bool)
+
+
+async def test_flow_concentration_intraday_accumulated_missing_baseline_returns_empty_list(monkeypatch):
+    # PLAN.md §5.19 — 베이스라인이 없으면(market_flow 데이터 전무) 그 시각을
+    # 건너뛴다. intraday_sample에는 정상적으로 활동량이 있어도(§5.18 조건은
+    # 충족) 베이스라인이 없으면 시리즈가 비어야 한다.
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+
+    async def fake_activity_baseline_empty(session, market):
+        return {"n": 0, "avg_daily_activity": None}
+
+    monkeypatch.setattr(regime_backtest, "compute_activity_baseline", fake_activity_baseline_empty)
+    payload = {
+        "kospi": {"investors": {"외국인": {"net_value": 100}, "기관계": {"net_value": -50}}},
+        "kosdaq": {"investors": {"외국인": {"net_value": 10}, "기관계": {"net_value": -5}}},
+        "market_closed": False,
+    }
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, payload)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/flow-concentration/intraday-accumulated")
+
+    assert resp.status_code == 200
+    assert resp.json()["series"] == []
 
 
 async def test_flow_concentration_intraday_accumulated_empty_returns_empty_list(monkeypatch):

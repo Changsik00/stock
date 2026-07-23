@@ -185,3 +185,65 @@ async def test_compute_streak_buckets_unknown_investor_all_empty():
     async with async_session_factory() as session:
         buckets = await regime_backtest.compute_streak_buckets(session, TEST_MARKET, "__no_such_investor__")
     assert all(b["n"] == 0 for b in buckets)
+
+
+# ---------------------------------------------------------------------------
+# compute_activity_baseline (PLAN.md §5.19 — 쏠림 비율 시총 편향 보정용 베이스라인)
+# ---------------------------------------------------------------------------
+
+# 25거래일치 외국인/기관계 net_value를 날짜별로 심어, "최근 20거래일만 집계"
+# 동작을 검증한다. 오래된 5일(day1~day5)은 값을 극단적으로 크게 줘서, 만약
+# 함수가 실수로 전체 기간을 평균 내면 바로 값이 어긋나 드러나도록 한다.
+ACTIVITY_DAYS = [dt.date(2098, 1, 1) + dt.timedelta(days=i) for i in range(25)]
+# 오래된 5일(제외되어야 함): 외국인=+10000, 기관계=-10000 -> 일별 활동량 20000.
+OLD_FOREIGN = [10_000] * 5
+OLD_INST = [-10_000] * 5
+# 최근 20일(집계 대상): 외국인은 1~20, 기관계는 전부 -5 -> 일별 활동량 = i+5.
+RECENT_FOREIGN = list(range(1, 21))
+RECENT_INST = [-5] * 20
+ACTIVITY_FOREIGN = OLD_FOREIGN + RECENT_FOREIGN
+ACTIVITY_INST = OLD_INST + RECENT_INST
+# 최근 20일 일별 활동량 평균 = mean(i+5 for i in 1..20) = mean(6..25) = 15.5
+EXPECTED_RECENT_AVG = sum(i + 5 for i in range(1, 21)) / 20
+
+
+async def _seed_activity_baseline_rows() -> None:
+    async with async_session_factory() as session:
+        for d, foreign, inst in zip(ACTIVITY_DAYS, ACTIVITY_FOREIGN, ACTIVITY_INST):
+            session.add(
+                MarketFlow(market=TEST_MARKET, date=d, investor="외국인", net_value=foreign, source="test")
+            )
+            session.add(
+                MarketFlow(market=TEST_MARKET, date=d, investor="기관계", net_value=inst, source="test")
+            )
+        await session.commit()
+
+
+async def test_compute_activity_baseline_uses_only_most_recent_n_dates():
+    # 25일치를 심고 days=20으로 조회 — 오래된 5일(활동량 20000/일, 훨씬 큼)이
+    # 집계에서 빠지고 최근 20일만 평균에 들어가는지 확인한다.
+    await _seed_activity_baseline_rows()
+    async with async_session_factory() as session:
+        baseline = await regime_backtest.compute_activity_baseline(session, TEST_MARKET, days=20)
+
+    assert baseline["n"] == 20
+    assert baseline["avg_daily_activity"] == pytest.approx(EXPECTED_RECENT_AVG, abs=0.01)
+
+
+async def test_compute_activity_baseline_fewer_than_n_dates_uses_all_available():
+    # 존재하는 날짜 수(25일)보다 큰 days(100)를 요청하면 있는 만큼(25일)만 써서
+    # 평균을 낸다 — 25일 전체(오래된 5일 20000/일 + 최근 20일 EXPECTED_RECENT_AVG
+    # 구간) 평균과 일치해야 한다.
+    await _seed_activity_baseline_rows()
+    async with async_session_factory() as session:
+        baseline = await regime_backtest.compute_activity_baseline(session, TEST_MARKET, days=100)
+
+    assert baseline["n"] == 25
+    expected_avg = (sum(20_000 for _ in range(5)) + sum(i + 5 for i in range(1, 21))) / 25
+    assert baseline["avg_daily_activity"] == pytest.approx(expected_avg, abs=0.01)
+
+
+async def test_compute_activity_baseline_unknown_market_is_empty():
+    async with async_session_factory() as session:
+        baseline = await regime_backtest.compute_activity_baseline(session, "__no_such_market__")
+    assert baseline == {"n": 0, "avg_daily_activity": None}

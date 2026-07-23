@@ -317,25 +317,53 @@ async def get_breadth_series(session: AsyncSession, days: int = 1) -> dict:
     }
 
 
-async def get_market_concentration_series(session: AsyncSession, days: int = 1) -> dict:
+async def get_market_concentration_series(
+    session: AsyncSession,
+    days: int = 1,
+    kospi_baseline: float | None = None,
+    kosdaq_baseline: float | None = None,
+) -> dict:
     """1D 조회 API(`GET /api/markets/flow-concentration/intraday-accumulated`)가
-    그대로 반환할 payload(PLAN.md §5.18). "외인, 기관이 적극 매수해야 코스피/코스닥이
-    오른다"는 사용자 관찰에서, "그 돈이 코스피/코스닥 중 어디로 쏠리는지"를 추이로
-    보여준다.
+    그대로 반환할 payload(PLAN.md §5.18, 시총 편향 보정은 §5.19). "외인, 기관이
+    적극 매수해야 코스피/코스닥이 오른다"는 사용자 관찰에서, "그 돈이 코스피/코스닥
+    중 어디로 쏠리는지"를 추이로 보여준다.
 
-    지표 정의: ``쏠림% = 코스피_활동량 / (코스피_활동량 + 코스닥_활동량) * 100``,
-    ``활동량 = |외국인 순매수| + |기관계 순매수|``(방향 무관 절댓값 — "어디에 돈이
-    몰리는지"를 보는 것이라 순매수/순매도 방향은 상관없다). 50%=균등 분산,
-    100%=코스피 완전 쏠림, 0%=코스닥 완전 쏠림.
+    **§5.19 정규화**: §5.18 최초 버전은 ``쏠림% = 코스피_활동량 / (코스피_활동량 +
+    코스닥_활동량) * 100``으로 절대 금액을 직접 비교했는데, 코스피 시장 규모가
+    코스닥보다 구조적으로 훨씬 커서 평범한 날에도 90~100%가 나와 변별력이
+    없었다(사용자 지적 — "시총 차이가 너무 생겨서 코스피로만 발생할거야"). 이제는
+    각 시장을 절대금액이 아니라 **그 시장 자신의 평소 활동량(``kospi_baseline``/
+    ``kosdaq_baseline`` — `app/quant/regime_backtest.py`의
+    ``compute_activity_baseline``, 최근 20거래일 일평균) 대비 오늘 몇 배인지**로
+    먼저 정규화한 뒤 그 배율끼리 비교한다:
+
+    - ``활동량 = |외국인 순매수| + |기관계 순매수|``(방향 무관 절댓값 — "어디에
+      돈이 몰리는지"를 보는 것이라 순매수/순매도 방향은 상관없다). §5.18과 동일.
+    - ``배율 = 오늘_활동량 / 평소_활동량``
+    - ``가중쏠림% = 코스피_배율 / (코스피_배율 + 코스닥_배율) * 100``
+
+    50%=양쪽 다 "평소 대비" 똑같이 늘거나 줄었다, 100%=코스피만 평소보다 유독
+    활발, 0%=코스닥만 평소보다 유독 활발.
+
+    **단위가 달라도 무관하다**(수학적 성질, 손짓이 아니다): ``intraday_sample``
+    (오늘 활동량, 단위 A일 수 있음)과 ``market_flow``(평소 활동량 베이스라인, 단위
+    B일 수 있음)가 서로 다른 단위라도 결과에 영향이 없다 — 단위 환산 상수를
+    ``k``라 하면 두 시장 모두에 똑같이 곱해지는 공통 인자라, 코스피_배율 = k *
+    (코스피_오늘/코스피_평소), 코스닥_배율 = k * (코스닥_오늘/코스닥_평소)이 되고,
+    최종 비율 계산(분자/분모)에서 ``k``가 그대로 약분되어 사라진다. 그래서 두
+    베이스라인이 정확히 같은 단위인지 신경 쓸 필요가 없다.
 
     ``flow_kospi_외국인``/``flow_kospi_기관계``/``flow_kosdaq_외국인``/
     ``flow_kosdaq_기관계`` 4개 series_key를 §5.10/`get_foreign_position_series`와
     동일한 방식으로 time(정확히 일치하는 timestamp) 매칭한다(같은
     `record_flow_snapshot` 호출 안에서 네 값 모두 동일한 ``dt.datetime.now(KST)``로
     쓰이므로 timestamp가 정확히 일치한다). 한 시각에 4개 중 일부만 있으면 없는
-    쪽은 0(그 순간 그 시장/투자자는 활동 없음)으로 취급해 계산한다 — 완전히 다
-    없어서 분모(코스피_활동량+코스닥_활동량)가 0이면 쏠림을 정의할 수 없으므로
-    그 시각은 건너뛴다(억지로 50%를 채우지 않는다)."""
+    쪽은 0(그 순간 그 시장/투자자는 활동 없음)으로 취급해 계산한다.
+
+    ``kospi_baseline``/``kosdaq_baseline``이 없거나(``None``) 0 이하면 그 시장을
+    정규화할 기준이 없다는 뜻이라 해당 시각은 건너뛴다(§5.18과 동일하게 "억지로
+    채우지 않는다" 원칙 — 절대 금액으로 대체 계산하지 않는다). 정규화 후에도
+    분모(코스피_배율+코스닥_배율)가 0이면 마찬가지로 건너뛴다."""
     days = _clamp_days(days)
     cutoff = _cutoff(days)
 
@@ -362,10 +390,15 @@ async def get_market_concentration_series(session: AsyncSession, days: int = 1) 
         values = by_time[time]
         kospi_activity = abs(values.get("kospi_외국인", 0.0)) + abs(values.get("kospi_기관계", 0.0))
         kosdaq_activity = abs(values.get("kosdaq_외국인", 0.0)) + abs(values.get("kosdaq_기관계", 0.0))
-        denom = kospi_activity + kosdaq_activity
+
+        if kospi_baseline is None or kospi_baseline <= 0 or kosdaq_baseline is None or kosdaq_baseline <= 0:
+            continue  # 정규화 기준이 없다 — 억지로 절대금액 비교로 대체하지 않는다(PLAN.md §5.19)
+        kospi_multiple = kospi_activity / kospi_baseline
+        kosdaq_multiple = kosdaq_activity / kosdaq_baseline
+        denom = kospi_multiple + kosdaq_multiple
         if denom <= 0:
             continue
-        ratio = kospi_activity / denom * 100
+        ratio = kospi_multiple / denom * 100
         series.append({"time": _format_time(time, days), "value": ratio})
 
     return {

@@ -142,6 +142,48 @@ async def compute_baseline(session: AsyncSession, market: str) -> dict:
     return {"n": n, "avg_return_pct": round(avg, 3), "positive_rate_pct": round(positive, 1)}
 
 
+async def compute_activity_baseline(session: AsyncSession, market: str, days: int = 20) -> dict:
+    """``market``의 "평소 활동량" 베이스라인(PLAN.md §5.19) — §5.18 쏠림 비율
+    지표가 절대 금액을 그대로 비교해 코스피 시총 편향(코스피가 구조적으로
+    항상 더 커서 평범한 날에도 90%대 "쏠림"이 나오는 문제)을 갖고 있던 걸
+    고치기 위한 정규화 기준값이다. "그 시장이 오늘 평소 대비 몇 배 활동적인지"를
+    계산하려면 먼저 "그 시장의 평소가 얼마인지"가 있어야 한다 — 이 함수가 그
+    분모를 만든다.
+
+    ``market_flow(market, investor in (외국인, 기관계))``에서 날짜별로 두 투자자의
+    ``abs(net_value)``를 합산해(§5.18과 동일한 "방향 무관 절댓값 활동량" 정의)
+    "그날의 활동량"을 만든 뒤, 날짜 기준 최근 ``days``개(기본 20거래일)의
+    평균을 낸다. ``market_flow``는 18시 배치가 쓰는 확정치만 담고 있어 "오늘"을
+    따로 걸러낼 필요가 없다(``compute_baseline``과 동일한 전제).
+
+    베이스라인이 몇 주 사이 급변하지 않는다는 전제하에, 이 값은 호출 시점
+    기준 "지금의 평소"로 계산해 7일/30일 등 과거 구간 조회 전체에 그대로
+    적용한다(과거 시점마다 그때의 20일 베이스라인을 다시 계산하지 않음 —
+    PLAN.md §5.19 "정밀도보다 단순성 우선" 원칙).
+
+    데이터가 전혀 없으면 ``{"n": 0, "avg_daily_activity": None}`` —
+    ``compute_baseline``의 빈 데이터 반환 관례와 동일.
+
+    Returns ``{"n": int, "avg_daily_activity": float|None}``.
+    """
+    stmt = select(MarketFlow.date, MarketFlow.net_value).where(
+        MarketFlow.market == market, MarketFlow.investor.in_(("외국인", "기관계"))
+    )
+    rows = (await session.execute(stmt)).all()
+    daily: dict[dt.date, float] = {}
+    for d, net_value in rows:
+        if net_value is None:
+            continue
+        daily[d] = daily.get(d, 0.0) + abs(net_value)
+
+    recent_dates = sorted(daily.keys(), reverse=True)[:days]
+    if not recent_dates:
+        return {"n": 0, "avg_daily_activity": None}
+
+    values = [daily[d] for d in recent_dates]
+    return {"n": len(values), "avg_daily_activity": round(sum(values) / len(values), 1)}
+
+
 async def compute_streak_buckets(session: AsyncSession, market: str, investor: str) -> list[dict]:
     """``market`` × ``investor``의 연속 순매수/매도 스트릭을 6개 버킷(3+매수/
     2매수/1매수/1매도/2매도/3+매도)으로 나눠, 각 버킷에 속한 날짜들의 "다음날
