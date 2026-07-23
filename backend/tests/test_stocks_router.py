@@ -26,7 +26,7 @@ from app.clients import naver_index
 from app.clients.kiwoom import KiwoomAPIError
 from app.db import async_session_factory, engine
 from app.main import app
-from app.models import Stock, StockFlow, StockOhlcv
+from app.models import Stock, StockFlow, StockOhlcv, ValueRank
 from app.routers import stocks
 
 TEST_CODE = "999999"
@@ -53,6 +53,7 @@ async def _clear_test_rows() -> None:
     async with async_session_factory() as session:
         await session.execute(delete(StockFlow).where(StockFlow.code == TEST_CODE))
         await session.execute(delete(StockOhlcv).where(StockOhlcv.code == TEST_CODE))
+        await session.execute(delete(ValueRank).where(ValueRank.code == TEST_CODE))
         await session.execute(delete(Stock).where(Stock.code == TEST_CODE))
         await session.commit()
 
@@ -515,3 +516,83 @@ async def test_series_flow_fetch_failure_is_partial_success_200(monkeypatch, see
     assert len(body["prices"]) == 1  # 캔들은 정상
     assert body["flows"] == {}
     assert "flows_error" in body["meta"]
+
+
+# -- 회전율 (PLAN.md §5.16-2, value_rank 조인) ------------------------------------
+
+
+async def test_series_includes_turnover_when_value_rank_row_exists(monkeypatch, seeded_stock):
+    target_end = stocks._latest_trading_day()
+
+    def fake_fetch_stock_series(code, start, end):
+        return [
+            {
+                "date": target_end,
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "volume": 1,
+            }
+        ]
+
+    monkeypatch.setattr(stocks.naver_index, "fetch_stock_series", fake_fetch_stock_series)
+    monkeypatch.setattr(
+        stocks,
+        "KiwoomClient",
+        _make_fake_kiwoom_client({}, KiwoomAPIError(3, "존재하지 않는 종목코드입니다")),
+    )
+
+    async with async_session_factory() as session:
+        session.add(
+            ValueRank(
+                date=target_end,
+                market="kospi",
+                rank=1,
+                code=TEST_CODE,
+                name=TEST_NAME,
+                value=123456,
+                change_rate=1.23,
+                is_etf=False,
+                turnover=4.5678,
+            )
+        )
+        await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/stocks/{TEST_CODE}/series")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["turnover"] == {"value": pytest.approx(4.5678), "date": target_end.strftime("%Y%m%d")}
+
+
+async def test_series_turnover_is_null_when_no_value_rank_row(monkeypatch, seeded_stock):
+    """value_rank는 거래대금 상위 종목만 적재하므로(§5.16 배경) 없는 종목은
+    turnover가 정직하게 null이어야 한다 — 억지로 채우지 않는다."""
+    target_end = stocks._latest_trading_day()
+
+    def fake_fetch_stock_series(code, start, end):
+        return [
+            {
+                "date": target_end,
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "volume": 1,
+            }
+        ]
+
+    monkeypatch.setattr(stocks.naver_index, "fetch_stock_series", fake_fetch_stock_series)
+    monkeypatch.setattr(
+        stocks,
+        "KiwoomClient",
+        _make_fake_kiwoom_client({}, KiwoomAPIError(3, "존재하지 않는 종목코드입니다")),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/stocks/{TEST_CODE}/series")
+
+    assert resp.status_code == 200
+    assert resp.json()["turnover"] is None

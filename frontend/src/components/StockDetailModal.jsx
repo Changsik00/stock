@@ -39,6 +39,41 @@ function dateLabel(iso) {
   return `${digits.slice(4, 6)}/${digits.slice(6, 8)}`
 }
 
+// MM-DD만 뽑는다(DashboardPage.jsx의 mmdd/StaleDate와 동일한 관례) — 회전율 기준일이
+// 가격 기준일과 다를 때 작게 구분 표시하는 용도.
+function mmdd(date) {
+  const d = formatDate(date)
+  return typeof d === 'string' && d.length === 10 ? d.slice(5) : d
+}
+
+// 오늘(브라우저 로컬 날짜)과 같은 날짜 문자열인지 — 개인 수급 "집계 중" 판정용.
+function isToday(date) {
+  const d = formatDate(date)
+  return typeof d === 'string' && d.length === 10 && d === formatDate(new Date())
+}
+
+// 개인 수급 "집계 중" 판정 (PLAN.md §5.16-1): 실측 결과 오늘 날짜의 개인(ind_invsr)만
+// 소스 자체가 0을 반환하는 구조적 특성이 있다(파싱 버그 아님) — 코드로 값을 억지로
+// 채우지 않고, 조건을 만족할 때만 "0원" 대신 "집계 중"이라고 정직하게 구분해서 보여준다.
+// 조건: (1) 이 타일이 "개인"이고 (2) 최신 행 날짜가 오늘이며 (3) net_value가 정확히
+// 0인데 (4) 같은 날짜의 외국인 또는 기관계 중 하나라도 0이 아닌 값이 있을 때만 —
+// 그 외(다른 투자자군도 다 0이거나 오늘 날짜가 아님)는 진짜 0원이므로 그대로 둔다.
+function isPendingPersonalFlow(name, latest, flows) {
+  if (name !== '개인' || !latest) return false
+  if (latest.net_value !== 0 || !isToday(latest.date)) return false
+  return DEFAULT_INVESTORS.some((other) => {
+    if (other === '개인') return false
+    const rows = flows?.[other] || []
+    const otherLatest = rows.length > 0 ? rows[rows.length - 1] : null
+    return (
+      otherLatest &&
+      otherLatest.net_value !== 0 &&
+      otherLatest.net_value !== null &&
+      formatDate(otherLatest.date) === formatDate(latest.date)
+    )
+  })
+}
+
 function flowLineTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null
   return (
@@ -104,14 +139,24 @@ function FlowStatTiles({ flows }) {
       {DEFAULT_INVESTORS.map((name) => {
         const rows = flows?.[name] || []
         const latest = rows.length > 0 ? rows[rows.length - 1] : null
+        const pending = isPendingPersonalFlow(name, latest, flows)
         return (
           <div className="stock-detail-flow-tile" key={name}>
             <span className="stock-detail-flow-tile-label">
               <span className="dot" style={{ background: INVESTOR_COLOR_VAR[name] }} /> {name}
             </span>
-            <span className={`stock-detail-flow-tile-value ${eokClass(latest?.net_value)}`}>
-              {latest ? eok(latest.net_value) : '-'}
-            </span>
+            {pending ? (
+              <span
+                className="stock-detail-flow-tile-value stock-detail-flow-tile-pending"
+                title="개인 수급은 장중 소스 집계가 늦어 당일 값이 아직 반영되지 않았습니다"
+              >
+                집계 중
+              </span>
+            ) : (
+              <span className={`stock-detail-flow-tile-value ${eokClass(latest?.net_value)}`}>
+                {latest ? eok(latest.net_value) : '-'}
+              </span>
+            )}
             <span className={`stock-detail-flow-tile-sub ${eokClass(latest?.cum_net_value)}`}>
               기간 누적 {latest ? eok(latest.cum_net_value) : '-'}
             </span>
@@ -326,6 +371,17 @@ export default function StockDetailModal({ code, initial }) {
             <span className={`stock-detail-rate ${rateClass(latestPrice.changeRate)}`}>
               {rateLabel(latestPrice.changeRate)}
             </span>
+          </span>
+        )}
+        {series?.turnover && (
+          <span className="stock-detail-turnover">
+            회전율 {series.turnover.value.toFixed(2)}%
+            {latestPrice && formatDate(series.turnover.date) !== formatDate(latestPrice.date) && (
+              <span className="stale-date" title={formatDate(series.turnover.date)}>
+                {' '}
+                {mmdd(series.turnover.date)}
+              </span>
+            )}
           </span>
         )}
       </div>

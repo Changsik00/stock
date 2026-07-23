@@ -1188,6 +1188,13 @@ header h1 {
   color: var(--down);
 }
 
+/* 회전율(§5.16-2) — 가격 옆에 작게, 색상 강조 없이(등락 개념이 아니라 유동성 지표). */
+.stock-detail-turnover {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .stock-detail-flow {
   margin-top: 16px;
 }
@@ -1260,6 +1267,12 @@ header h1 {
 
 .stock-detail-flow-tile-value.down {
   color: var(--down);
+}
+
+/* 개인 수급 "집계 중"(§5.16-1) — 진짜 0원과 시각적으로 구분되게 중립색 + 이탤릭. */
+.stock-detail-flow-tile-pending {
+  color: var(--text-muted);
+  font-style: italic;
 }
 
 .stock-detail-flow-tile-sub {

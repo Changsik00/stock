@@ -50,7 +50,7 @@ from ..clients.kiwoom import (
 )
 from ..db import get_session
 from ..market_hours import KST, is_nxt_closed
-from ..models import Stock, StockFlow, StockOhlcv
+from ..models import Stock, StockFlow, StockOhlcv, ValueRank
 from ..quant.signals import (
     compute_vwap,
     detect_breakout,
@@ -414,6 +414,22 @@ async def _read_flows(session: AsyncSession, code: str, days: int) -> dict[str, 
     return flows
 
 
+async def _read_turnover(session: AsyncSession, code: str) -> dict | None:
+    """value_rank에서 이 종목의 최신 회전율(%)을 가져온다. value_rank는 거래대금
+    상위 종목만 적재되므로(PLAN.md §5.16) 없는 종목은 None을 그대로 반환 —
+    억지로 채우지 않는다(§5 "정직한 표시" 원칙)."""
+    stmt = (
+        select(ValueRank.turnover, ValueRank.date)
+        .where(ValueRank.code == code)
+        .order_by(ValueRank.date.desc())
+        .limit(1)
+    )
+    row = (await session.execute(stmt)).first()
+    if row is None or row.turnover is None:
+        return None
+    return {"value": float(row.turnover), "date": row.date.strftime("%Y%m%d")}
+
+
 # -- 엔드포인트 -----------------------------------------------------------------
 
 
@@ -457,6 +473,7 @@ async def stock_series(
         meta["flows_error"] = str(e)[:300]
 
     flows = await _read_flows(session, code, days)
+    turnover = await _read_turnover(session, code)
 
     return {
         "code": code,
@@ -467,6 +484,7 @@ async def stock_series(
         "prices": prices,
         "flows": flows,
         "meta": meta,
+        "turnover": turnover,
     }
 
 
