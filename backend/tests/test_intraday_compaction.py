@@ -4,7 +4,16 @@
 Same house pattern as tests/test_intraday_snapshot.py: real dev Postgres via
 app.db.async_session_factory, rows isolated with a "test_compact_"-prefixed
 series_key and a far-future TEST_DAY that never collides with real data,
-cleaned up in teardown."""
+cleaned up in teardown.
+
+**2026-07-23 수정**: ``compact_intraday_samples``는 series_key로 스코프하지
+않고 "target_date 기준 N일 지난 원본 전부"를 압축하는 전역 부수효과를 갖는다
+— TEST_DAY가 2099년이라 실제 운영 데이터(§5.14 이후 worker가 실제로 쓰고
+있는 flow_kospi_*/breadth_ratio 등)까지 전부 "2099년 기준으로는 오래된 것"에
+걸려 같이 압축된다(장중에 실제로 쌓이고 있어 더 이상 우연이 아니라 항상
+재현됨). 그래서 `rows_written`(함수의 전역 반환값)을 정확한 값으로 검증하지
+않는다 — 하한(`>=`)만 확인하거나 아예 생략하고, 대신 `_rows_for(SERIES_KEY)`
+(테스트 자신의 series_key로 스코프된 조회)로 실제 압축 결과를 검증한다."""
 
 from __future__ import annotations
 
@@ -85,7 +94,7 @@ async def test_compacts_old_bucket_into_average_and_deletes_originals():
     )
 
     async with async_session_factory() as session:
-        rows_written = await compact_intraday_samples(session, TEST_DAY)
+        rows_written = await compact_intraday_samples(session, TEST_DAY, series_keys=[SERIES_KEY])
         await session.commit()
 
     assert rows_written == 1
@@ -107,7 +116,7 @@ async def test_splits_across_15_minute_bucket_boundary():
     )
 
     async with async_session_factory() as session:
-        rows_written = await compact_intraday_samples(session, TEST_DAY)
+        rows_written = await compact_intraday_samples(session, TEST_DAY, series_keys=[SERIES_KEY])
         await session.commit()
 
     assert rows_written == 2
@@ -127,7 +136,7 @@ async def test_does_not_touch_rows_within_retention_window():
     )
 
     async with async_session_factory() as session:
-        rows_written = await compact_intraday_samples(session, TEST_DAY)
+        rows_written = await compact_intraday_samples(session, TEST_DAY, series_keys=[SERIES_KEY])
         await session.commit()
 
     assert rows_written == 0
@@ -148,7 +157,7 @@ async def test_already_compacted_rows_are_left_alone_on_rerun():
     )
 
     async with async_session_factory() as session:
-        first_run = await compact_intraday_samples(session, TEST_DAY)
+        first_run = await compact_intraday_samples(session, TEST_DAY, series_keys=[SERIES_KEY])
         await session.commit()
     assert first_run == 1
 
@@ -160,7 +169,7 @@ async def test_already_compacted_rows_are_left_alone_on_rerun():
     # 재실행(멱등성) — 원본(resolution_seconds=0)이 이미 삭제됐으니 재압축 대상이
     # 없어 아무 것도 바뀌지 않아야 한다.
     async with async_session_factory() as session:
-        second_run = await compact_intraday_samples(session, TEST_DAY)
+        second_run = await compact_intraday_samples(session, TEST_DAY, series_keys=[SERIES_KEY])
         await session.commit()
     assert second_run == 0
 
@@ -180,7 +189,9 @@ async def test_compacts_multiple_series_keys_independently():
     )
 
     async with async_session_factory() as session:
-        rows_written = await compact_intraday_samples(session, TEST_DAY)
+        rows_written = await compact_intraday_samples(
+            session, TEST_DAY, series_keys=[SERIES_KEY, OTHER_SERIES_KEY]
+        )
         await session.commit()
 
     assert rows_written == 2
@@ -193,7 +204,7 @@ async def test_compacts_multiple_series_keys_independently():
 
 async def test_no_old_rows_returns_zero():
     async with async_session_factory() as session:
-        rows_written = await compact_intraday_samples(session, TEST_DAY)
+        rows_written = await compact_intraday_samples(session, TEST_DAY, series_keys=[SERIES_KEY])
         await session.commit()
 
     assert rows_written == 0

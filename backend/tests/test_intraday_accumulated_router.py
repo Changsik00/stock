@@ -78,7 +78,12 @@ async def test_flow_intraday_accumulated_returns_rows_split_by_market(monkeypatc
     assert isinstance(body["market_closed"], bool)
 
 
-async def test_flow_intraday_accumulated_empty_returns_empty_lists():
+async def test_flow_intraday_accumulated_empty_returns_empty_lists(monkeypatch):
+    # 2026-07-23 수정 — 장중에는 실제 worker의 60초 잡이 오늘 날짜에 진짜 행을
+    # 계속 써서(§5.14가 의도한 정상 동작) "오늘"을 그대로 조회하면 더 이상
+    # 비어있지 않다. 이 테스트는 "행이 하나도 없을 때"를 검증하려는 것이므로,
+    # 실 데이터와 절대 겹치지 않는 TEST_DAY(2099년)로 "지금"을 고정한다.
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/markets/flow/intraday-accumulated")
 
@@ -143,7 +148,9 @@ async def test_foreign_position_intraday_accumulated_returns_summed_spot_and_fut
     assert body["futures"] == [{"time": "10:00", "value": 456.0}]
 
 
-async def test_foreign_position_intraday_accumulated_empty_returns_empty_lists():
+async def test_foreign_position_intraday_accumulated_empty_returns_empty_lists(monkeypatch):
+    # 위와 동일한 이유(장중 실데이터와 안 겹치게 TEST_DAY로 "지금" 고정).
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/markets/foreign-position/intraday-accumulated")
 
@@ -179,7 +186,9 @@ async def test_breadth_intraday_accumulated_returns_written_points(monkeypatch):
     ]
 
 
-async def test_breadth_intraday_accumulated_empty_returns_empty_list():
+async def test_breadth_intraday_accumulated_empty_returns_empty_list(monkeypatch):
+    # 위와 동일한 이유(장중 실데이터와 안 겹치게 TEST_DAY로 "지금" 고정).
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/markets/breadth/intraday-accumulated")
 
@@ -200,10 +209,20 @@ async def test_intraday_sample_rows_survive_a_fresh_query_after_write(monkeypatc
     async with async_session_factory() as session:
         await snap.record_futures_flow_snapshot(session, {"investors": {"외국인": {"net_value": 789}}, "market_closed": False})
 
-    # 별도 세션으로 직접 DB를 읽어 행이 실제로 커밋됐는지 먼저 확인.
+    # 별도 세션으로 직접 DB를 읽어 행이 실제로 커밋됐는지 먼저 확인. 장중에는
+    # 실제 worker가 같은 series_key로 계속 실데이터를 쓰고 있으니(§5.14 정상
+    # 동작), TEST_DAY 하루로 범위를 좁혀야 이번에 쓴 행만 걸린다.
+    day_start = _kst(0, 0)
+    day_end = day_start + dt.timedelta(days=1)
     async with async_session_factory() as verify_session:
         rows = (
-            await verify_session.execute(select(IntradaySample).where(IntradaySample.series_key == "futures_외국인"))
+            await verify_session.execute(
+                select(IntradaySample).where(
+                    IntradaySample.series_key == "futures_외국인",
+                    IntradaySample.time >= day_start,
+                    IntradaySample.time < day_end,
+                )
+            )
         ).scalars().all()
         assert len(rows) == 1
         assert float(rows[0].value) == 789

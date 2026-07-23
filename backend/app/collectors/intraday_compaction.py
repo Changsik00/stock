@@ -42,20 +42,34 @@ def _bucket_start(ts: dt.datetime) -> dt.datetime:
     return ts.replace(minute=bucket_minute, second=0, microsecond=0)
 
 
-async def compact_intraday_samples(session: AsyncSession, target_date: dt.date) -> int:
+async def compact_intraday_samples(
+    session: AsyncSession, target_date: dt.date, series_keys: list[str] | None = None
+) -> int:
     """``target_date`` 기준 ``target_date - COMPACT_AFTER_DAYS`` 이전(KST 자정
     기준)의 원본(``resolution_seconds=0``) 행을 series_key + 15분 버킷으로 묶어
     평균값을 압축본(``resolution_seconds=900``)으로 upsert하고, 압축에 쓰인 원본을
     삭제한다. 반환값은 생성/갱신된 압축 버킷 개수(REGISTRY의 다른 collect_fn들과
-    동일하게 "rows written" 의미로 collect_log.rows에 기록됨)."""
+    동일하게 "rows written" 의미로 collect_log.rows에 기록됨).
+
+    ``series_keys``를 주면 그 목록에만 스코프한다(기본 None = 전체 series_key,
+    실제 배치 실행 시의 동작 그대로). **2026-07-23 추가** — 테스트가 먼 미래
+    target_date(예: 2099년)를 써서 "8일 이전" 커트라인을 흉내내면, 그 기준으론
+    실제 운영 데이터(오늘 쌓인 원본)도 전부 "오래된 것"이 돼버려 테스트 실행마다
+    진짜 운영 데이터를 조기 압축해버리는 사고가 있었다(실측 확인: 2026-07-23
+    새벽 원본 32건이 테스트 실행 중 15분 버킷으로 조기 압축됨). 테스트는 반드시
+    이 파라미터로 자기 series_key만 스코프해서 이 사고를 재현하지 않는다."""
     cutoff = dt.datetime.combine(target_date - dt.timedelta(days=COMPACT_AFTER_DAYS), dt.time.min, tzinfo=KST)
+
+    conditions = [
+        IntradaySample.resolution_seconds == 0,
+        IntradaySample.time < cutoff,
+    ]
+    if series_keys is not None:
+        conditions.append(IntradaySample.series_key.in_(series_keys))
 
     rows = (
         await session.execute(
-            select(IntradaySample.series_key, IntradaySample.time, IntradaySample.value).where(
-                IntradaySample.resolution_seconds == 0,
-                IntradaySample.time < cutoff,
-            )
+            select(IntradaySample.series_key, IntradaySample.time, IntradaySample.value).where(*conditions)
         )
     ).all()
 
@@ -85,12 +99,7 @@ async def compact_intraday_samples(session: AsyncSession, target_date: dt.date) 
     # 그대로 남는다. 같은 (series_key, time) PK를 원본과 압축본이 동시에 가질 일이
     # 없다는 전제(models.py IntradaySample 참고, 버킷 시작 시각이 원본 60초 틱의
     # 정확한 timestamp와 우연히 같을 확률은 사실상 0에 가깝다).
-    await session.execute(
-        IntradaySample.__table__.delete().where(
-            IntradaySample.resolution_seconds == 0,
-            IntradaySample.time < cutoff,
-        )
-    )
+    await session.execute(IntradaySample.__table__.delete().where(*conditions))
 
     return len(buckets)
 

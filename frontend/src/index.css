@@ -691,6 +691,81 @@ header h1 {
   font-family: inherit;
 }
 
+/* "지금 유입 우세"(PLAN.md §5.15) — 코스닥·외국인 검증 신호만 근거로 한 종합
+   판정 카드. regime-card-kosdaq는 "코스닥우세"일 때만 강조 테두리(약한 accent,
+   상승/하락 색과는 다른 --up 재사용 — 이 카드는 등락률이 아니라 판정 결과이지만
+   "우세=긍정적 관찰"이라는 방향성이 있어 상승 관례색을 그대로 빌려온다), 그 외는
+   중립 테두리. */
+.regime-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+
+.regime-card-kosdaq {
+  border-color: var(--up);
+}
+
+.regime-card-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.regime-verdict {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.regime-reason {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-bottom: 10px;
+}
+
+.regime-combo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.regime-combo {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--chip-bg);
+  font-size: 12px;
+}
+
+.regime-combo-weak {
+  opacity: 0.6;
+}
+
+.regime-combo-label {
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.regime-combo-streak {
+  font-variant-numeric: tabular-nums;
+}
+
+.regime-combo-stats {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.regime-combo-hint {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-style: italic;
+}
+
 /* ETF 경유 수급 상위 (PLAN.md §4.5, FlowPathTable.jsx) — 기여 ETF 배지 목록. */
 .flow-path-etf-badges {
   display: flex;

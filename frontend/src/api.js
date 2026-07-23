@@ -195,6 +195,15 @@ export async function fetchAttention() {
   return getJson('/api/markets/attention')
 }
 
+// GET /api/markets/regime -> { regime, reason, reliable_signal, market_closed,
+// kospi: {외국인, 기관계, baseline}, kosdaq: {...}, cached_at } — "지금 어느
+// 시장이 유리한지" 검증 기반 판정(PLAN.md §5.15, 60초 서버 캐시). flowLive·
+// attentionTop과 동일하게 로컬 전용 기능이라 정적 배포(VITE_STATIC_DATA) 대상이
+// 아니다 — 이 값은 오늘의 실시간 스트릭 반영이 핵심이라 스냅샷으로 남길 수 없다.
+export async function fetchRegime() {
+  return getJson('/api/markets/regime')
+}
+
 // GET /api/groups?type=upjong|theme -> [{name, change_rate, value, market_sum}] —
 // 해당 group_type의 최신 날짜 스냅샷 (PLAN.md §4.6 3.6-3 트리맵).
 export async function fetchGroups(type = 'upjong') {

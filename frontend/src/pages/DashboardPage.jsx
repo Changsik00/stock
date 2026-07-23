@@ -22,6 +22,7 @@ import {
   fetchMacroSeries,
   fetchMarketIntraday,
   fetchMarketSeries,
+  fetchRegime,
   fetchScalpCandidates,
   fetchSentiment,
   fetchValueRank,
@@ -380,6 +381,16 @@ function mergeIntradayByTime(seriesA, seriesB) {
 function latestFlowRow(flows, investor) {
   const rows = flows?.[investor]
   return rows && rows.length > 0 ? rows[rows.length - 1] : null
+}
+
+// 종목 랭킹 요약 카드(거래대금 상위/실시간 관심 TOP5/스켈핑 후보)의 시장 필터
+// (PLAN.md §5.15-3) — rows 각 행에 이미 있는 market 필드('kospi'|'kosdaq'|null)로
+// 걸러낸다. 'all'이면 그대로, 필터가 시장 하나로 좁혀지면 market이 없는(null)
+// 행은 그 시장 소속인지 알 수 없으니 제외한다.
+function filterRowsByMarket(rows, marketFilter) {
+  if (!rows) return rows
+  if (marketFilter === 'all') return rows
+  return rows.filter((r) => r.market === marketFilter)
 }
 
 // 차트 X축 라벨 — 'YYYY-MM-DD' -> 'MM/DD' (MacroChart.jsx/MarketFundChart.jsx의
@@ -1595,6 +1606,21 @@ export default function DashboardPage() {
   // 전용 기능과 동일한 관례).
   const [scalpCandidates, setScalpCandidates] = useState(null)
 
+  // "지금 유입 우세" 판정(PLAN.md §5.15) — GET /api/markets/regime 응답 바디를
+  // 그대로 담는다({ regime, reason, reliable_signal, market_closed, kospi,
+  // kosdaq, cached_at }). scalpCandidates 등과 동일하게 로컬 전용 기능이라
+  // 정적 배포에서는 항상 null.
+  const [regime, setRegime] = useState(null)
+
+  // 종목 랭킹 요약 3개 카드(거래대금 상위/실시간 관심 TOP5/스켈핑 후보)의 시장
+  // 필터(PLAN.md §5.15-3) — 'all'|'kospi'|'kosdaq', 기본 전체. 수급 상위/ETF
+  // 경유 상위는 시장 구분이 뚜렷하지 않은 소스(수급 상위는 market이 일부만 채워짐,
+  // ETF 경유 상위는 애초에 market 필드가 없음)라 필터 대상에서 뺀다. 이름을
+  // FlowSummaryModal의 지역 marketFilter(합계/코스피/코스닥, §5.10)와 구분하기
+  // 위해 rankingMarketFilter로 부른다 — 서로 다른 컴포넌트 스코프라 충돌은
+  // 없지만 같은 파일 안에서 헷갈리지 않도록.
+  const [rankingMarketFilter, setRankingMarketFilter] = useState('all')
+
   const [modal, setModal] = useState(null) // { type, title, ...params } | null
 
   // 지수 3종 — 타일(최신 종가/등락률) + 캔들 모달 기본 기간(90일) 데이터를 한 번에
@@ -1707,12 +1733,29 @@ export default function DashboardPage() {
     }
 
     function loadScalpCandidates() {
-      return fetchScalpCandidates(5)
+      // PLAN.md §5.15-3 시장 필터 — Top5Card는 어차피 rows.slice(0,5)만 렌더하지만,
+      // 필터가 코스피/코스닥 한쪽으로 좁혀지면 상위 5개 중 그 시장 종목이 5개 미만일
+      // 수 있다. limit을 20으로 넉넉히 받아와 필터 후에도 5개를 채울 여유를 둔다
+      // (기존 5 -> 20, 백엔드는 이미 캐시된 value-rank/live·attention 조합을
+      // 스코어링만 다시 하는 거라 비용 증가 없음, 최대 50까지 허용됨).
+      return fetchScalpCandidates(20)
         .then((body) => {
           if (!cancelled) setScalpCandidates(body)
         })
         .catch(() => {
           if (!cancelled) setScalpCandidates(null)
+        })
+    }
+
+    // "지금 유입 우세" 판정(PLAN.md §5.15) — 백엔드가 이미 60초 캐시라 이 1분
+    // 티어에 그대로 합류한다(별도 setInterval 신설 금지).
+    function loadRegime() {
+      return fetchRegime()
+        .then((body) => {
+          if (!cancelled) setRegime(body)
+        })
+        .catch(() => {
+          if (!cancelled) setRegime(null)
         })
     }
 
@@ -1784,7 +1827,8 @@ export default function DashboardPage() {
           loadGroupLive(),
           loadBasisLive(),
           loadFuturesFlowLive(),
-          loadFxLive()
+          loadFxLive(),
+          loadRegime()
         )
       }
       return Promise.all(tasks)
@@ -2150,20 +2194,22 @@ export default function DashboardPage() {
   const programArbDate = latestOf(programDate('prog_arb_kospi'), programDate('prog_arb_kosdaq'))
 
   // 시그널 배지(PLAN.md §4.5-5, 중립 표현 — "함정" 단정 금지) — ① 외인 현물·선물 방향
-  // 대치, ② 백워데이션, ③ 만기 D-3 이내. 값이 없거나(0 포함) 한쪽이 없으면 판단하지
-  // 않는다(오검 방지 — Math.sign(0)===0이라 자연히 걸러진다).
+  // 대치, ② 만기 D-3 이내. 값이 없거나(0 포함) 한쪽이 없으면 판단하지 않는다(오검
+  // 방지 — Math.sign(0)===0이라 자연히 걸러진다).
+  // 2026-07-23(§5.15 후속): 백워데이션 배지는 제거했다 — 3년치 실측 결과 다음날
+  // 하락확률이 콘탱고와 거의 차이 없어(43.8% vs 43.0%, PLAN.md §5.15) 예측력이
+  // 없다는 게 실증됐다. 베이시스 값 자체(콘탱고/역전 텍스트)는 위 KpiTile에 그대로
+  // 남아 있다 — 이 배지 행에서만 뺀다.
   const foreignSpotSign = foreignSpotValue === null || foreignSpotValue === undefined ? 0 : Math.sign(foreignSpotValue)
   const foreignFuturesSign =
     foreignFuturesRow?.net_value === null || foreignFuturesRow?.net_value === undefined
       ? 0
       : Math.sign(foreignFuturesRow.net_value)
   const directionMismatch = foreignSpotSign !== 0 && foreignFuturesSign !== 0 && foreignSpotSign !== foreignFuturesSign
-  const backwardationSignal = basisLatest?.backwardation === true
   const expirySoonSignal = typeof expiry?.d_day === 'number' && expiry.d_day >= 0 && expiry.d_day <= EXPIRY_SOON_D_DAY
 
   const foreignSignals = [
     directionMismatch && { key: 'direction', kind: 'warn', label: '현·선 방향 상이' },
-    backwardationSignal && { key: 'backwardation', kind: 'info', label: '백워데이션' },
     expirySoonSignal && { key: 'expiry', kind: 'warn', label: '만기 임박' },
   ].filter(Boolean)
 
@@ -2267,6 +2313,68 @@ export default function DashboardPage() {
       )}
       {!STATIC_DATA && marketStatus === 'closed' && (
         <div className="banner">장 마감 — 모든 지표가 최근 확정치입니다.</div>
+      )}
+
+      {/* 0.5 지금 유입 우세(PLAN.md §5.15, 2026-07-23) — 코스닥·외국인 연속
+          순매수/매도일수 검증 결과(3년치 index_ohlcv/market_flow 백테스트)만
+          근거로 "지금 어느 시장이 유리한지" 판정한다. 문구는 항상 관찰+확률
+          서술이다(§5 전체 원칙) — "사라"/"지금이 기회" 같은 명령형·추천형 문구는
+          이 카드에서도 절대 쓰지 않는다. 코스피 등 신뢰도 낮은 조합은 숨기지 않고
+          흐리게("참고용 · 신호 약함") 구분해 그대로 노출한다(정직성 원칙). 정적
+          배포는 라이브 폴링이 없어 대상이 아니다(다른 로컬 전용 카드와 동일). */}
+      {!STATIC_DATA && regime && (
+        <>
+          <div className="section-title">지금 유입 우세</div>
+          <div className={`regime-card regime-card-${regime.regime === '코스닥우세' ? 'kosdaq' : 'neutral'}`}>
+            <div className="regime-card-top">
+              <span className="regime-verdict">{regime.regime}</span>
+              {regime.regime === '코스닥우세' && (
+                <button
+                  type="button"
+                  className="toggle-chip"
+                  onClick={() => setRankingMarketFilter('kosdaq')}
+                  title="아래 종목 랭킹 요약을 코스닥으로 필터"
+                >
+                  코스닥만 보기 ›
+                </button>
+              )}
+            </div>
+            <div className="regime-reason">{regime.reason}</div>
+            <div className="regime-combo-grid">
+              {['kosdaq', 'kospi'].map((m) =>
+                ['외국인', '기관계'].map((inv) => {
+                  const combo = regime[m]?.[inv]
+                  if (!combo) return null
+                  const streakLabel =
+                    combo.streak > 0
+                      ? `${combo.streak}일 연속 매수`
+                      : combo.streak < 0
+                        ? `${Math.abs(combo.streak)}일 연속 매도`
+                        : '연속 없음'
+                  return (
+                    <div
+                      key={`${m}-${inv}`}
+                      className={`regime-combo ${combo.reliable ? 'regime-combo-reliable' : 'regime-combo-weak'}`}
+                    >
+                      <span className="regime-combo-label">
+                        {m === 'kospi' ? '코스피' : '코스닥'} · {inv}
+                      </span>
+                      <span className="regime-combo-streak">{streakLabel}</span>
+                      {combo.bucket_stats ? (
+                        <span className="regime-combo-stats">
+                          다음날 상승확률 {combo.bucket_stats.positive_rate_pct}% (표본 {combo.bucket_stats.n}일)
+                        </span>
+                      ) : (
+                        <span className="regime-combo-stats">이 구간 과거 표본 없음</span>
+                      )}
+                      {!combo.reliable && <span className="regime-combo-hint">참고용 · 신호 약함</span>}
+                    </div>
+                  )
+                })
+              )}
+            </div>
+          </div>
+        </>
       )}
 
       {/* 1. 지수 3종 */}
@@ -2476,15 +2584,13 @@ export default function DashboardPage() {
               (basisLiveActive ? basisLive.backwardation : basisLatest?.backwardation) === null ? (
                 '-'
               ) : (basisLiveActive ? basisLive.backwardation : basisLatest?.backwardation) ? (
-                // 2026-07-22 수정 — "차익 매도 유의"는 basis<0(부호)만 보고 뜨는데
-                // 실제 청산 가능한 매수차익잔고 규모는 확인하지 않는다. 사용자 지적:
-                // 외인 현물·선물이 둘 다 매수 중인데도 뜰 수 있고, 지수가 오히려
-                // 오를 때도 "유의"라는 문구 때문에 소극 대응을 유도할 수 있다 —
-                // §4.5 "중립 계기판, 함정 탐지기 아님" 원칙에서 벗어난 표현이었다.
-                // 관찰 사실(선물<현물)만 남기고 방향성 판단은 하지 않는다.
-                <Badge kind="info" title="선물이 현물보다 저평가된 상태 — 매수차익잔고 청산과 연관되기도 하나 지수 방향을 결정하지는 않습니다.">
-                  백워데이션(선물&lt;현물)
-                </Badge>
+                // 2026-07-23 수정(§4.5-5 후속) — 어제(2026-07-22)는 "차익 매도 유의"
+                // 문구를 순화해 배지 자체는 남겨뒀는데, 오늘 index_ohlcv/market_flow
+                // 3년치 실측 결과 백워데이션 다음날 하락확률(43.8%)이 콘탱고(43.0%)와
+                // 거의 차이가 없어(PLAN.md §5.15) 예측력이 없다는 게 실증됐다 —
+                // 배지(강조 표시) 자체를 없애고 콘탱고와 동일하게 중립적인 짧은
+                // 텍스트만 남긴다. 베이시스 수치(pt)는 그대로 위에 표시된다.
+                '역전(선물<현물)'
               ) : (
                 '콘탱고'
               )}
@@ -2701,6 +2807,24 @@ export default function DashboardPage() {
           MM-DD만 붙인다(staleHintLabel, 대시보드 상단 표시와 동일 규칙). 정확한 날짜는
           카드 title(hover)로 확인 가능. */}
       <div className="section-title">종목 랭킹 요약</div>
+      {/* 시장 필터(PLAN.md §5.15-3) — 거래대금 상위/실시간 관심 TOP5/스켈핑 후보
+          3개 카드에만 적용된다(각 row에 market 필드가 있는 소스). 수급 상위는
+          market이 일부 구간만 채워져 있고 ETF 경유 상위는 애초에 market 필드가
+          없어(routers/flow_rank.py 참고) 두 카드는 필터 대상에서 뺐다 — 항상
+          그대로 표시된다. */}
+      <div className="toggle-row">
+        {VALUE_RANK_MARKET_OPTIONS.map((opt) => (
+          <button
+            key={opt.key}
+            type="button"
+            className={`toggle-chip ${rankingMarketFilter === opt.key ? 'active' : ''}`}
+            onClick={() => setRankingMarketFilter(opt.key)}
+          >
+            {opt.label}
+          </button>
+        ))}
+        <span className="toggle-hint">거래대금 상위 · 실시간 관심 TOP5 · 스켈핑 후보에 적용</span>
+      </div>
       <div className="top5-grid">
         <Top5Card
           title="수급 상위"
@@ -2740,7 +2864,7 @@ export default function DashboardPage() {
                 : undefined
           }
           hoverDate={effectiveValueRank?.date ? formatDate(effectiveValueRank.date) : undefined}
-          rows={effectiveValueRank?.rows}
+          rows={filterRowsByMarket(effectiveValueRank?.rows, rankingMarketFilter)}
           onMore={() => setModal({ type: 'valueRank', title: '거래대금 상위 — 전체' })}
           renderRow={(row) => (
             <Top5RowTile
@@ -2800,7 +2924,7 @@ export default function DashboardPage() {
         <Top5Card
           title="실시간 관심 TOP5"
           hint="조회수 기준 · 60초 갱신"
-          rows={attentionTop?.rows}
+          rows={filterRowsByMarket(attentionTop?.rows, rankingMarketFilter)}
           onMore={() => setModal({ type: 'attention', title: '실시간 관심 종목 — 전체' })}
           renderRow={(row) => (
             <Top5RowTile
@@ -2832,7 +2956,7 @@ export default function DashboardPage() {
         <Top5Card
           title="스켈핑 후보"
           hint="참고용 스크리닝 — 매매 신호 아님 · 7분 갱신(관심 TOP 배지만 1분)"
-          rows={scalpCandidates?.rows}
+          rows={filterRowsByMarket(scalpCandidates?.rows, rankingMarketFilter)}
           onMore={() => setModal({ type: 'scalp', title: '스켈핑 후보 — 전체' })}
           renderRow={(row, i) => (
             <Top5RowTile

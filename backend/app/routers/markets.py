@@ -89,6 +89,7 @@ from ..collectors.market_flow import fetch_live_flow
 from ..db import get_session
 from ..market_hours import KST, is_market_closed as _market_closed_kst, is_nxt_closed
 from ..models import IndexOhlcv, MacroSeries, MarketBreadth, MarketFlow, Stock
+from ..quant import regime_backtest
 from ..services import DB_MARKET, get_market_series_from_db
 
 logger = logging.getLogger(__name__)
@@ -768,6 +769,181 @@ async def market_fx_live(session: AsyncSession = Depends(get_session)):
     bool, "cached_at": iso8601}``.
     """
     return await _warm_fx_live(session)
+
+
+# GET /api/markets/regime — "검증 기반 시장 우세 판정"(PLAN.md §5.15, 2026-07-23).
+# app/quant/regime_backtest.py의 스트릭/버킷 계산 함수를 코스피/코스닥 ×
+# 외국인/기관계 4개 조합 전부에 돌리지만, **종합 판정 근거는 코스닥·외국인 하나뿐**
+# 이다(§5.15 실측 검증 결과 — 나머지 3개 조합은 버킷 간 부호가 들쭉날쭉해 신호로
+# 채택하지 않는다). "코스피는 신호가 약하다"는 사실을 감추지 않고 응답에 그대로
+# 노출한다(각 조합의 "reliable" 플래그). 새 외부 호출 없음 — 오늘의 스트릭은
+# `_warm_flow_live`가 이미 반환한 잠정치를 재사용해 어제까지 확정된 스트릭에
+# 반영한다. breadth/live 등과 동일한 60초 메모리 캐시 + Lock 패턴.
+_REGIME_CACHE_TTL_SECONDS = 60
+_regime_cache: dict[str, object] = {"ts": 0.0, "data": None}
+_regime_cache_lock = asyncio.Lock()
+
+REGIME_MARKETS = ("kospi", "kosdaq")
+REGIME_INVESTORS = ("외국인", "기관계")
+
+
+def _sign(value: float | int) -> int:
+    if value > 0:
+        return 1
+    if value < 0:
+        return -1
+    return 0
+
+
+def _bucket_stats_for(buckets: list[dict], label: str | None) -> dict | None:
+    if label is None:
+        return None
+    for b in buckets:
+        if b["bucket"] == label:
+            return b
+    return None
+
+
+async def _compute_regime_combo(
+    session: AsyncSession, market: str, investor: str, market_flow_live: dict | None
+) -> dict:
+    """market x investor 한 조합의 "오늘 반영한 스트릭" + 그 스트릭 구간의
+    과거 통계. ``market_flow_live``는 `_warm_flow_live` 응답의 해당 시장 값
+    (``{"date", "investors", "provisional", "source"}``) — provisional=True일
+    때만(진짜 오늘 장중 라이브 값일 때만) 확정 스트릭에 반영한다. provisional=False면
+    `_warm_flow_live`가 이미 market_flow DB 확정치로 폴백한 것이라(그 값은 확정
+    스트릭 계산에 이미 포함돼 있음) 다시 반영하면 이중 계산이 된다."""
+    confirmed_streak = await regime_backtest.compute_current_streak(session, market, investor)
+    streak = confirmed_streak
+    live_applied = False
+    if market_flow_live and market_flow_live.get("provisional") is True:
+        live_net_value = market_flow_live.get("investors", {}).get(investor, {}).get("net_value")
+        # PLAN.md §5.15-2: "오늘 잠정 방향이 스트릭과 같은 방향이면" 반영한다 —
+        # 스트릭이 아직 없거나(0) 방향이 반대면 확정 스트릭을 그대로 둔다(오늘
+        # 하루치 잠정 데이터로 스트릭 리셋/반전을 판정하지 않는다, 보수적 처리).
+        if (
+            live_net_value is not None
+            and confirmed_streak != 0
+            and _sign(live_net_value) == _sign(confirmed_streak)
+        ):
+            streak = regime_backtest.next_streak(confirmed_streak, live_net_value)
+            live_applied = True
+
+    buckets = await regime_backtest.compute_streak_buckets(session, market, investor)
+    label = regime_backtest.bucket_label(streak)
+    stats = _bucket_stats_for(buckets, label)
+    return {
+        "streak": streak,
+        "confirmed_streak": confirmed_streak,
+        "live_applied": live_applied,
+        "bucket": label,
+        "bucket_stats": stats,
+        "reliable": market == "kosdaq" and investor == "외국인",
+    }
+
+
+def _judge_regime(kosdaq_foreign: dict) -> tuple[str, str]:
+    """코스닥·외국인 조합 하나만 근거로 종합 판정한다(§5.15 원칙 — 코스피는
+    자체 스트릭으로 "코스피우세"를 절대 만들지 않는다, 나머지 3개 조합은 참고
+    수치로만 응답에 노출됨). 스트릭이 짧으면(1일 이하) 그 방향과 무관하게
+    "중립"(표본이 짧아 판정 근거로 못 씀), 매도 스트릭(2일+)도 "중립"(코스닥에
+    불리하다는 관찰이지 코스피가 유리하다는 뜻은 아니므로), 2일+ 연속 매수만
+    "코스닥우세". 문구는 항상 관찰+확률 서술이다(§5 원칙 — 명령형/추천형 금지)."""
+    streak = kosdaq_foreign["streak"]
+    stats = kosdaq_foreign["bucket_stats"]
+
+    if streak == 0:
+        return "중립", "코스닥 외국인 수급 연속 방향 없음(직전 순매수/매도 전환 직후) — 판정 근거 부족"
+
+    if abs(streak) == 1:
+        direction = "매수" if streak > 0 else "매도"
+        return "중립", f"코스닥 외국인 {abs(streak)}일 연속 {direction} 중 — 표본이 짧아(1일) 판정 근거로 쓰지 않음"
+
+    if stats is None or stats.get("n", 0) == 0:
+        direction = "매수" if streak > 0 else "매도"
+        return "중립", f"코스닥 외국인 {abs(streak)}일 연속 {direction} 중 — 이 구간 과거 표본 없음"
+
+    pct = stats["positive_rate_pct"]
+    n = stats["n"]
+    if streak >= 2:
+        return "코스닥우세", f"코스닥 외국인 {streak}일 연속 매수 중 — 과거 이 구간 다음날 상승확률 {pct}%(표본 {n}일)"
+
+    return (
+        "중립",
+        f"코스닥 외국인 {abs(streak)}일 연속 매도 중 — 과거 이 구간 다음날 상승확률 {pct}%(표본 {n}일), "
+        "코스닥에 불리한 신호일 뿐 코스피가 유리하다는 뜻은 아님",
+    )
+
+
+async def _warm_regime(session: AsyncSession) -> dict:
+    """regime 캐시를 채우고 payload를 반환한다 — 이 파일의 다른 라이브
+    엔드포인트와 동일한 warm 함수 + TTL + Lock 패턴. 계산 자체는 수백 행
+    집계라 비싸지 않지만(모듈 상단 주석 참고) 매 요청마다 재계산은 낭비라
+    60초 TTL로 감싼다."""
+    now = time.monotonic()
+    async with _regime_cache_lock:
+        cached = _regime_cache["data"]
+        if cached is not None and (now - _regime_cache["ts"]) < _REGIME_CACHE_TTL_SECONDS:
+            return cached
+
+        try:
+            flow_live_payload = await _warm_flow_live(session)
+        except Exception as e:  # noqa: BLE001 - 라이브 실패해도 확정 스트릭만으로 판정 가능
+            logger.warning("regime: flow/live 조회 실패, 확정치 스트릭만 사용: %s", e)
+            flow_live_payload = {
+                "kospi": None,
+                "kosdaq": None,
+                "market_closed": _market_closed_kst(dt.datetime.now(KST)),
+            }
+
+        market_closed = bool(flow_live_payload.get("market_closed"))
+
+        combos: dict[str, dict[str, dict]] = {}
+        baselines: dict[str, dict] = {}
+        for market in REGIME_MARKETS:
+            baselines[market] = await regime_backtest.compute_baseline(session, market)
+            market_flow_live = flow_live_payload.get(market)
+            combos[market] = {}
+            for investor in REGIME_INVESTORS:
+                combos[market][investor] = await _compute_regime_combo(session, market, investor, market_flow_live)
+
+        regime, reason = _judge_regime(combos["kosdaq"]["외국인"])
+
+        payload = {
+            "regime": regime,
+            "reason": reason,
+            "reliable_signal": "kosdaq_foreign",
+            "market_closed": market_closed,
+            "kospi": {**combos["kospi"], "baseline": baselines["kospi"]},
+            "kosdaq": {**combos["kosdaq"], "baseline": baselines["kosdaq"]},
+            "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        _regime_cache["data"] = payload
+        _regime_cache["ts"] = now
+        return payload
+
+
+@router.get("/api/markets/regime")
+async def markets_regime(session: AsyncSession = Depends(get_session)):
+    """"지금 어느 시장이 유리한지" 검증 기반 판정(PLAN.md §5.15).
+
+    코스피/코스닥 각각 외국인/기관계 연속 순매수·매도 스트릭 + 그 스트릭
+    구간의 과거 다음날 수익률 통계(app/quant/regime_backtest.py)를 계산한다.
+    **종합 판정(regime/reason)은 코스닥·외국인 하나만 근거로 쓴다** — 코스피
+    자체 스트릭으로는 "코스피우세"를 절대 만들지 않는다(§5.15 실측 검증 결과,
+    코스피/기관 조합은 버킷 간 부호가 들쭉날쭉해 신호로 채택하지 않음). 각
+    조합에는 ``reliable``(신뢰 가능한 신호인지) 플래그가 있어 프런트가 참고용
+    수치를 흐리게 구분해 표시할 수 있다.
+
+    Returns ``{"regime": "코스닥우세"|"중립", "reason": str, "reliable_signal":
+    "kosdaq_foreign", "market_closed": bool, "kospi": {"외국인": {...}, "기관계":
+    {...}, "baseline": {...}}, "kosdaq": {...}, "cached_at": iso8601}`` — 각
+    투자자 값은 ``{"streak", "confirmed_streak", "live_applied", "bucket",
+    "bucket_stats", "reliable"}``(``bucket_stats``는 ``{"bucket", "n",
+    "avg_return_pct", "positive_rate_pct"}`` | None). "코스피우세"는 설계상
+    나오지 않는다(§5.15 원칙 — 코스피 신호가 약하다는 걸 감추지 않는다).
+    """
+    return await _warm_regime(session)
 
 
 @router.get("/api/markets/flow/intraday-accumulated")
