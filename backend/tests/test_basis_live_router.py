@@ -109,6 +109,69 @@ async def test_basis_live_market_closed_skips_fetch_no_cache(monkeypatch):
     assert body["basis"] is None
 
 
+async def test_basis_live_includes_futures_today_ohlcv(monkeypatch):
+    """PLAN.md §5.21-1 — futures_row 전체(open/high/low/close/volume)가
+    futures_today로 노출되어야 한다(기존엔 close만 basis 계산에 쓰고 나머지는
+    버렸다)."""
+
+    def fake_fetch(market, start, end):
+        return FUT_ROWS if market == basis.FUTURES_MARKET else SPOT_ROWS
+
+    monkeypatch.setattr(basis, "_fetch_index_series_blocking", fake_fetch)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/basis/live")
+
+    body = resp.json()
+    assert body["futures_today"] == {
+        "date": "2026-07-20",
+        "open": 1040.0,
+        "high": 1051.0,
+        "low": 1033.0,
+        "close": 1049.85,
+        "volume": 9866,
+    }
+
+
+async def test_basis_live_market_closed_no_cache_sets_futures_today_none(monkeypatch):
+    monkeypatch.setattr(basis, "is_market_closed", lambda now_kst: True)
+
+    def _raise(market, start, end):  # pragma: no cover - 불리면 안 됨
+        raise AssertionError("naver_index should not be called when market is closed")
+
+    monkeypatch.setattr(basis, "_fetch_index_series_blocking", _raise)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/basis/live")
+
+    body = resp.json()
+    assert body["futures_today"] is None
+
+
+async def test_basis_live_market_closed_reuse_carries_over_futures_today(monkeypatch):
+    """장 마감 + 캐시 재사용 분기(`{**cached, "market_closed": True}`)가
+    futures_today를 그대로 이어받는지 확인 — PLAN.md §5.21-1 "carry over" 요구사항."""
+
+    def fake_fetch(market, start, end):
+        return FUT_ROWS if market == basis.FUTURES_MARKET else SPOT_ROWS
+
+    monkeypatch.setattr(basis, "_fetch_index_series_blocking", fake_fetch)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r1 = await client.get("/api/markets/basis/live")
+    assert r1.json()["futures_today"] is not None
+
+    basis._basis_live_cache["ts"] = 0.0  # TTL 만료 시뮬레이션
+    monkeypatch.setattr(basis, "is_market_closed", lambda now_kst: True)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r2 = await client.get("/api/markets/basis/live")
+
+    body = r2.json()
+    assert body["market_closed"] is True
+    assert body["futures_today"] == r1.json()["futures_today"]
+
+
 async def test_basis_live_market_closed_reuses_last_cache(monkeypatch):
     def fake_fetch(market, start, end):
         return FUT_ROWS if market == basis.FUTURES_MARKET else SPOT_ROWS

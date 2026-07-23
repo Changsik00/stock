@@ -36,6 +36,15 @@ DB 폴백이 필요 없어(소스 자체가 최근 며칠 창을 항상 주므�
 ``is_market_closed``로 걸러 네이버를 아예 호출하지 않는다 — DB 폴백이 없으므로
 마지막 캐시(있으면)를 ``market_closed: true``로 재사용하고, 캐시조차 없으면
 빈 값 + ``market_closed: true``로 응답한다(502 아님).
+
+**futures_today 필드 추가(PLAN.md §5.21, 2026-07-23)**: K200 선물 일봉 차트가
+분봉이 없어(§5.1) 매번 "어제 그대로"로 보이는 문제를 해결하기 위해, 위에서 이미
+fetch한 ``futures_row``(``close``만 베이시스 계산에 쓰고 나머지는 버리던 값)의
+open/high/low/close/volume 전부를 ``futures_today``로 payload에 노출한다 — 새
+외부 호출 없이 기존 fetch를 재사용. `routers/markets.py::_build_prices`가 이
+필드를 읽어 `/api/markets/futures/series` 응답 끝에 "오늘 잠정치" 합성 캔들을
+붙인다. 장 마감/캐시 재사용 분기에서도 ``{**cached, ...}``로 그대로 이어받아
+빠지지 않게 한다.
 """
 
 from __future__ import annotations
@@ -100,6 +109,7 @@ async def _warm_basis_live() -> dict:
                     "basis": None,
                     "basis_pct": None,
                     "backwardation": None,
+                    "futures_today": None,
                     "expiry": _build_expiry(now_kst.date()),
                     "market_closed": True,
                     "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -129,6 +139,19 @@ async def _warm_basis_live() -> dict:
         basis = futures_row["close"] - spot_row["close"]
         basis_pct = (basis / spot_row["close"] * 100) if spot_row["close"] else None
 
+        # PLAN.md §5.21 — futures_row는 이미 위에서 fetch한 "오늘" 선물 일봉이다.
+        # 원래는 close만 베이시스 계산에 쓰고 open/high/low/volume은 버렸는데, 그대로
+        # 노출하면 markets.py의 선물 일봉 차트가 "오늘 잠정치" 캔들을 새 외부 호출
+        # 없이 만들 수 있다(모듈 docstring "futures_today 필드 추가" 절 참고).
+        futures_today = {
+            "date": futures_row["date"].isoformat(),
+            "open": futures_row["open"],
+            "high": futures_row["high"],
+            "low": futures_row["low"],
+            "close": futures_row["close"],
+            "volume": futures_row["volume"],
+        }
+
         payload = {
             "date": futures_row["date"].isoformat(),
             "futures_close": futures_row["close"],
@@ -136,6 +159,7 @@ async def _warm_basis_live() -> dict:
             "basis": round(basis, 2),
             "basis_pct": round(basis_pct, 4) if basis_pct is not None else None,
             "backwardation": basis < 0,
+            "futures_today": futures_today,
             "expiry": _build_expiry(today),
             "market_closed": False,
             "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -233,6 +257,9 @@ async def basis_live() -> dict:
     fchart siseJson의 "오늘" 봉을 온디맨드로 재조회해 7분 메모리 캐시로 감싼다
     (DB에는 쓰지 않는다 — §3.5 원칙). 응답은 `/api/markets/basis`의 `latest`/`expiry`와
     같은 모양이다: ``{date, futures_close, kospi200_close, basis, basis_pct,
-    backwardation, expiry, cached_at}``.
+    backwardation, futures_today, expiry, cached_at}``. ``futures_today``는
+    ``{date, open, high, low, close, volume}``(PLAN.md §5.21, 모듈 docstring
+    "futures_today 필드 추가" 절 참고) — `routers/markets.py`가 선물 일봉 차트에
+    "오늘 잠정치" 캔들을 붙이는 데 재사용한다.
     """
     return await _warm_basis_live()

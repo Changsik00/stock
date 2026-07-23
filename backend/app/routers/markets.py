@@ -9,6 +9,15 @@ for the KRX->DB migration note). The legacy `/api/series?market=` path is kept a
 an alias so the existing frontend keeps working until it's migrated — it returns
 only the `series` list (no flows) for backward compatibility.
 
+**예외(PLAN.md §5.21, 2026-07-23)**: `market == "futures"`일 때만 위 "DB 전용"
+원칙에 조건부 예외가 있다 — 선물은 분봉 소스가 없어 일봉이 유일한 뷰라 매번
+"어제 그대로"로 보이는 문제를 완화하려고, `_build_prices`가 `basis.py::
+_warm_basis_live`(이미 60초 캐시로 warm되어 있는 값, 새 외부 호출 아님)의
+`futures_today`를 DB 마지막 확정 행보다 최신일 때만 `provisional: true` 합성
+행으로 덧붙인다(`_append_futures_provisional_row` 참고). 라이브 조회가 실패하면
+조용히 건너뛰어 이 엔드포인트의 "DB만 읽어 항상 성공" 계약은 그대로 유지된다.
+코스피/코스닥은 이 예외 대상이 아니다(분봉 탭으로 이미 해결됨).
+
 flows now also covers `market=futures`: market_flow stores K200 선물 투자자별
 순매수 as `market='k200_futures'` (개인/외국인/기관계, collectors/futures_flow.py,
 네이버 m.stock.naver.com 소스 — PLAN.md §4.5 4.5-2). `_build_flows` translates the
@@ -91,6 +100,7 @@ from ..market_hours import KST, is_market_closed as _market_closed_kst, is_nxt_c
 from ..models import IndexOhlcv, MacroSeries, MarketBreadth, MarketFlow, Stock
 from ..quant import flow_acceleration, regime_backtest
 from ..services import DB_MARKET, get_market_series_from_db
+from . import basis as basis_router
 
 logger = logging.getLogger(__name__)
 
@@ -115,11 +125,74 @@ _live_cache: dict[str, object] = {"ts": 0.0, "data": None}
 _live_cache_lock = asyncio.Lock()
 
 
+async def _append_futures_provisional_row(data: list[dict]) -> None:
+    """선물 일봉 DB 시리즈(`data`) 끝에 "오늘 잠정치" 합성 행을 in-place로 붙인다
+    (PLAN.md §5.21, 2026-07-23) — 코스피/코스닥은 일봉이 어제까지만 있어도 분봉
+    탭(intraday)이 오늘 실시간 움직임을 보여주는데, 선물은 분봉 소스가 없어(§5.1)
+    일봉이 유일한 뷰라 매번 볼 때마다 "어제 그대로"로 보이는 구조적 문제가 있었다.
+
+    `basis.py::_warm_basis_live`가 베이시스 계산을 위해 이미 fetch해 둔 오늘 선물
+    일봉(``futures_today``, §5.21-1)을 그대로 재사용한다 — 새 외부 호출 없음(그
+    캐시는 collectors/live_refresh.py의 60초 인터벌 잡이 이미 선제적으로 채우는
+    중이라 이 호출은 대개 캐시 히트다). 이 엔드포인트의 계약은 "DB 전용, 항상
+    성공"이므로(모듈 docstring 참고) 라이브 조회가 실패해도 조용히 건너뛴다 —
+    provisional 행이 없을 뿐 500을 내지 않는다.
+
+    DB 마지막 확정 행보다 날짜가 **더 최신**일 때만 붙인다 — EOD 배치가 아직 그
+    날짜를 채우지 않았다는 뜻이고, 배치가 돌고 나면(다음 요청부터) 이 조건이
+    거짓이 되어 자연히 확정 행이 그 자리를 대신한다(중복 방지, 별도 정리 로직
+    불필요).
+    """
+    try:
+        basis_payload = await basis_router._warm_basis_live()
+    except Exception as e:  # noqa: BLE001 - 라이브 실패가 /series 전체를 막지 않도록
+        logger.warning("futures provisional row: basis/live 조회 실패, 건너뜀: %s", e)
+        return
+
+    if basis_payload.get("market_closed"):
+        return
+    futures_today = basis_payload.get("futures_today")
+    if not futures_today:
+        return
+
+    today_str = futures_today["date"].replace("-", "")
+    if data and today_str <= data[-1]["date"]:
+        return  # 이미 EOD 배치가 이 날짜를 확정 행으로 채움 — 중복 방지
+
+    prev_close = data[-1]["close"] if data else None
+    close = futures_today["close"]
+    change_rate = 0.0
+    if prev_close is not None and close is not None:
+        change_rate = round((close - prev_close) / prev_close * 100, 4)
+
+    data.append(
+        {
+            "date": today_str,
+            "open": futures_today["open"],
+            "high": futures_today["high"],
+            "low": futures_today["low"],
+            "close": close,
+            "changeRate": change_rate,
+            "volume": futures_today["volume"],
+            "value": 0,
+            "provisional": True,
+        }
+    )
+
+
 async def _build_prices(market: str, days: int, session: AsyncSession) -> dict:
+    """`/api/markets/{market}/series`·legacy `/api/series`가 공유하는 가격 시리즈
+    빌더. DB 전용 조회(`get_market_series_from_db`)가 기본이지만, ``market ==
+    "futures"``면 §5.21(위 `_append_futures_provisional_row` 참고) 원칙에 따라
+    오늘 잠정치 합성 행을 조건부로 덧붙인다 — 코스피/코스닥은 절대 건드리지
+    않는다(그쪽은 분봉 탭으로 이미 해결돼 있어 이 워크어라운드가 필요 없다,
+    §5.21 원칙)."""
     if market not in MARKETS:
         raise HTTPException(400, f"market must be one of {sorted(MARKETS)}")
 
     data = await get_market_series_from_db(session, market, days)
+    if market == "futures":
+        await _append_futures_provisional_row(data)
     return {"market": market, "days": days, "series": data}
 
 

@@ -590,6 +590,14 @@ function CandleModal({ market }) {
           {loading && <div className="state">불러오는 중…</div>}
           {error && <div className="state error">{error}</div>}
           {!loading && !error && prices && prices.length > 0 && <CandleChart data={prices} height={320} />}
+          {/* PLAN.md §5.21-3 — 선물은 분봉이 없어 일봉이 유일한 뷰라, 마지막 봉이
+              basis/live의 오늘 잠정치(provisional)로 채워졌을 때 확정치가 아님을
+              명시한다(§5 "관찰 사실만" 원칙 — 확정치처럼 보이면 안 됨). */}
+          {!loading && !error && prices && prices.length > 0 && prices[prices.length - 1]?.provisional && (
+            <div className="toggle-hint" style={{ marginTop: 4 }}>
+              마지막 봉은 장중 잠정치 · 체결마다 갱신, 확정 아님
+            </div>
+          )}
           {!loading && !error && prices && prices.length === 0 && (
             <div className="state">해당 기간에 표시할 데이터가 없습니다.</div>
           )}
