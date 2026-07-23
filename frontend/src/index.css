@@ -766,6 +766,14 @@ header h1 {
   font-style: italic;
 }
 
+/* 2026-07-23 — 확정 스트릭과 반대 방향인 오늘 장중 잠정치 표시. 경고색(빨강)이
+   아니라 정보성 톤(--series-price, 다른 곳의 "1분 갱신 · 장중" 배지와 동일
+   계열)을 쓴다 — §5 "중립 계기판" 원칙, 좋다/나쁘다 판단이 아니라 사실 표시. */
+.regime-combo-reversal {
+  color: var(--series-price);
+  font-style: normal;
+}
+
 /* ETF 경유 수급 상위 (PLAN.md §4.5, FlowPathTable.jsx) — 기여 ETF 배지 목록. */
 .flow-path-etf-badges {
   display: flex;

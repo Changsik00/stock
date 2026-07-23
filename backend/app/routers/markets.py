@@ -816,6 +816,7 @@ async def _compute_regime_combo(
     confirmed_streak = await regime_backtest.compute_current_streak(session, market, investor)
     streak = confirmed_streak
     live_applied = False
+    live_net_value = None
     if market_flow_live and market_flow_live.get("provisional") is True:
         live_net_value = market_flow_live.get("investors", {}).get(investor, {}).get("net_value")
         # PLAN.md §5.15-2: "오늘 잠정 방향이 스트릭과 같은 방향이면" 반영한다 —
@@ -829,6 +830,16 @@ async def _compute_regime_combo(
             streak = regime_backtest.next_streak(confirmed_streak, live_net_value)
             live_applied = True
 
+    # 2026-07-23 수정 — 사용자 지적: "오늘 수급이 좋아 보이는데 왜 중립이냐"는
+    # 위 보수적 처리(방향이 반대면 스트릭 미반영) 때문에 오늘 값이 화면에서
+    # 통째로 안 보여서 생긴 혼란이었다(streak/live_applied만 보면 "오늘 값이
+    # 없다"처럼 읽힘). live_applied 여부와 무관하게 오늘의 원본 잠정치는 항상
+    # 노출한다 — 스트릭 반전 여부 판정과 "오늘 실제로 무슨 일이 있었는지 보여주기"는
+    # 별개 관심사다.
+    live_reversal = (
+        live_net_value is not None and confirmed_streak != 0 and _sign(live_net_value) != _sign(confirmed_streak)
+    )
+
     buckets = await regime_backtest.compute_streak_buckets(session, market, investor)
     label = regime_backtest.bucket_label(streak)
     stats = _bucket_stats_for(buckets, label)
@@ -836,6 +847,8 @@ async def _compute_regime_combo(
         "streak": streak,
         "confirmed_streak": confirmed_streak,
         "live_applied": live_applied,
+        "today_live_net_value": live_net_value,
+        "live_reversal": live_reversal,
         "bucket": label,
         "bucket_stats": stats,
         "reliable": market == "kosdaq" and investor == "외국인",
@@ -852,6 +865,16 @@ def _judge_regime(kosdaq_foreign: dict) -> tuple[str, str]:
     streak = kosdaq_foreign["streak"]
     stats = kosdaq_foreign["bucket_stats"]
 
+    # 2026-07-23 수정 — 오늘 잠정치가 확정 스트릭과 반대 방향이면(예: 4일 연속
+    # 매도 중인데 오늘은 순매수) 스트릭 자체는 보수적으로 안 바꾸지만(위
+    # _compute_regime_combo 주석 참고 — 하루치로 다일 추세를 뒤집지 않음),
+    # 그 사실을 문구에서 숨기지 않는다 — "오늘 수급이 좋아 보이는데 왜
+    # 중립이냐"는 혼란을 막는다.
+    reversal_suffix = ""
+    if kosdaq_foreign.get("live_reversal"):
+        today_dir = "매수" if kosdaq_foreign["today_live_net_value"] > 0 else "매도"
+        reversal_suffix = f" (단, 오늘 장중은 현재 {today_dir} 전환 조짐 — 하루로는 추세 반전 판정 안 함)"
+
     if streak == 0:
         return "중립", "코스닥 외국인 수급 연속 방향 없음(직전 순매수/매도 전환 직후) — 판정 근거 부족"
 
@@ -866,12 +889,16 @@ def _judge_regime(kosdaq_foreign: dict) -> tuple[str, str]:
     pct = stats["positive_rate_pct"]
     n = stats["n"]
     if streak >= 2:
-        return "코스닥우세", f"코스닥 외국인 {streak}일 연속 매수 중 — 과거 이 구간 다음날 상승확률 {pct}%(표본 {n}일)"
+        return (
+            "코스닥우세",
+            f"코스닥 외국인 {streak}일 연속 매수 중 — 과거 이 구간 다음날 상승확률 {pct}%(표본 {n}일)"
+            + reversal_suffix,
+        )
 
     return (
         "중립",
         f"코스닥 외국인 {abs(streak)}일 연속 매도 중 — 과거 이 구간 다음날 상승확률 {pct}%(표본 {n}일), "
-        "코스닥에 불리한 신호일 뿐 코스피가 유리하다는 뜻은 아님",
+        "코스닥에 불리한 신호일 뿐 코스피가 유리하다는 뜻은 아님" + reversal_suffix,
     )
 
 

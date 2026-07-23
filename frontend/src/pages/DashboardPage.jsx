@@ -2368,6 +2368,15 @@ export default function DashboardPage() {
                         <span className="regime-combo-stats">이 구간 과거 표본 없음</span>
                       )}
                       {!combo.reliable && <span className="regime-combo-hint">참고용 · 신호 약함</span>}
+                      {/* 2026-07-23 수정 — 사용자 지적: "오늘 수급이 좋아 보이는데
+                          왜 중립이냐". 확정 스트릭은 하루치 잠정 데이터로 방향을
+                          안 뒤집는(보수적 처리) 게 맞지만, 오늘 실제로 반대 방향
+                          움직임이 있다는 사실 자체는 숨기지 않는다. */}
+                      {combo.live_reversal && (
+                        <span className="regime-combo-hint regime-combo-reversal">
+                          오늘 장중은 현재 {combo.today_live_net_value > 0 ? '매수' : '매도'} 전환 조짐
+                        </span>
+                      )}
                     </div>
                   )
                 })
