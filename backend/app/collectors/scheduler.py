@@ -1,8 +1,27 @@
-"""APScheduler AsyncIOScheduler — 평일 18:00 Asia/Seoul에 REGISTRY의 전 잡 실행.
+"""APScheduler AsyncIOScheduler — 평일 18:00 Asia/Seoul에 REGISTRY의 전 잡 실행 +
+평일 07:30 Asia/Seoul에 "macro" 잡만 재실행(PLAN.md §5.22).
 
 기본적으로 꺼져 있다. main.py의 lifespan이 ``ENABLE_SCHEDULER=1`` 환경변수가 설정된
 경우에만 ``start_scheduler()``를 호출한다 (개발 중 의도치 않은 배치/외부 API 호출을
 막기 위함, PLAN.md §5.1).
+
+**2026-07-24 두 번째 cron 추가(미국장 조기 수집, PLAN.md §5.22)**: 사용자가
+"나스닥/다우 어제자 정보가 아침에 안 맞는다"고 지적했다. 원인은 타임존: 미국
+정규장은 한국시간 밤 22:30~23:30에 열려 다음날 새벽 05:00~06:00에 마감한다
+(서머타임에 따라 ±1시간) — 즉 "어젯밤 미국장"은 한국시간 새벽에 이미 완전히
+끝나 있는데, 이 모듈의 유일한 배치가 그날 저녁 18:00 한 번뿐이라 이미 새벽에
+끝난 데이터를 그날 저녁까지 수집하지 않는 구조였다. 사용자가 아침에 대시보드를
+열면 전날 미국장이 어땠는지 그날 저녁까지 알 수 없었다.
+
+해결: ``collectors/macro.py::collect_macro``(환율/유가/미국지수 4종/KOFIA를
+한 잡으로 묶어 ``REGISTRY["macro"]``에 등록됨)는 이미 ``LOOKBACK_DAYS=10`` 창 +
+upsert로 **하루 두 번 실행해도 안전**(idempotent, 해당 모듈 docstring 참고)하므로
+새 수집 로직 없이 **같은 잡을 아침에 한 번 더 도는 두 번째 cron만 추가**한다.
+시각은 미국장 마감(새벽 05~06시, 서머타임 변동 감안)보다 넉넉히 늦고, 한국 NXT
+프리마켓 시작(08:00)보다는 이른 **07:30 KST**로 잡는다. 아래 ``_run_all_jobs``
+(18:00 전체 배치)와 달리 ``_run_macro_job``은 REGISTRY 전체를 순회하지 않고
+"macro" 항목 하나만 ``run_job``으로 실행한다 — 나머지 잡들은 KRX 장 마감(정규장
+15:30 이후 각종 확정치) 기준이라 18:00 스케줄에 남아야 맞다.
 
 **2026-07-22 심각한 버그 수정(misfire_grace_time)**: 사용자가 "개인 방향성(파생ETF)
 차트가 이틀치(07-15/07-20)뿐이라 이상하다"고 지적해 추적하다가, 지난 일주일 중
@@ -49,6 +68,29 @@ async def _run_all_jobs() -> None:
         await run_job(job_name, target_date, collect_fn)
 
 
+async def _run_macro_job() -> None:
+    """평일 07:30 KST 조기 실행분 — PLAN.md §5.22, 전날 새벽에 이미 마감한 미국장
+    데이터를 그날 저녁 18:00까지 기다리지 않고 아침에 한 번 더 당겨온다.
+
+    REGISTRY 전체를 순회하는 ``_run_all_jobs``와 달리 "macro" 잡 하나만 실행한다 —
+    나머지 잡은 KRX 정규장 마감 이후 확정치 기준이라 이 시각에 돌릴 이유가 없다.
+    """
+    target_date = dt.date.today()
+    collect_fn = REGISTRY.get("macro")
+    if collect_fn is None:
+        # register_all()이 collectors/macro.py를 import하지 않았다면(비정상 상황)
+        # KeyError로 스케줄러 잡 자체를 죽이는 대신 경고만 남기고 넘어간다 — 이
+        # 잡은 스케줄러 프로세스 안에서 반복 실행되므로, 한 번 실패했다고 이후
+        # 실행까지 막히면 안 된다.
+        logger.warning(
+            "macro job not found in REGISTRY (registered: %s) — skipping 07:30 run",
+            sorted(REGISTRY),
+        )
+        return
+    logger.info("scheduled early macro batch starting for %s (US market catch-up)", target_date)
+    await run_job("macro", target_date, collect_fn)
+
+
 def start_scheduler() -> AsyncIOScheduler:
     """Create, start, and return the module-level scheduler (idempotent)."""
     global _scheduler
@@ -66,10 +108,20 @@ def start_scheduler() -> AsyncIOScheduler:
         # 1회뿐인 배치라 "늦게라도 반드시 돈다"가 "정시"보다 훨씬 중요하다.
         misfire_grace_time=3600,
     )
+    scheduler.add_job(
+        _run_macro_job,
+        CronTrigger(day_of_week="mon-fri", hour=7, minute=30, timezone="Asia/Seoul"),
+        id="macro_morning",
+        replace_existing=True,
+        # 18:00 잡과 같은 이유(모듈 docstring의 2026-07-22 버그 참고)로 넉넉히 준다 —
+        # 이 잡도 하루 한 번뿐이라 "늦게라도 반드시 돈다"가 "정시"보다 중요하다.
+        misfire_grace_time=3600,
+    )
     scheduler.start()
     _scheduler = scheduler
     logger.info(
-        "scheduler started: weekday 18:00 Asia/Seoul daily batch (%d jobs registered: %s)",
+        "scheduler started: weekday 18:00 Asia/Seoul daily batch (%d jobs registered: %s) "
+        "+ weekday 07:30 Asia/Seoul macro-only catch-up (PLAN.md §5.22)",
         len(REGISTRY),
         sorted(REGISTRY),
     )
