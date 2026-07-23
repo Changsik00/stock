@@ -23,7 +23,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.db import get_session
 from app.main import app
-from app.quant import regime_backtest
+from app.quant import flow_acceleration, regime_backtest
 from app.routers import markets
 
 
@@ -50,6 +50,21 @@ def _clear_overrides():
     app.dependency_overrides[get_session] = fake_get_session
     yield
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def _default_flow_acceleration_none(monkeypatch):
+    """PLAN.md §5.17 — _compute_regime_combo가 세션으로 flow_acceleration을
+    직접 조회한다. 이 파일의 세션은 진짜 쿼리를 실행할 수 없는 ``_FakeSession``
+    더미이므로(다른 라우터 로직은 전부 regime_backtest monkeypatch로 가로챔),
+    기본값으로 None(데이터 부족)을 돌려주는 가짜 함수로 항상 교체해 둔다 —
+    가속도 값 자체를 검증하는 테스트는 이 fixture 이후 다시 monkeypatch해서
+    override한다."""
+
+    async def fake_compute_flow_acceleration(session, series_key, now, window_minutes=30):
+        return None
+
+    monkeypatch.setattr(flow_acceleration, "compute_flow_acceleration", fake_compute_flow_acceleration)
 
 
 def _bucket(label, n, avg, pos):
@@ -127,6 +142,13 @@ async def test_kosdaq_foreign_buy_streak_yields_kosdaq_advantage(monkeypatch):
     assert body["kosdaq"]["기관계"]["reliable"] is False
     assert body["kospi"]["외국인"]["reliable"] is False
     assert body["kospi"]["기관계"]["reliable"] is False
+
+    # PLAN.md §5.17 — 4개 조합 전부에 acceleration 필드가 존재해야 한다(기본
+    # fixture는 데이터 부족 None을 돌려주지만, 필드 자체는 항상 있어야 함).
+    for market in ("kospi", "kosdaq"):
+        for investor in ("외국인", "기관계"):
+            assert "acceleration" in body[market][investor]
+            assert body[market][investor]["acceleration"] is None
 
 
 async def test_kospi_streak_never_yields_kospi_advantage_even_when_bullish(monkeypatch):
@@ -310,3 +332,55 @@ async def test_regime_falls_back_when_flow_live_raises(monkeypatch):
     body = resp.json()
     assert body["regime"] == "코스닥우세"
     assert body["kosdaq"]["외국인"]["live_applied"] is False
+
+
+# ---------------------------------------------------------------------------
+# 가속도 (PLAN.md §5.17) — 스트릭과 별도 필드, _judge_regime에 섞이지 않음
+# ---------------------------------------------------------------------------
+
+
+async def test_acceleration_is_wired_per_combo_with_correct_series_key(monkeypatch):
+    """각 콤보가 자신의 series_key(``flow_{market}_{investor}``)로 조회한
+    가속도 결과를 그대로 노출하는지 확인 — 4개 조합이 서로 다른 값을 받아도
+    섞이지 않아야 한다."""
+    _patch_backtest(
+        monkeypatch,
+        streaks={("kosdaq", "외국인"): 3, ("kosdaq", "기관계"): 0, ("kospi", "외국인"): 0, ("kospi", "기관계"): 0},
+        buckets={("kosdaq", "외국인"): _all_buckets({"3+매수": _bucket("3+매수", 69, 0.522, 65.2)})},
+    )
+    _patch_flow_live(monkeypatch, CLOSED_FLOW_LIVE)
+
+    results = {
+        ("kosdaq", "외국인"): {
+            "window_minutes": 30,
+            "recent_velocity": 1200.0,
+            "prior_velocity": 300.0,
+            "acceleration": 900.0,
+        },
+        ("kosdaq", "기관계"): {
+            "window_minutes": 30,
+            "recent_velocity": -100.0,
+            "prior_velocity": 200.0,
+            "acceleration": -300.0,
+        },
+        # kospi 두 조합은 patch하지 않음 -> None(데이터 부족) 그대로 유지되는지 확인.
+    }
+
+    async def fake_compute_flow_acceleration(session, series_key, now, window_minutes=30):
+        prefix = "flow_"
+        market, investor = series_key[len(prefix) :].split("_", 1)
+        return results.get((market, investor))
+
+    monkeypatch.setattr(flow_acceleration, "compute_flow_acceleration", fake_compute_flow_acceleration)
+
+    resp = await _get_regime()
+    body = resp.json()
+
+    assert body["kosdaq"]["외국인"]["acceleration"] == results[("kosdaq", "외국인")]
+    assert body["kosdaq"]["기관계"]["acceleration"] == results[("kosdaq", "기관계")]
+    assert body["kospi"]["외국인"]["acceleration"] is None
+    assert body["kospi"]["기관계"]["acceleration"] is None
+
+    # 종합 판정(regime/reason)에는 가속도가 섞이지 않는다 — 여전히 스트릭 기반.
+    assert body["regime"] == "코스닥우세"
+    assert "가속" not in body["reason"] and "감속" not in body["reason"]

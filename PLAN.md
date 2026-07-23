@@ -1463,8 +1463,8 @@ Prometheus/Grafana도 최근 데이터는 원본, 오래된 건 시간당 평균
 
 | # | 작업 | 내용 | 완료 기준 |
 |---|---|---|---|
-| 5.17-1 | 가속도 계산 함수 | `compute_flow_acceleration` — 30분/60분 전 값 조회 + 속도·가속도 계산, 데이터 부족 시 None | 실제 오늘 데이터로 가속/감속 값이 정확히 계산됨 |
-| 5.17-2 | API + 프런트 | regime 응답에 acceleration 필드, 콤보 타일에 표시 | 60초마다 갱신되는 실시간 가속도가 화면에 보임 |
+| 5.17-1 ✅ | 가속도 계산 함수 | 신규 `app/quant/flow_acceleration.py`의 `compute_flow_acceleration` — 지금/30분전/60분전 각각 "그 시각 이전 가장 가까운 틱"(time<=target desc limit 1) 조회 후 속도·가속도 계산, 셋 중 하나라도 없으면 None | 실제 오늘 데이터로 가속/감속 값이 정확히 계산됨 — **완료(2026-07-23)**, 실 DB로 코스피/코스닥 × 외국인/기관계 4개 조합 전부 값 산출 확인(예: `flow_kosdaq_외국인` recent_velocity=194.0/prior_velocity=227.0/acceleration=-33.0, 단위 백만원) |
+| 5.17-2 ✅ | API + 프런트 | `routers/markets.py` `_compute_regime_combo`에 `acceleration` 필드 추가(series_key=`flow_{market}_{investor}`), `DashboardPage.jsx` 콤보 타일에 "최근 30분 순매수 속도 {부호}{억원}(가속/감속/속도 유지)" 또는 "가속도 데이터 부족(적립 중)" 표시(`.regime-combo-reversal` 스타일 재사용) | 60초마다 갱신되는 실시간 가속도가 화면에 보임 — **완료(2026-07-23)**, curl로 `/api/markets/regime` 4개 콤보 전부 acceleration 필드 확인 + Playwright로 "지금 유입 우세" 카드 4개 타일 모두 가속도 줄 렌더 확인(장중 실데이터라 4개 전부 실값, None 분기는 별도 단위테스트로 검증) |
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 

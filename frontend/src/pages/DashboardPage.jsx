@@ -188,6 +188,14 @@ function eokLabel(million) {
   return `${eokFmt.format(million / 100)}억원`
 }
 
+// PLAN.md §5.17 — 가속도 카드 문구용(부호 있는 억원 표기, "+12.3억원"/"-4.5억원").
+// eokLabel은 부호를 안 붙이므로(음수는 Intl 기본 마이너스만) 별도로 분리한다.
+function signedEokLabel(million) {
+  if (typeof million !== 'number') return '-'
+  const sign = million > 0 ? '+' : ''
+  return `${sign}${eokFmt.format(million / 100)}억원`
+}
+
 function trillion(million) {
   if (million === null || million === undefined) return null
   return million / 1e6
@@ -2376,6 +2384,25 @@ export default function DashboardPage() {
                         <span className="regime-combo-hint regime-combo-reversal">
                           오늘 장중은 현재 {combo.today_live_net_value > 0 ? '매수' : '매도'} 전환 조짐
                         </span>
+                      )}
+                      {/* PLAN.md §5.17 — 수급 가속도(실시간 반응성 지표). 스트릭(위
+                          streakLabel/bucket_stats, 느리지만 검증된 신호)과는 별도
+                          필드로 항상 따로 보여준다 — 종합 판정에 섞지 않는다. 부호만
+                          일관되게 해석 가능한 관찰 서술이고("가속"/"감속"), "좋다/
+                          나쁘다" 판단 문구는 쓰지 않는다(§5 원칙). */}
+                      {combo.acceleration ? (
+                        <span className="regime-combo-hint regime-combo-reversal">
+                          최근 30분 순매수 속도 {signedEokLabel(combo.acceleration.recent_velocity)}
+                          (직전 30분 대비{' '}
+                          {combo.acceleration.acceleration > 0
+                            ? '가속'
+                            : combo.acceleration.acceleration < 0
+                              ? '감속'
+                              : '속도 유지'}
+                          )
+                        </span>
+                      ) : (
+                        <span className="regime-combo-hint">가속도 데이터 부족(적립 중)</span>
                       )}
                     </div>
                   )

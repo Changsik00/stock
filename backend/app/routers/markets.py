@@ -89,7 +89,7 @@ from ..collectors.market_flow import fetch_live_flow
 from ..db import get_session
 from ..market_hours import KST, is_market_closed as _market_closed_kst, is_nxt_closed
 from ..models import IndexOhlcv, MacroSeries, MarketBreadth, MarketFlow, Stock
-from ..quant import regime_backtest
+from ..quant import flow_acceleration, regime_backtest
 from ..services import DB_MARKET, get_market_series_from_db
 
 logger = logging.getLogger(__name__)
@@ -843,6 +843,14 @@ async def _compute_regime_combo(
     buckets = await regime_backtest.compute_streak_buckets(session, market, investor)
     label = regime_backtest.bucket_label(streak)
     stats = _bucket_stats_for(buckets, label)
+
+    # PLAN.md §5.17 — 스트릭(느리지만 검증된 신호)과는 별도로, intraday_sample
+    # DB 조회만으로(새 외부 호출 없음) "지금 순매수 속도가 가속/감속 중인지"를
+    # 계산해 별도 필드로 얹는다. _judge_regime에는 절대 섞지 않는다(사용자 명시
+    # 원칙 — "따로 보여달라").
+    series_key = f"flow_{market}_{investor}"
+    acceleration = await flow_acceleration.compute_flow_acceleration(session, series_key, dt.datetime.now(KST))
+
     return {
         "streak": streak,
         "confirmed_streak": confirmed_streak,
@@ -852,6 +860,7 @@ async def _compute_regime_combo(
         "bucket": label,
         "bucket_stats": stats,
         "reliable": market == "kosdaq" and investor == "외국인",
+        "acceleration": acceleration,
     }
 
 
@@ -966,9 +975,16 @@ async def markets_regime(session: AsyncSession = Depends(get_session)):
     "kosdaq_foreign", "market_closed": bool, "kospi": {"외국인": {...}, "기관계":
     {...}, "baseline": {...}}, "kosdaq": {...}, "cached_at": iso8601}`` — 각
     투자자 값은 ``{"streak", "confirmed_streak", "live_applied", "bucket",
-    "bucket_stats", "reliable"}``(``bucket_stats``는 ``{"bucket", "n",
-    "avg_return_pct", "positive_rate_pct"}`` | None). "코스피우세"는 설계상
-    나오지 않는다(§5.15 원칙 — 코스피 신호가 약하다는 걸 감추지 않는다).
+    "bucket_stats", "reliable", "acceleration"}``(``bucket_stats``는
+    ``{"bucket", "n", "avg_return_pct", "positive_rate_pct"}`` | None). "코스피우세"는
+    설계상 나오지 않는다(§5.15 원칙 — 코스피 신호가 약하다는 걸 감추지 않는다).
+
+    ``acceleration``(PLAN.md §5.17)은 스트릭과 별개로 계산되는 실시간 반응성
+    지표 — ``intraday_sample`` 60초 틱에서 지금/30분전/60분전 순매수 누적치의
+    차분으로 "매수/매도 속도가 가속/감속 중인지"를 본다. 오늘 60분치 틱이 아직
+    안 쌓였으면(장 시작 직후 등) ``{"window_minutes", "recent_velocity",
+    "prior_velocity", "acceleration"}`` 대신 ``None``. 종합 판정(regime/reason)에는
+    섞이지 않는다 — 참고용 별도 신호.
     """
     return await _warm_regime(session)
 
