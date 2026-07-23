@@ -12,8 +12,8 @@ routers/scalp.py가 담당한다(quant/signals.py·sentiment.py의 "계산부/�
 
 ## 스코어 산식
 
-재료는 전부 이미 수집·적재된 것만 쓴다(§5.2 지시 "신규 수집 불필요") — 4개
-이하 요소로 단순하게(과설계 금지):
+재료는 전부 이미 수집·적재된 것만 쓴다(§5.2 지시 "신규 수집 불필요") — 아래
+5개 요소로 단순하게(과설계 금지):
 
 1. ``abs(change_rate)`` — 오늘 등락률의 크기(방향 무관, 스켈핑은 변동성 자체가
    기회이지 방향이 아니다).
@@ -27,17 +27,36 @@ routers/scalp.py가 담당한다(quant/signals.py·sentiment.py의 "계산부/�
 4. ``in_attention_top`` — 키움 실시간 관심순위(조회수) TOP 편입 여부. 위 세
    요소가 전부 "장중 스냅샷 1회" 기준인 것과 달리, 이건 투자자들이 지금 이
    순간 실제로 보고 있는 종목이라는 별도 신호라 가산점으로만 반영한다.
+5. ``flow_net_value`` — **PLAN.md §5.20 추가(2026-07-23)**: 오늘 외국인+기관계
+   순매수 합(``routers/stocks.py``의 ka10059 파서를 재사용해 ``collectors/
+   live_refresh.py::_run_stock_flow_scan``이 10분마다 후보군 전체를 순회 조회,
+   ``stock_flow`` 테이블에 upsert). 사용자가 "알테오젠 수급 들어오는 거 같은데
+   이런 종목 찾는 법 없나"라고 물은 게 이 요소의 직접 계기다 — §5.15~§5.19가
+   시장 전체 수급은 공들여 분석해 왔는데 정작 이 스켈핑 스코어엔 개별 종목
+   수급이 전혀 반영되지 않고 있었다(등락률·회전율·거래대금 순위·관심순위 4개
+   전부 "가격/관심"만 보고 "누가 사는지"는 안 봄). **1~3번과 달리 abs()를 쓰지
+   않고 부호 있는 값 그대로 z-score화한다** — 등락률은 스켈핑 관점에서 상승이든
+   하락이든 "변동성 자체"가 기회라 방향이 무의미하지만, 수급은 "누가 사는지
+   판다"의 방향 자체가 관찰하려는 대상이라(외국인/기관 매수 유입 vs 유출은
+   반대 신호) 부호를 죽이면 안 된다 — 순매도가 큰 종목이 순매수가 큰 종목과
+   똑같이 높은 점수를 받는 걸 막기 위함.
 
-1~3번은 스케일이 서로 달라(등락률 %, 회전율 %, 순위 1..N) 그대로 더할 수 없으므로
-후보군(candidates) 안에서 각각 z-score(평균 0, 표준편차 1로 표준화)로 정규화한
-뒤 가중합한다. 4번(불리언)은 z-score가 아니라 "대략 1 표준편차에 해당하는"
-고정 가산점(``ATTENTION_BONUS``)을 더한다 — 다른 세 요소의 z-score 분포와
-크기 자릿수를 맞추기 위함(별도 정규화 없이도 과도하게 튀지 않도록).
+1~3번, 5번은 스케일이 서로 달라(등락률 %, 회전율 %, 순위 1..N, 수급 백만원 단위)
+그대로 더할 수 없으므로 후보군(candidates) 안에서 각각 z-score(평균 0,
+표준편차 1로 표준화)로 정규화한 뒤 가중합한다. 4번(불리언)은 z-score가 아니라
+"대략 1 표준편차에 해당하는" 고정 가산점(``ATTENTION_BONUS``)을 더한다 — 다른
+요소들의 z-score 분포와 크기 자릿수를 맞추기 위함(별도 정규화 없이도 과도하게
+튀지 않도록).
 
-가중치는 등락률·회전율(변동성·유동성, 스켈핑의 핵심 재료)을 동일하게 가장
-높게 두고, 거래대금 순위·관심순위는 보조 신호로 낮게 둔다:
-``{"change": 0.35, "turnover": 0.35, "value_rank": 0.15, "attention": 0.15}``
-(합 1.0). 최종 점수는 상대 순위용이라 절대 스케일에 의미를 두지 않는다 —
+가중치는 사용자가 반복 강조한 우선순위(수급이 이번 요청의 핵심 재료)를 반영해
+``flow``를 가장 높게 두고 나머지를 재배분했다:
+``{"change": 0.20, "turnover": 0.20, "value_rank": 0.10, "attention": 0.10,
+"flow": 0.40}`` (합 1.0). **이 가중치는 검증된 값이 아니라 첫 배정이다** —
+§5.15의 시장 단위 가중치는 백테스트로 정했지만, 종목 단위 "수급 유입 →
+이후 수익률" 관계는 아직 실증하지 않았다. 이미 있는 ``scalp_pick``/
+``scalp_tracker``(§5.7 — 진입 시점·이후 5/15/30/60분·EOD change_rate를 그대로
+기록) 메커니즘이 그대로 이 새 가중치의 사후 검증 근거가 된다 — 표본이 쌓이면
+재검토한다. 최종 점수는 상대 순위용이라 절대 스케일에 의미를 두지 않는다 —
 후보군이 바뀌면(장중 재조회) 같은 종목도 값이 달라질 수 있다.
 
 후보군 자체(어떤 종목을 스코어링 대상으로 삼을지)는 이 모듈이 정하지 않는다
@@ -52,7 +71,14 @@ from typing import Any, TypedDict
 
 # 가중치 합은 1.0이어야 한다(문서화된 산식과 일치 — compute_scalp_scores가
 # 이를 전제로 검산하지는 않지만, 값을 바꿀 때는 합을 유지해야 한다).
-WEIGHTS: dict[str, float] = {"change": 0.35, "turnover": 0.35, "value_rank": 0.15, "attention": 0.15}
+# PLAN.md §5.20(2026-07-23) — flow(종목별 당일 외국인+기관 순매수) 추가, 가중치 재배분.
+WEIGHTS: dict[str, float] = {
+    "change": 0.20,
+    "turnover": 0.20,
+    "value_rank": 0.10,
+    "attention": 0.10,
+    "flow": 0.40,
+}
 
 # 관심순위 편입 가산점 — z-score 단위(대략 1 표준편차)에 맞춘 고정값.
 ATTENTION_BONUS = 1.0
@@ -65,6 +91,7 @@ class ScalpCandidate(TypedDict, total=False):
     change_rate: float | None
     turnover: float | None
     value_rank: int
+    flow_net_value: int | None
 
 
 def _zscores(values: list[float]) -> list[float]:
@@ -92,6 +119,8 @@ def compute_scalp_scores(
     가져야 한다 — ``change_rate``/``turnover``는 None이면 0.0으로 취급한다
     (값이 없는 종목을 계산에서 빼면 z-score 분포 자체가 왜곡되므로, 대신
     "변동성/회전율 없음"을 중립값으로 반영). candidates가 비어 있으면 빈 리스트.
+    ``flow_net_value``도 None이면(그 종목이 아직 ``_run_stock_flow_scan`` 스윕을
+    못 돈 경우) 0.0 중립으로 취급한다 — 동일한 관례(PLAN.md §5.20).
 
     반환 원소는 입력 dict를 그대로 복사한 뒤 ``in_attention_top``(bool)과
     ``score``(round 3자리)를 추가한 것 — 정렬은 score 내림차순, 동점이면
@@ -107,10 +136,14 @@ def compute_scalp_scores(
     # 순위는 작을수록 좋음(1등이 최상위) -> 부호를 뒤집어 z-score화하면 "순위가
     # 좋을수록 z가 큼"이 되어 다른 요소들과 같은 방향으로 합산할 수 있다.
     inverted_ranks = [-float(c["value_rank"]) for c in candidates]
+    # PLAN.md §5.20 — abs()를 쓰지 않는다(모듈 docstring "스코어 산식" 5번 참고):
+    # 수급은 방향(순매수 vs 순매도)이 관찰 대상 그 자체라 부호를 죽이면 안 된다.
+    flow_values = [c["flow_net_value"] if c.get("flow_net_value") is not None else 0.0 for c in candidates]
 
     z_change = _zscores(abs_changes)
     z_turnover = _zscores(turnovers)
     z_rank = _zscores(inverted_ranks)
+    z_flow = _zscores(flow_values)
 
     scored: list[dict[str, Any]] = []
     for i, c in enumerate(candidates):
@@ -120,6 +153,7 @@ def compute_scalp_scores(
             + w["turnover"] * z_turnover[i]
             + w["value_rank"] * z_rank[i]
             + w["attention"] * (ATTENTION_BONUS if in_attention else 0.0)
+            + w["flow"] * z_flow[i]
         )
         scored.append({**c, "in_attention_top": in_attention, "score": round(score, 3)})
 

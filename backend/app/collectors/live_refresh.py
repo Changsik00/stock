@@ -1,4 +1,4 @@
-"""서버 측 능동 갱신 스케줄러 — 두 개의 독립 인터벌 잡을 돌린다.
+"""서버 측 능동 갱신 스케줄러 — 세 개의 독립 인터벌 잡을 돌린다.
 
 1. ``live_refresh``(60초): routers/markets.py의 breadth/live, flow/live,
    attention, index-tiles/live(2026-07-21 추가 — 대시보드 지수 3종 타일),
@@ -32,6 +32,23 @@
    있었다(프런트만 60초마다 헛요청). 사용자가 "업종·테마 강약이 갱신 안 된다"고
    재차 지적해 90초 간격 재호출로 byte-for-byte 동일 응답을 실측 확인, 그제서야
    발견했다. 지금 이 셋을 실제로 60초 잡으로 옮기고 각 TTL도 60초로 맞춘다.
+3. ``stock_flow_scan``(10분, PLAN.md §5.20, 2026-07-23 추가): 종목별 당일
+   수급(외국인+기관 순매수) 스크리닝. value-rank/live가 이미 캐시해 둔 후보군
+   (코스피+코스닥 거래대금 상위, 최대 200개, ETF 제외 — 위 2번과 동일 소스)
+   코드를 순회하며 키움 ka10059(종목별투자자기관별요청, routers/stocks.py가
+   종목상세에서 이미 온디맨드로 쓰는 것과 같은 TR)를 종목마다 1콜씩 호출해
+   ``stock_flow`` 테이블에 upsert한다(스키마 변경 없음). 시장 전체를 한 번에
+   보여주는 "외국인/기관 순매수 상위 랭킹" TR(ka10065/ka90009, 네이버 대안
+   포함)은 이미 조사해 장중 실시간 갱신이 안 된다고 결론 났다(routers/
+   flow_rank.py 모듈 docstring "flow-rank/live는 만들지 않는다" 절 참고,
+   재조사 불필요) — 그래서 랭킹 TR 대신 이미 존재하는 종목별 개별 조회 TR을
+   후보군에 대해 순회하는 이 방식을 쓴다. **왜 10분(다른 두 잡보다 훨씬
+   느림)인가**: 키움 rate limiter(`clients/kiwoom.py`의 `_bucket`)가 1req/s로
+   보수적이고, 이 잡은 종목마다 1콜씩 최대 200콜을 순차로 쳐야 해서 최악
+   ~200초(3.3분)가 걸린다 — 60초/7분 티어에 끼워 넣기엔 너무 느려 전용 10분
+   티어를 새로 둔다(10분 창 안에 여유 있게 끝남). ``routers/scalp.py``의
+   ``_stock_flow_lookup``이 이 테이블을 읽어 ``compute_scalp_scores``의 5번째
+   요소(flow)로 스코어에 반영한다(quant/screener.py 모듈 docstring 참고).
 
 `collectors/intraday_snapshot.py`는 위 두 잡이 이미 끝낸 fetch 결과를 그대로
 받아 ``intraday_sample`` 테이블에 INSERT만 하는 저장소다(PLAN.md §5.14, 2026-07-22
@@ -79,7 +96,9 @@ kospi/kosdaq + index-tiles 선물 fchart + fx 환율 1콜) + basis 2콜 + groups
 futures-flow 1콜 = 매분 네이버 9콜/키움 3콜 — KiwoomClient 자체 리미터(1req/s)가
 있어 문제없고 네이버 쪽도 단일/소수 요청뿐이라 여유 있다. 7분 잡은 매 호출마다
 네이버 ~44콜(value-rank 코스피+코스닥 전량 페이지네이션) — 7분 창 안에 15~30초
-소요라 여유 있다.
+소요라 여유 있다. 10분 잡(stock_flow_scan)은 매 호출마다 키움 ka10059를 후보군
+크기만큼(최대 ~200콜) 호출 — 1req/s 리미터 기준 최악 ~200초, 10분(600초) 창
+안에 충분히 여유 있다(후보군이 200개보다 적으면 그만큼 더 여유롭다).
 """
 
 from __future__ import annotations
@@ -101,6 +120,11 @@ _scheduler: AsyncIOScheduler | None = None
 # futures-flow는 60초 잡으로 이동, 모듈 docstring 참고). routers/flow_rank.py의
 # LIVE_TTL_SECONDS(420초)와 반드시 맞춘다.
 EXTRA_REFRESH_INTERVAL_SECONDS = 420
+
+# 10분 티어 — 종목별 당일 수급(stock_flow) 스윕 전용(PLAN.md §5.20). 후보군
+# 최대 200개를 키움 rate limiter(1req/s) 아래에서 순차 호출하면 최악 ~200초가
+# 걸려 60초/7분 티어보다 훨씬 느린 창이 필요하다(모듈 docstring "3." 문단 참고).
+STOCK_FLOW_SCAN_INTERVAL_SECONDS = 600
 
 
 async def _run_live_refresh() -> None:
@@ -237,6 +261,83 @@ async def _run_live_refresh_extra() -> None:
     logger.info("live-refresh-extra: 7분 캐시 warmed at %s KST", now_kst.isoformat())
 
 
+async def _run_stock_flow_scan() -> None:
+    """10분 티어(PLAN.md §5.20) — value-rank/live 후보군(코스피+코스닥 거래대금
+    상위, 최대 200개, ETF 제외)을 순회하며 키움 ka10059(종목별투자자기관별요청)로
+    오늘 외국인+기관 순매수를 조회해 ``stock_flow``에 upsert한다. 파싱/upsert는
+    ``routers/stocks.py``가 종목상세 온디맨드 조회에서 이미 쓰고 검증한
+    ``_parse_ka10059_rows``/``_upsert_flow_rows``를 그대로 재사용한다(중복 구현
+    금지 — 이 함수는 "누구를, 언제 순회할지"만 새로 정한다).
+
+    개별 종목 시세라 위 ``_run_live_refresh_extra``와 동일하게 NXT 확장세션
+    (08:00~20:00, ``is_nxt_closed``)을 잡 레벨 게이트로 쓴다 — attention/
+    value-rank와 같은 기준(market_hours.py 모듈 docstring 참고).
+
+    **단일 KiwoomClient 인스턴스 필수(실제 외부 API 안전장치)**: 키움 클라이언트의
+    rate limiter(``clients/kiwoom.py``의 ``_bucket``, 1req/s)는 **인스턴스
+    속성**이라 종목마다 새 ``KiwoomClient()``를 열면 매번 토큰 버킷이 새로
+    리셋돼 사실상 무제한 버스트가 되어 버린다(리미터가 있으나 마나 해짐) —
+    실제 키움 서버에 초당 제한을 넘는 버스트를 쳐서 429/차단 리스크가 생긴다.
+    그래서 이 스윕 전체를 위해 ``KiwoomClient()`` 인스턴스를 **딱 하나만** 열고
+    (아래 ``async with``), 그 안에서 후보군 전체를 순차 호출한다 — 최악
+    ~200종목 × 1초 ≈ 200초, 10분(600초) 창 안에 충분히 끝난다.
+
+    종목 하나 조회가 실패해도(일시적 네트워크 오류, 그 종목 데이터 없음 등)
+    나머지 종목 스윕을 막지 않는다 — 이 파일의 다른 잡들과 동일한 "부분 실패
+    허용" 철학(모듈 docstring 참고), per-code try/except로 처리한다. 스윕
+    전체(예: 키움 인증 실패)가 죽는 경우도 바깥 try/except로 흡수해 스케줄러
+    자체는 계속 살아있게 한다.
+    """
+    now_kst = dt.datetime.now(KST)
+    if is_nxt_closed(now_kst):
+        logger.debug("stock-flow-scan: NXT closed (%s KST), skipping", now_kst.isoformat())
+        return
+
+    from ..clients.kiwoom import KiwoomClient
+    from ..routers import flow_rank as flow_rank_router
+    from ..routers import stocks as stocks_router
+
+    value_payload = await flow_rank_router._warm_value_rank_live()
+    codes = [
+        row["code"]
+        for row in (value_payload.get("rows") or [])
+        if row.get("code") and not row.get("is_etf")
+    ]
+    if not codes:
+        logger.debug("stock-flow-scan: 후보군이 비어 있어 건너뜀 (%s KST)", now_kst.isoformat())
+        return
+
+    # code에 의존하지 않는 값이라 루프 밖에서 한 번만 계산한다(_ensure_flows_cached와
+    # 동일한 컷오프 표현 — routers/stocks.py 참고, 별도로 새로 만들지 않는다).
+    target_end = stocks_router._latest_trading_day()
+    cutoff = target_end - dt.timedelta(days=stocks_router.FLOW_BACKFILL_DAYS)
+
+    success = 0
+    try:
+        async with KiwoomClient() as client:
+            async with async_session_factory() as session:
+                for code in codes:
+                    try:
+                        data, _headers = await client.stock_investor_daily(code)
+                        rows = stocks_router._parse_ka10059_rows(data)
+                        rows = [r for r in rows if r["date"] >= cutoff]
+                        await stocks_router._upsert_flow_rows(session, code, rows)
+                        success += 1
+                    except Exception as e:  # noqa: BLE001 - 종목 하나 실패가 나머지를 막지 않도록
+                        logger.warning("stock-flow-scan: %s 조회/upsert 실패: %s", code, e)
+                await session.commit()
+    except Exception as e:  # noqa: BLE001 - 인증 실패 등 스윕 전체 실패는 로깅만 하고 스케줄러를 죽이지 않는다
+        logger.warning("stock-flow-scan: 스윕 전체 실패: %s", e)
+        return
+
+    logger.info(
+        "stock-flow-scan: %d/%d 종목 수급 갱신 완료 at %s KST",
+        success,
+        len(codes),
+        now_kst.isoformat(),
+    )
+
+
 def start_live_refresh_scheduler() -> AsyncIOScheduler:
     """Create, start, and return the module-level scheduler (idempotent)."""
     global _scheduler
@@ -265,11 +366,25 @@ def start_live_refresh_scheduler() -> AsyncIOScheduler:
         # 이 잡도 기동 즉시 한 번 워밍한다(위 60초 잡과 동일한 이유).
         next_run_time=dt.datetime.now(),
     )
+    scheduler.add_job(
+        _run_stock_flow_scan,
+        IntervalTrigger(seconds=STOCK_FLOW_SCAN_INTERVAL_SECONDS),
+        id="stock_flow_scan",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        # 의도적으로 next_run_time을 지정하지 않는다 — 위 두 잡(60초/7분)은
+        # 둘 다 기동 즉시 1회 워밍하지만(각 add_job 주석 참고), 이 잡은 최대
+        # ~200초짜리 순회 스윕이라 앱 기동/리로드(--reload 개발 환경 포함)마다
+        # 즉시 실행하면 그때마다 키움에 최대 200콜을 몰아 치는 부담이 생긴다 —
+        # 첫 자연 tick(600초 뒤)부터 느긋하게 시작한다.
+    )
     scheduler.start()
     _scheduler = scheduler
     logger.info(
-        "live-refresh scheduler started: 60s + %ds interval, weekday 09:00-15:30 KST only",
+        "live-refresh scheduler started: 60s + %ds + %ds interval, weekday 09:00-15:30 KST only",
         EXTRA_REFRESH_INTERVAL_SECONDS,
+        STOCK_FLOW_SCAN_INTERVAL_SECONDS,
     )
     return scheduler
 

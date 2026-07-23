@@ -9,7 +9,7 @@ from __future__ import annotations
 from app.quant.screener import ATTENTION_BONUS, WEIGHTS, compute_scalp_scores
 
 
-def _cand(code, change_rate, turnover, value_rank, name=None, market="kospi"):
+def _cand(code, change_rate, turnover, value_rank, name=None, market="kospi", flow_net_value=None):
     return {
         "code": code,
         "name": name or code,
@@ -17,6 +17,7 @@ def _cand(code, change_rate, turnover, value_rank, name=None, market="kospi"):
         "change_rate": change_rate,
         "turnover": turnover,
         "value_rank": value_rank,
+        "flow_net_value": flow_net_value,
     }
 
 
@@ -76,7 +77,7 @@ def test_ties_broken_by_value_rank_ascending():
         _cand("A", change_rate=2.0, turnover=2.0, value_rank=9),
         _cand("B", change_rate=2.0, turnover=2.0, value_rank=3),
     ]
-    weights = {"change": 0.5, "turnover": 0.5, "value_rank": 0.0, "attention": 0.0}
+    weights = {"change": 0.5, "turnover": 0.5, "value_rank": 0.0, "attention": 0.0, "flow": 0.0}
     scored = compute_scalp_scores(candidates, attention_codes=set(), weights=weights)
 
     assert scored[0]["score"] == scored[1]["score"]
@@ -89,10 +90,49 @@ def test_custom_weights_are_respected():
         _cand("B", change_rate=20.0, turnover=1.0, value_rank=1),
     ]
     # turnover만 100% 반영하는 극단 가중치 -> turnover가 큰 A가 1등이어야 한다.
-    weights = {"change": 0.0, "turnover": 1.0, "value_rank": 0.0, "attention": 0.0}
+    weights = {"change": 0.0, "turnover": 1.0, "value_rank": 0.0, "attention": 0.0, "flow": 0.0}
     scored = compute_scalp_scores(candidates, attention_codes=set(), weights=weights)
 
     assert scored[0]["code"] == "A"
+
+
+# -- flow 요소 (PLAN.md §5.20) ---------------------------------------------
+
+
+def test_positive_flow_scores_higher_than_negative_flow_all_else_equal():
+    """수급 유입(외국인+기관 순매수 양수)이 유출(음수)보다 높은 점수를 받아야
+    한다 — 다른 3개 요소(change/turnover/value_rank)는 동일하게 고정."""
+    candidates = [
+        _cand("INFLOW", change_rate=2.0, turnover=5.0, value_rank=10, flow_net_value=5000),
+        _cand("OUTFLOW", change_rate=2.0, turnover=5.0, value_rank=10, flow_net_value=-5000),
+    ]
+    scored = compute_scalp_scores(candidates, attention_codes=set())
+
+    by_code = {r["code"]: r for r in scored}
+    assert by_code["INFLOW"]["score"] > by_code["OUTFLOW"]["score"]
+    assert scored[0]["code"] == "INFLOW"
+
+
+def test_flow_none_treated_as_neutral_zero_not_dropped():
+    """flow_net_value가 None(그 종목이 아직 stock_flow 스윕을 못 돈 경우)이면
+    change_rate/turnover의 기존 None 처리와 동일하게 0.0 중립으로 취급되어야
+    한다 — 계산에서 제외되면 안 된다."""
+    candidates = [
+        _cand("NEUTRAL", change_rate=2.0, turnover=5.0, value_rank=10, flow_net_value=None),
+        _cand("INFLOW", change_rate=2.0, turnover=5.0, value_rank=10, flow_net_value=5000),
+        _cand("OUTFLOW", change_rate=2.0, turnover=5.0, value_rank=10, flow_net_value=-5000),
+    ]
+    scored = compute_scalp_scores(candidates, attention_codes=set())
+
+    by_code = {r["code"]: r for r in scored}
+    assert len(scored) == 3
+    # None은 유입(양수)보다 낮고 유출(음수)보다는 높은 "중간" 취급을 받아야 한다.
+    assert by_code["INFLOW"]["score"] > by_code["NEUTRAL"]["score"] > by_code["OUTFLOW"]["score"]
+
+
+def test_weights_include_flow_and_still_sum_to_one():
+    assert "flow" in WEIGHTS
+    assert round(sum(WEIGHTS.values()), 6) == 1.0
 
 
 def test_score_output_preserves_input_fields():

@@ -1,23 +1,40 @@
 """Unit tests for GET /api/markets/scalp-candidates (app.routers.scalp,
-PLAN.md §5.2).
+PLAN.md §5.2, extended for §5.20 flow scoring).
 
-httpx.AsyncClient + ASGITransport against the real FastAPI app. No real
-network/DB — this router doesn't fetch anything itself, it only calls the
-already-tested warm functions from routers.flow_rank (_warm_value_rank_live)
-and routers.markets (_warm_attention), so here we monkeypatch those two warm
-functions directly (same "swap the collaborator" style as
-test_markets_attention_router.py / test_value_rank_live_router.py, but one
-level up since scalp.py composes both).
+httpx.AsyncClient + ASGITransport against the real FastAPI app. The
+value-rank/attention warm functions are monkeypatched (same "swap the
+collaborator" style as test_markets_attention_router.py / test_value_rank_
+live_router.py) since this router doesn't fetch those itself.
+
+**2026-07-23 change (PLAN.md §5.20-2)**: ``_scored_candidates`` now also calls
+``_stock_flow_lookup(session, codes)``, a real DB read against ``stock_flow``
+— the dependency override can no longer yield ``None`` for the session (it did
+before this phase, since nothing touched the DB). Tests now use a real session
+from ``app.db.async_session_factory`` against the dev Postgres (same house
+pattern as tests/test_stocks_router.py / test_scalp_tracker.py), and the
+value-rank candidate codes were swapped from real KRX codes (000660/069500/
+247540) to fake test codes (999801/999802/999803) that don't collide with
+real market data, so seeding/clearing ``stock_flow`` rows for them is safe.
 """
 
 from __future__ import annotations
 
+import datetime as dt
+
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import delete
 
-from app.db import get_session
+from app.db import async_session_factory, engine, get_session
 from app.main import app
+from app.market_hours import KST
+from app.models import Stock, StockFlow
 from app.routers import scalp
+
+TEST_CODE_KOSPI = "999801"  # 069500 KODEX 200 자리를 대신하던 "SK하이닉스" 역할 -> 이제 개별주
+TEST_CODE_ETF = "999802"
+TEST_CODE_KOSDAQ = "999803"
+TEST_CODES = [TEST_CODE_KOSPI, TEST_CODE_ETF, TEST_CODE_KOSDAQ]
 
 VALUE_RANK_PAYLOAD = {
     "date": "2026-07-21",
@@ -27,8 +44,8 @@ VALUE_RANK_PAYLOAD = {
         {
             "rank": 1,
             "market": "kospi",
-            "code": "000660",
-            "name": "SK하이닉스",
+            "code": TEST_CODE_KOSPI,
+            "name": "테스트반도체",
             "value": 500_000,
             "change_rate": 3.5,
             "is_etf": False,
@@ -37,8 +54,8 @@ VALUE_RANK_PAYLOAD = {
         {
             "rank": 2,
             "market": "kospi",
-            "code": "069500",
-            "name": "KODEX 200",
+            "code": TEST_CODE_ETF,
+            "name": "테스트KODEX",
             "value": 400_000,
             "change_rate": 0.5,
             "is_etf": True,  # ETF -> 후보에서 제외돼야 함
@@ -47,8 +64,8 @@ VALUE_RANK_PAYLOAD = {
         {
             "rank": 3,
             "market": "kosdaq",
-            "code": "247540",
-            "name": "에코프로비엠",
+            "code": TEST_CODE_KOSDAQ,
+            "name": "테스트바이오",
             "value": 100_000,
             "change_rate": -6.1,
             "is_etf": False,
@@ -58,7 +75,16 @@ VALUE_RANK_PAYLOAD = {
 }
 
 ATTENTION_PAYLOAD = {
-    "rows": [{"rank": 1, "code": "247540", "name": "에코프로비엠", "change_rate": -6.1, "is_etf": False, "market": "kosdaq"}],
+    "rows": [
+        {
+            "rank": 1,
+            "code": TEST_CODE_KOSDAQ,
+            "name": "테스트바이오",
+            "change_rate": -6.1,
+            "is_etf": False,
+            "market": "kosdaq",
+        }
+    ],
     "qry_tp": "4",
     "queried_at": "2026-07-21T01:00:05+00:00",
     "market_closed": False,
@@ -85,12 +111,48 @@ def _clear_overrides():
     app.dependency_overrides.clear()
 
 
+@pytest.fixture(autouse=True)
+async def _dispose_engine_per_test():
+    """app.db.engine이 이벤트 루프에 바인딩된 모듈 전역 싱글턴이라(pytest-asyncio가
+    테스트마다 새 루프를 준다) 매 테스트 뒤 dispose — test_stocks_router.py와 동일한
+    안전장치."""
+    yield
+    await engine.dispose()
+
+
+async def _clear_test_rows() -> None:
+    async with async_session_factory() as session:
+        await session.execute(delete(StockFlow).where(StockFlow.code.in_(TEST_CODES)))
+        await session.execute(delete(Stock).where(Stock.code.in_(TEST_CODES)))
+        await session.commit()
+
+
+@pytest.fixture
+async def seeded_stocks():
+    """value-rank 후보 3개가 FK(``stock_flow.code -> stocks.code``)를 만족하도록
+    최소한의 Stock 마스터 행을 심어 둔다 — 실제 flow 값 유무와 무관하게 이
+    파일의 모든 테스트가 의존한다(seed 없이 StockFlow를 넣으면 FK 위반)."""
+    await _clear_test_rows()
+    async with async_session_factory() as session:
+        session.add(Stock(code=TEST_CODE_KOSPI, name="테스트반도체", market="KOSPI", is_etf=False))
+        session.add(Stock(code=TEST_CODE_ETF, name="테스트KODEX", market="KOSPI", is_etf=True))
+        session.add(Stock(code=TEST_CODE_KOSDAQ, name="테스트바이오", market="KOSDAQ", is_etf=False))
+        await session.commit()
+    yield
+    await _clear_test_rows()
+
+
 async def _get_session_override():
-    yield None
+    async with async_session_factory() as session:
+        yield session
 
 
-async def test_scalp_candidates_excludes_etf_and_marks_attention():
+def _apply_session_override():
     app.dependency_overrides[get_session] = _get_session_override
+
+
+async def test_scalp_candidates_excludes_etf_and_marks_attention(seeded_stocks):
+    _apply_session_override()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/markets/scalp-candidates")
@@ -100,23 +162,26 @@ async def test_scalp_candidates_excludes_etf_and_marks_attention():
     assert body["date"] == "2026-07-21"
     assert body["market_closed"] is False
     codes = [r["code"] for r in body["rows"]]
-    assert "069500" not in codes  # ETF 제외
-    assert set(codes) == {"000660", "247540"}
+    assert TEST_CODE_ETF not in codes  # ETF 제외
+    assert set(codes) == {TEST_CODE_KOSPI, TEST_CODE_KOSDAQ}
 
     by_code = {r["code"]: r for r in body["rows"]}
-    assert by_code["247540"]["in_attention_top"] is True
-    assert by_code["000660"]["in_attention_top"] is False
-    assert by_code["247540"]["value_rank_position"] == 3
-    assert by_code["000660"]["value_rank_position"] == 1
-    assert by_code["247540"]["turnover"] == 15.4
-    assert by_code["000660"]["change_rate"] == 3.5
+    assert by_code[TEST_CODE_KOSDAQ]["in_attention_top"] is True
+    assert by_code[TEST_CODE_KOSPI]["in_attention_top"] is False
+    assert by_code[TEST_CODE_KOSDAQ]["value_rank_position"] == 3
+    assert by_code[TEST_CODE_KOSPI]["value_rank_position"] == 1
+    assert by_code[TEST_CODE_KOSDAQ]["turnover"] == 15.4
+    assert by_code[TEST_CODE_KOSPI]["change_rate"] == 3.5
+    # 아직 stock_flow 스윕이 안 돈 상태(seeded_stocks는 StockFlow를 안 심음) -> null.
+    assert by_code[TEST_CODE_KOSPI]["flow_net_value"] is None
+    assert by_code[TEST_CODE_KOSDAQ]["flow_net_value"] is None
     # score 내림차순 정렬 확인
     scores = [r["score"] for r in body["rows"]]
     assert scores == sorted(scores, reverse=True)
 
 
-async def test_scalp_candidates_limit_param():
-    app.dependency_overrides[get_session] = _get_session_override
+async def test_scalp_candidates_limit_param(seeded_stocks):
+    _apply_session_override()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/markets/scalp-candidates?limit=1")
@@ -130,7 +195,7 @@ async def test_scalp_candidates_empty_rows_when_no_value_rank_data(monkeypatch):
         return {"date": None, "market_closed": False, "cached_at": None, "rows": []}
 
     monkeypatch.setattr(scalp, "_warm_value_rank_live", _empty_value_rank)
-    app.dependency_overrides[get_session] = _get_session_override
+    _apply_session_override()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/markets/scalp-candidates")
@@ -139,15 +204,71 @@ async def test_scalp_candidates_empty_rows_when_no_value_rank_data(monkeypatch):
     assert resp.json()["rows"] == []
 
 
-async def test_scalp_candidates_market_closed_reflected_from_value_rank(monkeypatch):
+async def test_scalp_candidates_market_closed_reflected_from_value_rank(seeded_stocks, monkeypatch):
     async def _closed_value_rank():
         return {**VALUE_RANK_PAYLOAD, "market_closed": True}
 
     monkeypatch.setattr(scalp, "_warm_value_rank_live", _closed_value_rank)
-    app.dependency_overrides[get_session] = _get_session_override
+    _apply_session_override()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/markets/scalp-candidates")
 
     assert resp.status_code == 200
     assert resp.json()["market_closed"] is True
+
+
+# -- _stock_flow_lookup / flow_net_value (PLAN.md §5.20-2) -------------------
+
+
+async def _seed_flow_rows(today: dt.date) -> None:
+    async with async_session_factory() as session:
+        session.add_all(
+            [
+                StockFlow(code=TEST_CODE_KOSPI, date=today, investor="외국인", net_value=3000),
+                StockFlow(code=TEST_CODE_KOSPI, date=today, investor="기관계", net_value=2000),
+                # 개인은 합계에서 제외돼야 한다 — 아무리 커도 결과에 영향 없어야 함.
+                StockFlow(code=TEST_CODE_KOSPI, date=today, investor="개인", net_value=999_999),
+                StockFlow(code=TEST_CODE_KOSDAQ, date=today, investor="외국인", net_value=-500),
+            ]
+        )
+        await session.commit()
+
+
+async def test_stock_flow_lookup_sums_foreign_and_institution_excludes_individual(seeded_stocks):
+    today = dt.datetime.now(KST).date()
+    await _seed_flow_rows(today)
+
+    async with async_session_factory() as session:
+        result = await scalp._stock_flow_lookup(session, [TEST_CODE_KOSPI, TEST_CODE_KOSDAQ])
+
+    assert result[TEST_CODE_KOSPI] == 5000  # 3000(외국인) + 2000(기관계), 개인 999999 제외
+    assert result[TEST_CODE_KOSDAQ] == -500
+
+
+async def test_stock_flow_lookup_omits_codes_with_no_data(seeded_stocks):
+    async with async_session_factory() as session:
+        result = await scalp._stock_flow_lookup(session, [TEST_CODE_KOSPI, TEST_CODE_KOSDAQ])
+
+    assert result == {}
+
+
+async def test_stock_flow_lookup_empty_codes_returns_empty_dict_without_query():
+    async with async_session_factory() as session:
+        result = await scalp._stock_flow_lookup(session, [])
+
+    assert result == {}
+
+
+async def test_flow_net_value_appears_in_scalp_candidates_response(seeded_stocks):
+    today = dt.datetime.now(KST).date()
+    await _seed_flow_rows(today)
+    _apply_session_override()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/scalp-candidates")
+
+    assert resp.status_code == 200
+    by_code = {r["code"]: r for r in resp.json()["rows"]}
+    assert by_code[TEST_CODE_KOSPI]["flow_net_value"] == 5000
+    assert by_code[TEST_CODE_KOSDAQ]["flow_net_value"] == -500

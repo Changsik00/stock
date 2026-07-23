@@ -1556,6 +1556,80 @@ Prometheus/Grafana도 최근 데이터는 원본, 오래된 건 시간당 평균
 | 5.19-3 | 쏠림 계산 정규화 | `get_market_concentration_series`가 `kospi_baseline`/`kosdaq_baseline` 인자를 받아 배율로 정규화 후 비율 계산(둘 중 하나라도 없으면 그 틱 스킵), 라우터가 `compute_activity_baseline` 호출해 전달 | 오늘 실데이터로 정규화 전/후 쏠림% 비교 — 절대금액 비교(95~100%)와 다른(더 50%에 가까운, 또는 반대로 더 극단적인) 값이 나올 수 있음을 실측으로 확인 |
 | 5.19-4 | 프런트 정규화 반영 | `computeConcentration(flowLive, baseline)`이 `regime.kospi.activity_baseline`/`regime.kosdaq.activity_baseline`을 받아 배율 계산, KPI 타일/모달 "현재" 탭 3곳 모두 반영, 모달 설명 문구를 "평소 대비 배율 비교"로 갱신 | Playwright로 "코스피/코스닥 쏠림" 카드+모달이 새 정의로 렌더되고 배율(예: "코스피 평소 대비 N배 · 코스닥 평소 대비 M배") 표시 확인 |
 
+### Phase 5.20 — 종목별 당일 수급 유입 스크리닝 → 스켈핑 스코어 반영 (2026-07-23 사용자 요청)
+
+사용자: "알테오젠 수급으로 들어오는거 같거든.. 오늘 같은날 수급 받는걸
+찾는건 없을까? 지금 우리가 수급이 어디에서 어디로 가는지 분석하고
+있잖아.. 당일 스켈핑 추천을 하자."
+
+**문제**: 지금까지 §5.15~§5.19가 분석한 수급은 전부 **시장 전체**(코스피/
+코스닥 합계) 단위였다 — 개별 종목 수준에서 "오늘 외국인/기관 돈이 어디로
+들어오는지"는 스크리닝하지 못했다. 기존 "스켈핑 후보"
+(`app/quant/screener.py::compute_scalp_scores`)도 등락률·회전율·거래대금
+순위·관심순위 4개뿐이라 **수급(외국인/기관 순매수)이 전혀 안 들어간다** —
+지금 프로젝트가 가장 공들여 쌓아온 재료가 정작 스켈핑 추천에는 반영이
+안 되고 있었다는 뜻이다.
+
+**왜 지금까지 없었나(중요한 선행 조사, 재조사 불필요)**: `routers/flow_rank.py`
+모듈 docstring "flow-rank/live는 만들지 않는다" / "키움 TR(ka10065/ka90009)
+대체 재검토" 절에 이미 결론이 나 있다 — **시장 전체를 한 번에 보여주는
+"외국인/기관 순매수 상위 랭킹" 소스는 네이버·키움 둘 다 장중 실시간 갱신이
+안 된다**(2영업일 이상 지연 또는 값이 안 바뀜, 2026-07-20/21 실측 확정).
+이번엔 그 랭킹 TR이 아니라 **종목별 개별 조회 TR(`ka10059`, 종목별
+투자자기관별요청)을 후보 종목마다 순회 호출**하는 다른 방법을 쓴다 — 이미
+`routers/stocks.py`가 종목상세에서 온디맨드로 쓰고 있고(§5.16 "개인 0원"
+조사에서 확인했듯 외국인/기관은 당일 실시간 값이 나온다, 개인만 0), 이걸
+스켈핑 후보군(이미 있는 값-랭크 상위 종목, 최대 200개)에 대해 주기적으로
+전부 순회하면 "그 시각 기준 외국인+기관 당일 누적 순매수"를 종목별로
+얻을 수 있다.
+
+**설계**:
+
+1. **후보군**: `routers/flow_rank.py::_warm_value_rank_live()`가 이미 캐시해
+   둔 코스피+코스닥 거래대금 상위(최대 200개, ETF 제외) — `scalp-candidates`가
+   쓰는 후보군과 동일(새 유니버스 아님, §5.2 "신규 수집 불필요" 원칙 계승).
+2. **신규 주기 잡(10분 티어)**: `collectors/live_refresh.py`에 세 번째
+   인터벌 잡 `_run_stock_flow_scan`(`STOCK_FLOW_SCAN_INTERVAL_SECONDS = 600`)을
+   추가한다. 후보군 코드마다 `KiwoomClient.stock_investor_daily(code)`(ka10059)를
+   순회 호출해 `routers/stocks.py`의 기존 `_parse_ka10059_rows`/
+   `_upsert_flow_rows`를 그대로 재사용, `stock_flow` 테이블(스키마 변경 없음,
+   종목상세가 이미 쓰는 그 테이블)에 upsert한다. NXT 게이트(`is_nxt_closed`,
+   개별 종목이라 08:00~20:00) — attention/value-rank와 동일 기준.
+   **중요(실제 외부 API 안전장치)**: 키움 클라이언트의 rate limiter(`_bucket`,
+   1req/s)는 **인스턴스 속성**이라 종목마다 새 `KiwoomClient()`를 열면 매번
+   토큰 버킷이 리셋돼 사실상 무제한 버스트가 되어 버린다 — 반드시 **스윕
+   전체를 위해 `KiwoomClient()` 인스턴스 하나만 열고** 그 안에서 최대 200개
+   종목을 순차 호출한다(1req/s면 최악 200초 ≈ 3.3분, 10분 창 안에 여유).
+3. **읽기**: `routers/scalp.py`에 `_stock_flow_lookup(session, codes)` 추가 —
+   `stock_flow`에서 오늘 날짜 + investor in (외국인, 기관계)를 후보 코드로
+   필터링해 코드별 net_value 합을 반환. `_scored_candidates`가 이 lookup을
+   후보 dict에 `flow_net_value`로 붙여 `compute_scalp_scores`에 넘긴다.
+   스윕이 아직 안 돈 종목(신선한 데이터 없음)은 lookup에 없음 → None →
+   중립(0) 처리(기존 change_rate/turnover의 None 처리와 동일 관례).
+4. **스코어 반영**: `quant/screener.py::compute_scalp_scores`에 5번째 요소
+   `flow`(오늘 외국인+기관 net_value, **부호 있는 그대로** z-score — 등락률과
+   달리 수급은 "순매수 방향"이 의미가 있다, abs 쓰지 않음) 추가. 가중치
+   재배분 — 사용자가 반복 강조한 우선순위(수급이 핵심 재료)를 반영해 flow를
+   가장 높은 가중치로: `{"change": 0.20, "turnover": 0.20, "value_rank": 0.10,
+   "attention": 0.10, "flow": 0.40}`(합 1.0). **이 가중치는 검증된 값이
+   아니라 첫 배정이다** — §5.15가 시장 단위 백테스트로 가중치를 정한 것과
+   달리 종목 단위 수급→수익률 관계는 아직 검증 안 됨. 이미 있는
+   `scalp_pick`/`scalp_tracker`(§5.7, 진입 시점·이후 5/15/30/60분·EOD
+   수익률 기록)가 그대로 이 새 스코어의 사후 검증 근거가 된다 — 데이터가
+   쌓이면 가중치를 재검토한다.
+5. **응답 필드**: `/api/markets/scalp-candidates` 각 행에 `flow_net_value`
+   (int|null, 백만원 단위 — stock_flow.net_value 그대로, market_flow/종목상세
+   수급 차트와 동일 컨벤션) 추가해 "왜 이 종목이 상위인지" 투명하게 보이게 한다.
+6. **원칙 유지(§5 그대로)**: "참고용 스크리닝 — 매매 신호 아님" 문구는
+   그대로 유지한다. 수급이 크다고 "사라"가 아니라 "오늘 외국인/기관 순매수가
+   유입되고 있다"는 관찰 서술만.
+
+| # | 작업 | 내용 | 완료 기준 |
+|---|---|---|---|
+| 5.20-1 ✅ | 종목별 수급 스윕 잡 | `live_refresh.py`에 `_run_stock_flow_scan`(10분 티어, NXT 게이트, 단일 `KiwoomClient()` 재사용 필수) 추가, `stocks.py`의 `_parse_ka10059_rows`/`_upsert_flow_rows` 재사용해 `stock_flow`에 upsert | 실 DB로 후보군 종목들의 오늘 날짜 `stock_flow` 행이 주기적으로 갱신됨을 확인 — **완료(2026-07-23)**, 알테오젠(196170)이 실제로 후보군에 있고 오늘 외국인+기관 순매수 6,340백만원(63.4억원) 확인 |
+| 5.20-2 ✅ | 조회 + 스코어 반영 | `scalp.py::_stock_flow_lookup` 추가, `compute_scalp_scores`에 `flow` 요소(부호 있는 z-score) + 가중치 재배분, `flow_net_value` 필드를 `/api/markets/scalp-candidates` 응답에 노출 | curl로 스켈핑 후보 상위 종목에 수급 유입이 큰 종목이 실제로 상위권에 반영됨을 확인 — **완료(2026-07-23)**, 삼성전자 flow_net_value=106,457백만원으로 스코어 1위, 단위테스트로 가중치 합 1.0·None→중립·양수/음수 방향성 검증 |
+| 5.20-3 ✅ | 프런트 반영 | 대시보드 "스켈핑 후보" 카드에 종목별 `flow_net_value`(수급 유입 억원 등) 표시, "참고용 · 매매신호 아님" 문구 유지 | 빌드 성공 확인(브라우저 자동화 도구 미가용이라 Playwright 스크린샷 대신 `vite build` 클린 확인 + 코드 리뷰로 대체) — **완료(2026-07-23)** |
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 - **계획·리뷰는 메인 세션, 코딩은 Sonnet 서브에이전트**: 위 표의 작업(1-1, 1-2, …)

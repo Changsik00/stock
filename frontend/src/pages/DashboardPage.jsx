@@ -273,6 +273,21 @@ function scalpScoreBadgeLabel(score) {
   return `스코어 ${scalpScoreLabel(score)}`
 }
 
+// PLAN.md §5.20-3 — 종목별 당일 외국인+기관 순매수(flow_net_value) 배지. 단위는
+// stock_flow.net_value 그대로(백만원 관례, 위 eokLabel/signedEokLabel과 동일 — 종목
+// 상세 모달의 수급 타일과 같은 컨벤션, StockDetailModal.jsx "net_value/cum_net_value는
+// market_flow와 동일하게 백만원 단위로 내려온다" 주석 참고). turnoverBadgeLabel/
+// scalpScoreBadgeLabel과 동일하게 Badge kind="info"(중립색)만 쓴다 — 수급 방향이
+// 부호에 이미 드러나 있지만("+"/"-"), 그걸 배지 색(up/down)으로까지 강조하면
+// "사라"는 신호로 오해될 수 있다(§5 "관찰 사실만 서술" 원칙, scalpScoreBadgeLabel
+// 주석의 동일한 판단 그대로 계승). 아직 `_run_stock_flow_scan`(10분 티어) 스윕이
+// 그 종목까지 못 돈 경우 flow_net_value가 null이므로 배지 자체를 생략한다(turnover가
+// 없을 때 배지를 생략하는 것과 동일한 관례 — "0"이나 자리표시자를 억지로 보여주지 않는다).
+function flowBadgeLabel(flowNetValue) {
+  if (flowNetValue === null || flowNetValue === undefined) return null
+  return `수급 ${signedEokLabel(flowNetValue)}`
+}
+
 // MM-DD만 뽑는다 (StaleDate/TOP5 "…기준" 라벨 공용) — formatDate가 이미
 // 'YYYY-MM-DD'로 정규화하므로 뒤 5글자만 자르면 된다.
 function mmdd(date) {
@@ -1603,6 +1618,7 @@ function ScalpCandidatesFullModal({ onSelectStock }) {
                 {row.market && <Badge kind={row.market} />}
                 {turnoverBadgeLabel(row.turnover) && <Badge kind="info">{turnoverBadgeLabel(row.turnover)}</Badge>}
                 {scalpScoreBadgeLabel(row.score) && <Badge kind="info">{scalpScoreBadgeLabel(row.score)}</Badge>}
+                {flowBadgeLabel(row.flow_net_value) && <Badge kind="info">{flowBadgeLabel(row.flow_net_value)}</Badge>}
                 {row.in_attention_top && <Badge kind="live">관심 TOP</Badge>}
               </span>
               <span className={`top5-row-value ${rateClass(row.change_rate)}`}>{rateLabel(row.change_rate)}</span>
@@ -3196,12 +3212,18 @@ export default function DashboardPage() {
                   관심TOP)가 이름칸을 다 밀어내 종목명이 안 보였다 — 회전율/스코어
                   배지는 정보 밀도가 낮은 보조 정보라 "전체 보기" 모달(위 ScalpFullModal,
                   가로 폭이 훨씬 넓음)에서만 유지하고, 압축 카드에서는 다른 3개 랭킹
-                  카드와 동일하게 배지 최대 2개(시장·관심TOP)만 남긴다. */}
+                  카드와 동일하게 배지 최대 2개(시장·관심TOP)만 남긴다.
+                  PLAN.md §5.20-3: 수급 유입(flow_net_value) 배지는 예외적으로 압축
+                  카드에도 남긴다 — 이번 기능 자체가 "오늘 수급이 몰리는 종목을
+                  찾는다"는 사용자 요청(알테오젠 사례)에서 시작됐고, 스코어 가중치도
+                  flow가 0.40으로 가장 크므로(quant/screener.py 참고) 왜 이 종목이
+                  상위인지 압축 카드에서도 바로 보여야 의미가 있다는 판단. */}
               <span className="top5-row-name">
                 <span className="top5-row-label">
                   {i + 1}. {row.name || row.code}
                 </span>
                 {row.market && <Badge kind={row.market} />}
+                {flowBadgeLabel(row.flow_net_value) && <Badge kind="info">{flowBadgeLabel(row.flow_net_value)}</Badge>}
                 {row.in_attention_top && <Badge kind="live">관심 TOP</Badge>}
               </span>
               <span className={`top5-row-value ${rateClass(row.change_rate)}`}>{rateLabel(row.change_rate)}</span>

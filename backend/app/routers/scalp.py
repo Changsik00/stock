@@ -10,6 +10,11 @@
   (§4.7 value-rank/live, 7분 캐시) — 코스피+코스닥 상위 각 100개(최대 200개)
   스냅샷에서 ETF를 뺀 개별주만 후보로 쓴다(§5.2 "ETF는 제외").
 - 관심순위 편입 여부·등락률: ``routers.markets._warm_attention(session)``(60초 캐시).
+- **종목별 당일 수급(PLAN.md §5.20, 2026-07-23 추가)**: ``stock_flow`` 테이블
+  (DB, ``_stock_flow_lookup``이 읽는다) — ``collectors/live_refresh.py``의
+  ``_run_stock_flow_scan``(10분 티어)이 위 후보군 코드를 순회하며 키움
+  ka10059(``routers/stocks.py``의 기존 파서 재사용)로 채워둔다. 이 라우터는
+  그 결과를 읽기만 할 뿐 여기서 직접 키움을 호출하지 않는다.
 
 **change_rate 소스 우선순위(2026-07-21, §5.4-1)**: attention에 그 종목이 있으면
 attention의 change_rate(60초 캐시, 더 신선함)를 쓰고, 없으면 value-rank의
@@ -46,12 +51,45 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
 from ..market_hours import KST
-from ..models import ScalpPick
+from ..models import ScalpPick, StockFlow
 from ..quant.screener import compute_scalp_scores
 from .flow_rank import _warm_value_rank_live
 from .markets import _warm_attention
 
 router = APIRouter(tags=["markets"])
+
+# PLAN.md §5.20-2 — 오늘 외국인+기관 순매수만 스코어에 반영한다(개인은 §5.16에서
+# 확인했듯 장중 실시간 값이 항상 0으로 스텁돼 있어 신호가 아니다).
+_FLOW_INVESTORS = ("외국인", "기관계")
+
+
+async def _stock_flow_lookup(session: AsyncSession, codes: list[str]) -> dict[str, int]:
+    """code -> 오늘 날짜 외국인+기관계 net_value 합계(PLAN.md §5.20-2).
+
+    ``stock_flow``는 ``collectors/live_refresh.py::_run_stock_flow_scan``(10분
+    티어)이 후보군을 순회하며 채운다 — 이 함수는 그 결과를 읽기만 한다(새 외부
+    호출 없음). net_value가 NULL인 행은 "값이 없다"는 뜻이라 합계에서 제외한다
+    (0으로 취급하면 진짜 순매수 0과 구분이 안 된다). 스윕이 아직 그 종목까지
+    돌지 않았거나 데이터가 전혀 없으면 그 code는 반환 dict에 아예 없다 — 호출부가
+    ``.get(code)``로 자연스럽게 None(중립)을 받도록 한다(change_rate/turnover의
+    기존 None 처리 관례와 동일, quant/screener.py 참고).
+    """
+    if not codes:
+        return {}
+
+    today = dt.datetime.now(KST).date()
+    stmt = select(StockFlow.code, StockFlow.net_value).where(
+        StockFlow.code.in_(codes),
+        StockFlow.date == today,
+        StockFlow.investor.in_(_FLOW_INVESTORS),
+        StockFlow.net_value.isnot(None),
+    )
+    rows = (await session.execute(stmt)).all()
+
+    totals: dict[str, int] = {}
+    for code, net_value in rows:
+        totals[code] = totals.get(code, 0) + net_value
+    return totals
 
 
 async def _fetch_live_payloads(session: AsyncSession) -> tuple[dict, dict]:
@@ -107,6 +145,14 @@ async def _scored_candidates(session: AsyncSession) -> tuple[list[dict[str, Any]
         if not row.get("is_etf")
     ]
 
+    # PLAN.md §5.20-2 — 후보군이 정해진 뒤에 그 코드들만 stock_flow에서 조회한다
+    # (전체 stock_flow 테이블을 스캔하지 않고 이번 후보군으로 한정). 아직 스윕이
+    # 안 돈 종목은 lookup에 없어 .get()이 None을 주고, compute_scalp_scores가
+    # 이를 change_rate/turnover의 None과 동일하게 중립(0) 처리한다.
+    flow_lookup = await _stock_flow_lookup(session, [c["code"] for c in candidates])
+    for c in candidates:
+        c["flow_net_value"] = flow_lookup.get(c["code"])
+
     scored = compute_scalp_scores(candidates, attention_codes)
     return scored, value_payload
 
@@ -120,7 +166,10 @@ async def scalp_candidates(
 
     Returns ``{"date": iso8601|null, "market_closed": bool, "cached_at":
     iso8601|null, "rows": [{"code", "name", "market", "score", "change_rate",
-    "turnover", "in_attention_top", "value_rank_position"}, ...]}``.
+    "turnover", "in_attention_top", "value_rank_position", "flow_net_value"},
+    ...]}`` — ``flow_net_value``(PLAN.md §5.20)는 오늘 외국인+기관 순매수 합
+    (백만원 단위, stock_flow.net_value 그대로 — market_flow/종목상세 수급 차트와
+    동일 컨벤션, StockDetailModal.jsx 참고), 아직 수급 스윕이 안 돈 종목은 null.
 
     market_closed는 후보군 소스(value-rank/live)의 값을 그대로 따른다 — 장
     마감이면 마지막 라이브 스냅샷을 그대로 재사용해 표시한다(value-rank/live와
@@ -142,6 +191,7 @@ async def scalp_candidates(
                 "turnover": c["turnover"],
                 "in_attention_top": c["in_attention_top"],
                 "value_rank_position": c["value_rank"],
+                "flow_net_value": c.get("flow_net_value"),
             }
             for c in scored[:limit]
         ],
