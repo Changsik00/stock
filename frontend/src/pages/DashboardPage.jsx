@@ -8,6 +8,7 @@ import {
   fetchBreadthIntradayAccumulated,
   fetchBreadthLive,
   fetchDerivativeFlow,
+  fetchFlowConcentrationIntradayAccumulated,
   fetchFlowIntradayAccumulated,
   fetchFlowLive,
   fetchFlowPath,
@@ -384,6 +385,30 @@ function mergeIntradayByTime(seriesA, seriesB) {
   return order.map((time) => ({ time, value: totals.get(time) }))
 }
 
+// 코스피/코스닥 "쏠림" 비율(PLAN.md §5.18) — flow/live 응답(fetchFlowLive의
+// { kospi: {investors}, kosdaq: {investors} } 모양)에서 코스피·코스닥 각각의
+// "활동량"(|외국인 순매수|+|기관계 순매수|, 방향 무관 절댓값)을 계산해 쏠림%를
+// 구한다. 백엔드 collectors/intraday_snapshot.py의 get_market_concentration_series
+// 와 동일한 지표 정의 — 그쪽은 DB에 적립된 1D 시계열을 계산하고, 이 헬퍼는 KPI
+// 타일/모달의 "현재" 탭이 이미 폴링 중인 flow/live 스냅샷 하나로 즉석 계산한다
+// (새 API 호출 없음, breadthTotals와 동일한 "이미 fetch한 값을 프런트에서 합산"
+// 관례). 활동량 분모가 0이면(둘 다 활동 없음) 쏠림을 정의할 수 없어 null.
+function computeConcentration(flowLive) {
+  if (!flowLive) return null
+  const activity = (market) => {
+    const investors = flowLive[market]?.investors
+    const foreign = investors?.['외국인']?.net_value
+    const inst = investors?.['기관계']?.net_value
+    return Math.abs(foreign ?? 0) + Math.abs(inst ?? 0)
+  }
+  const kospiActivity = activity('kospi')
+  const kosdaqActivity = activity('kosdaq')
+  const denom = kospiActivity + kosdaqActivity
+  if (denom <= 0) return null
+  const kospiShare = (kospiActivity / denom) * 100
+  return { kospiShare, kosdaqShare: 100 - kospiShare, moreActive: kospiShare >= 50 ? '코스피' : '코스닥' }
+}
+
 // flows(투자자 -> [{date, net_value, net_volume}])에서 특정 투자자의 가장 최근 행을
 // 뽑는다 — market_flow 계열 응답을 다루는 여러 곳(외인 현물/선물 타일)에서 공용으로 쓴다.
 function latestFlowRow(flows, investor) {
@@ -751,6 +776,125 @@ function BreadthModal() {
           {intradayLoading && !intraday && <div className="state">불러오는 중…</div>}
           {intradayError && <div className="state error">{intradayError}</div>}
           {!intradayError && intraday && <BreadthRatioChart series={intraday.series} />}
+        </>
+      )}
+    </div>
+  )
+}
+
+function ConcentrationModal() {
+  // PLAN.md §5.18 — "외인, 기관이 적극 매수해야 코스피/코스닥이 오른다"는 관찰에서,
+  // 그 돈이 어느 시장으로 쏠리는지를 "현재"(순간 관찰)와 "1D 추이"(BreadthModal과
+  // 완전히 동일한 패턴, BreadthRatioChart 재사용) 두 탭으로 보여준다. "현재" 탭은
+  // BreadthModal의 live 탭과 동일하게 flow/live(이미 다른 곳에서도 쓰는 기존
+  // 엔드포인트, 새 호출 아님)를 자체 폴링해 computeConcentration으로 즉석 계산한다
+  // — DashboardPage 본문의 KPI 타일이 쓰는 헬퍼와 동일해 숫자가 항상 일치한다.
+  const [chartMode, setChartMode] = useState('live')
+  const [flowLive, setFlowLive] = useState(null)
+  const [liveError, setLiveError] = useState(null)
+
+  const [intraday, setIntraday] = useState(null)
+  const [intradayLoading, setIntradayLoading] = useState(false)
+  const [intradayError, setIntradayError] = useState(null)
+  const [intradayDays, setIntradayDays] = useState(1)
+
+  useEffect(() => {
+    if (STATIC_DATA || chartMode !== 'live') return undefined
+    let cancelled = false
+    async function load() {
+      try {
+        const body = await fetchFlowLive()
+        if (!cancelled) {
+          setFlowLive(body)
+          setLiveError(null)
+        }
+      } catch (e) {
+        if (!cancelled) setLiveError(e.message)
+      }
+    }
+    load()
+    // 모달이 열려 있는 동안 계속 갱신 — BreadthModal의 동일한 폴링 관례.
+    const intervalId = setInterval(load, BREADTH_LIVE_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(intervalId)
+    }
+  }, [chartMode])
+
+  useEffect(() => {
+    if (STATIC_DATA || chartMode !== '1D') return undefined
+    let cancelled = false
+    setIntradayLoading(true)
+    setIntradayError(null)
+    fetchFlowConcentrationIntradayAccumulated(intradayDays)
+      .then((body) => {
+        if (!cancelled) setIntraday(body)
+      })
+      .catch((e) => {
+        if (!cancelled) setIntradayError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setIntradayLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [chartMode, intradayDays])
+
+  const concentration = computeConcentration(flowLive)
+
+  return (
+    <div>
+      {!STATIC_DATA && (
+        <div className="toggle-row">
+          {BREADTH_MODE_OPTIONS.map((opt) => (
+            <button
+              key={opt.key}
+              type="button"
+              className={`toggle-chip ${chartMode === opt.key ? 'active' : ''}`}
+              onClick={() => setChartMode(opt.key)}
+            >
+              {opt.label}
+            </button>
+          ))}
+          <span className="toggle-hint">
+            쏠림% = 코스피 활동량 / (코스피+코스닥 활동량) × 100, 활동량 = |외국인 순매수|+|기관계 순매수|
+          </span>
+        </div>
+      )}
+
+      {chartMode === 'live' && (
+        <>
+          {liveError && <div className="state error">{liveError}</div>}
+          {!liveError && !concentration && <div className="state">적립 중 — 잠시 후 다시 확인</div>}
+          {concentration && (
+            // §5 "중립 계기판" 원칙 — "쏠려서 위험하다/좋다" 같은 가치 판단 없이
+            // 어느 쪽 활동이 더 많은지만 관찰 서술한다.
+            <div className="toggle-hint" style={{ marginBottom: 8 }}>
+              코스피 활동 비중 {scoreFmt.format(concentration.kospiShare)}% · 코스닥{' '}
+              {scoreFmt.format(concentration.kosdaqShare)}% — {concentration.moreActive} 쪽 활동이 더 많다
+            </div>
+          )}
+        </>
+      )}
+
+      {chartMode === '1D' && (
+        <>
+          <div className="toggle-row">
+            {INTRADAY_DAYS_OPTIONS.map((opt) => (
+              <button
+                key={opt.key}
+                type="button"
+                className={`toggle-chip ${intradayDays === opt.key ? 'active' : ''}`}
+                onClick={() => setIntradayDays(opt.key)}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          {intradayLoading && !intraday && <div className="state">불러오는 중…</div>}
+          {intradayError && <div className="state error">{intradayError}</div>}
+          {!intradayError && intraday && <BreadthRatioChart series={intraday.series} valueLabel="코스피 쏠림" />}
         </>
       )}
     </div>
@@ -2073,6 +2217,11 @@ export default function DashboardPage() {
     )
   })()
 
+  // "코스피/코스닥 쏠림" KPI 타일(PLAN.md §5.18) — 이미 1분 티어에서 폴링 중인
+  // flowLive를 computeConcentration으로 즉석 계산한다(breadthTotals와 동일한
+  // 관례, 새 API 호출 없음).
+  const concentrationLive = computeConcentration(flowLive)
+
   const fundLatest = (id) => {
     const points = fundSeries[id] || []
     return points.length > 0 ? points[points.length - 1].value : null
@@ -2683,6 +2832,14 @@ export default function DashboardPage() {
           sub={<span className="kpi-tile-sub">코스피+코스닥 합계</span>}
           onClick={() => setModal({ type: 'breadth', title: '등락 종목수' })}
         />
+        {/* "코스피/코스닥 쏠림"(PLAN.md §5.18) — "외인/기관 돈이 어디로 쏠리는지"
+            관찰 카드. 값은 코스피 쪽 활동 비중(%), 50%면 균등 분산. */}
+        <KpiTile
+          label="코스피/코스닥 쏠림"
+          value={concentrationLive ? `코스피 ${scoreFmt.format(concentrationLive.kospiShare)}%` : '…'}
+          sub={<span className="kpi-tile-sub">외인+기관계 활동량 비교 · 코스닥 나머지</span>}
+          onClick={() => setModal({ type: 'concentration', title: '코스피/코스닥 쏠림' })}
+        />
         {/* §5.6-1: 예탁금/대차잔고/신용융자는 KOFIA T+1(영업일) 공시라 구조적으로
             라이브 불가(§4.7-4, §7에 기록됨, 바꾸지 않음) — 그래서 실제 데이터 날짜가
             오늘과 다를 때가 대부분이다. ETF순유입/WTI 타일과 동일한 StaleDate("MM-DD"
@@ -3022,6 +3179,7 @@ export default function DashboardPage() {
         {modal?.type === 'candle' && <CandleModal market={modal.market} />}
         {modal?.type === 'sentiment' && <SentimentModal />}
         {modal?.type === 'breadth' && <BreadthModal />}
+        {modal?.type === 'concentration' && <ConcentrationModal />}
         {modal?.type === 'fund' && <FundModal />}
         {modal?.type === 'macro' && <MacroModal />}
         {modal?.type === 'flowSummary' && <FlowSummaryModal />}

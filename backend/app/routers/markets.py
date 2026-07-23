@@ -1076,6 +1076,35 @@ async def breadth_intraday_accumulated(
     return await intraday_snapshot.get_breadth_series(session, days)
 
 
+@router.get("/api/markets/flow-concentration/intraday-accumulated")
+async def flow_concentration_intraday_accumulated(
+    days: int = Query(1, ge=1, le=30),
+    session: AsyncSession = Depends(get_session),
+):
+    """장중 코스피/코스닥 "쏠림 비율" 누적 스냅샷 시계열(PLAN.md §5.18).
+
+    사용자 관찰: "외인, 기관이 적극적으로 매수를 해야 코스피, 코스닥이 오르는거
+    같아.. 코스피로 쏠리는지 코스닥으로 쏠리는지도 알아야 해" + "이게 추이 분석으로
+    가야해.. 순간 수치만 보여주면 안 된다". `flow_intraday_accumulated`/
+    `breadth_intraday_accumulated`와 완전히 같은 패턴 — 새로 소스를 호출하지 않고,
+    이미 60초 잡이 적립해 둔 ``flow_kospi_외국인``/``flow_kospi_기관계``/
+    ``flow_kosdaq_외국인``/``flow_kosdaq_기관계`` 4개 series_key를 시간매칭해 조회
+    시점에 쏠림%를 계산한다(collectors/intraday_snapshot.py
+    `get_market_concentration_series` 참고).
+
+    ``days``(기본 1, 최대 30) — 위 다른 intraday-accumulated 엔드포인트와 동일한
+    의미(과거 조회, 7일 초과 시 15분 압축본 포함).
+
+    Returns ``{"date": "YYYY-MM-DD", "series": [{"time": "HH:MM", "value": float}, ...],
+    "market_closed": bool}`` — ``value``는 쏠림%(0~100), 코스피 활동량 /
+    (코스피 활동량 + 코스닥 활동량) * 100(활동량 = |외국인 순매수| + |기관계
+    순매수|, 방향 무관 절댓값). 50%가 균등 분산 기준선, 100%=코스피 완전 쏠림,
+    0%=코스닥 완전 쏠림. ``market_closed``는 저장된 값이 아니라 호출 시점 기준으로
+    새로 계산한다.
+    """
+    return await intraday_snapshot.get_market_concentration_series(session, days)
+
+
 # GET /api/markets/{market}/intraday — 지수 분봉(PLAN.md §5.1). kospi/kosdaq은
 # 키움 ka20005(업종분봉차트요청)를 온디맨드로 호출해 "오늘"(최신 거래일) 하루치만
 # 반환한다(DB 미저장 — §5 원칙, stocks.py의 종목 분봉과 동일한 캐시 패턴이지만

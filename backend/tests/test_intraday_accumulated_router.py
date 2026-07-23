@@ -199,6 +199,52 @@ async def test_breadth_intraday_accumulated_empty_returns_empty_list(monkeypatch
     assert "market_closed" in body
 
 
+async def test_flow_concentration_intraday_accumulated_returns_computed_ratio(monkeypatch):
+    # PLAN.md §5.18 — 쏠림% = 코스피 활동량 / (코스피+코스닥 활동량) * 100,
+    # 활동량 = |외국인 순매수| + |기관계 순매수|. 아래 payload로 코스피 활동량
+    # 150, 코스닥 활동량 15 -> 쏠림 150/165*100.
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    payload = {
+        "kospi": {"investors": {"외국인": {"net_value": 100}, "기관계": {"net_value": -50}}},
+        "kosdaq": {"investors": {"외국인": {"net_value": 10}, "기관계": {"net_value": -5}}},
+        "market_closed": False,
+    }
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, payload)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/flow-concentration/intraday-accumulated")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["date"] == TEST_DAY.isoformat()
+    assert len(body["series"]) == 1
+    assert body["series"][0]["time"] == "10:00"
+    assert body["series"][0]["value"] == pytest.approx(150 / 165 * 100)
+    assert isinstance(body["market_closed"], bool)
+
+
+async def test_flow_concentration_intraday_accumulated_empty_returns_empty_list(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/flow-concentration/intraday-accumulated")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["series"] == []
+    assert "date" in body
+    assert "market_closed" in body
+
+
+async def test_flow_concentration_intraday_accumulated_days_out_of_range_returns_422():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp_low = await client.get("/api/markets/flow-concentration/intraday-accumulated", params={"days": 0})
+        resp_high = await client.get("/api/markets/flow-concentration/intraday-accumulated", params={"days": 31})
+
+    assert resp_low.status_code == 422
+    assert resp_high.status_code == 422
+
+
 async def test_intraday_sample_rows_survive_a_fresh_query_after_write(monkeypatch):
     """§5.14의 핵심 요구사항(재배포에도 데이터가 살아남아야 한다)을 라우터
     레벨에서도 확인한다 — 실제 프로세스 재시작은 못 흉내내지만, 쓰기에 쓰인

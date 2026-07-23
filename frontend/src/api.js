@@ -318,6 +318,19 @@ export async function fetchBreadthIntradayAccumulated(days = 1) {
   return getJson(`/api/markets/breadth/intraday-accumulated?days=${days}`)
 }
 
+// GET /api/markets/flow-concentration/intraday-accumulated?days=N -> { date,
+// series: [{time, value}], market_closed } (PLAN.md §5.18 — 코스피/코스닥 쏠림
+// 비율 추이) — "외인, 기관이 적극 매수해야 코스피/코스닥이 오른다"는 관찰에서,
+// 그 돈이 어느 시장으로 쏠리는지를 추이로 본다. 새 외부 호출 없이 서버가 이미
+// 60초마다 flow/live를 워밍하는 김에 적립해 둔 flow_kospi_외국인/기관계,
+// flow_kosdaq_외국인/기관계 4개 시리즈를 시간매칭해 계산한 쏠림 비율 시계열.
+// value는 쏠림%(0~100) — 코스피 활동량(|외국인 순매수|+|기관계 순매수|) /
+// (코스피 활동량+코스닥 활동량) * 100. 50%가 균등 분산 기준선, breadth와 동일한
+// 패턴(단일 시리즈, days 파라미터 의미 동일). 로컬 전용 기능, STATIC_DATA 대상 아님.
+export async function fetchFlowConcentrationIntradayAccumulated(days = 1) {
+  return getJson(`/api/markets/flow-concentration/intraday-accumulated?days=${days}`)
+}
+
 // GET /api/markets/basis?days=N -> { days, series: [{date, futures_close, kospi200_close,
 // basis, basis_pct}], latest: {date, backwardation, basis, basis_pct}, expiry: {date, d_day,
 // quadruple} } (PLAN.md §4.5-3/4.5-5) — K200 선물-현물 베이시스 + 다음 만기. latest/expiry는

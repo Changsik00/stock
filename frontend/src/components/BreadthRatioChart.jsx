@@ -12,8 +12,13 @@ import { CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Too
 // 단일 라인은 up/down(빨강/파랑) 대신 --series-price(중립 액센트)를 쓴다(MacroChart.jsx와
 // 동일한 관례) — 값 자체(상승비율)와 등락 방향 색상 관행을 혼동하지 않기 위해서다.
 //
-// props.series는 [{time: "HH:MM", value}] 형태(value는 0~100 상승비율 %, 백엔드
-// get_breadth_series()가 이미 계산해서 넘긴다 — 프런트는 추가 변환을 하지 않는다).
+// props.series는 [{time: "HH:MM", value}] 형태(value는 0~100 비율 %, 백엔드가 이미
+// 계산해서 넘긴다 — 프런트는 추가 변환을 하지 않는다).
+//
+// props.valueLabel(기본 '상승비율') — 툴팁/Y축 라벨 텍스트. §5.18(코스피/코스닥
+// 쏠림 비율)이 이 컴포넌트를 그대로 재사용하면서 "상승비율"이 아니라 "코스피 쏠림"
+// 같은 다른 지표명이 필요해져 프랍화했다 — 기본값은 기존 BreadthModal 동작과
+// 완전히 동일해 회귀 없음.
 
 const numFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 1 })
 
@@ -22,21 +27,21 @@ function pctLabel(v) {
   return `${numFmt.format(v)}%`
 }
 
-function chartTooltip({ active, payload, label }) {
+function chartTooltip({ active, payload, label, valueLabel }) {
   if (!active || !payload?.length) return null
   const v = payload[0].value
   return (
     <div className="tooltip">
       <div className="tooltip-date">{label}</div>
       <div className="tooltip-row">
-        <span>상승비율</span>
+        <span>{valueLabel}</span>
         <strong>{pctLabel(v)}</strong>
       </div>
     </div>
   )
 }
 
-export default function BreadthRatioChart({ series }) {
+export default function BreadthRatioChart({ series, valueLabel = '상승비율' }) {
   const data = series || []
   const totalPoints = data.length
 
@@ -63,10 +68,19 @@ export default function BreadthRatioChart({ series }) {
               domain={[0, 100]}
               width={48}
               tickFormatter={(v) => `${v}%`}
-              label={{ value: '상승비율(%)', angle: -90, position: 'insideLeft', fill: 'var(--text-muted)', fontSize: 11 }}
+              label={{
+                value: `${valueLabel}(%)`,
+                angle: -90,
+                position: 'insideLeft',
+                fill: 'var(--text-muted)',
+                fontSize: 11,
+              }}
             />
             <ReferenceLine y={50} stroke="var(--axis)" strokeDasharray="3 3" />
-            <Tooltip content={chartTooltip} cursor={{ stroke: 'var(--axis)', strokeWidth: 1 }} />
+            <Tooltip
+              content={(props) => chartTooltip({ ...props, valueLabel })}
+              cursor={{ stroke: 'var(--axis)', strokeWidth: 1 }}
+            />
             <Line
               type="monotone"
               dataKey="value"

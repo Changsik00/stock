@@ -423,6 +423,99 @@ async def test_get_breadth_series_reflects_written_points(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# get_market_concentration_series (PLAN.md §5.18)
+# ---------------------------------------------------------------------------
+
+
+async def test_get_market_concentration_series_shape_when_empty(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    async with async_session_factory() as session:
+        result = await snap.get_market_concentration_series(session, days=1)
+
+    assert result == {
+        "date": TEST_DAY.isoformat(),
+        "series": [],
+        "market_closed": result["market_closed"],
+    }
+
+
+async def test_get_market_concentration_series_computes_ratio_from_fixed_values(monkeypatch):
+    # _flow_payload 고정값: kospi 외국인=100/기관계=-50 -> 활동량 150,
+    # kosdaq 외국인=10/기관계=-5 -> 활동량 15. 쏠림% = 150/(150+15)*100.
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, _flow_payload(kospi_gaein=100, kosdaq_gaein=20))
+        result = await snap.get_market_concentration_series(session, days=1)
+
+    assert len(result["series"]) == 1
+    assert result["series"][0]["time"] == "10:00"
+    assert result["series"][0]["value"] == pytest.approx(150 / 165 * 100)
+
+
+async def test_get_market_concentration_series_uses_absolute_value_regardless_of_direction(monkeypatch):
+    # 방향(순매수/순매도)과 무관하게 절댓값으로 활동량을 계산해야 한다 — 부호가
+    # 반대라도(코스피 순매도, 코스닥 순매수) 활동량 자체는 양수로 합산된다.
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    payload = {
+        "kospi": {"investors": {"외국인": {"net_value": -300}, "기관계": {"net_value": -100}}},
+        "kosdaq": {"investors": {"외국인": {"net_value": 50}, "기관계": {"net_value": 50}}},
+        "market_closed": False,
+    }
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, payload)
+        result = await snap.get_market_concentration_series(session, days=1)
+
+    # kospi 활동량 = |-300|+|-100| = 400, kosdaq 활동량 = |50|+|50| = 100.
+    # 쏠림% = 400/(400+100)*100 = 80.0
+    assert result["series"] == [{"time": "10:00", "value": 80.0}]
+
+
+async def test_get_market_concentration_series_one_market_missing_treats_it_as_zero_activity(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    payload = {
+        "kospi": {"investors": {"외국인": {"net_value": 100}, "기관계": {"net_value": 50}}},
+        "kosdaq": None,
+        "market_closed": False,
+    }
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, payload)
+        result = await snap.get_market_concentration_series(session, days=1)
+
+    # 코스닥 쪽 series_key 자체가 안 쌓였으니 0으로 취급 -> 쏠림 100%(코스피 완전 쏠림).
+    assert result["series"] == [{"time": "10:00", "value": 100.0}]
+
+
+async def test_get_market_concentration_series_both_markets_zero_skips_the_tick(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    payload = {
+        "kospi": {"investors": {"외국인": {"net_value": 0}, "기관계": {"net_value": 0}}},
+        "kosdaq": {"investors": {"외국인": {"net_value": 0}, "기관계": {"net_value": 0}}},
+        "market_closed": False,
+    }
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, payload)
+        result = await snap.get_market_concentration_series(session, days=1)
+
+    # 활동량 분모가 0이라 쏠림을 정의할 수 없다 — 억지로 50%를 채우지 않고 건너뛴다.
+    assert result["series"] == []
+
+
+async def test_get_market_concentration_series_multiple_ticks_ordered_by_time(monkeypatch):
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 0))
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, _flow_payload(kospi_gaein=100, kosdaq_gaein=20))
+
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 1))
+    async with async_session_factory() as session:
+        await snap.record_flow_snapshot(session, _flow_payload(kospi_gaein=200, kosdaq_gaein=30))
+        result = await snap.get_market_concentration_series(session, days=1)
+
+    assert [p["time"] for p in result["series"]] == ["10:00", "10:01"]
+    for point in result["series"]:
+        assert point["value"] == pytest.approx(150 / 165 * 100)
+
+
+# ---------------------------------------------------------------------------
 # market_closed — 저장된 값이 아니라 호출 시점에 새로 계산
 # ---------------------------------------------------------------------------
 

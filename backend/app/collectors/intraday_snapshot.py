@@ -60,6 +60,16 @@ _FLOW_SERIES_KEYS = [f"flow_{market}_{investor}" for market in _FLOW_MARKETS for
 FUTURES_SERIES_KEY = "futures_외국인"
 BREADTH_SERIES_KEY = "breadth_ratio"
 
+# 쏠림 비율(PLAN.md §5.18)이 시간매칭에 쓰는 4개 series_key — 새 저장소 없이
+# _FLOW_SERIES_KEYS 중 외국인/기관계만 골라 쓴다("스마트 머니" = 외국인+기관계,
+# 개인은 제외).
+_CONCENTRATION_SERIES_KEYS = [
+    "flow_kospi_외국인",
+    "flow_kospi_기관계",
+    "flow_kosdaq_외국인",
+    "flow_kosdaq_기관계",
+]
+
 DAYS_MIN = 1
 DAYS_MAX = 30
 
@@ -299,6 +309,64 @@ async def get_breadth_series(session: AsyncSession, days: int = 1) -> dict:
     ).all()
 
     series = [{"time": _format_time(t, days), "value": float(v)} for t, v in rows]
+
+    return {
+        "date": _today_kst().isoformat(),
+        "series": series,
+        "market_closed": is_market_closed(_now_kst()),
+    }
+
+
+async def get_market_concentration_series(session: AsyncSession, days: int = 1) -> dict:
+    """1D 조회 API(`GET /api/markets/flow-concentration/intraday-accumulated`)가
+    그대로 반환할 payload(PLAN.md §5.18). "외인, 기관이 적극 매수해야 코스피/코스닥이
+    오른다"는 사용자 관찰에서, "그 돈이 코스피/코스닥 중 어디로 쏠리는지"를 추이로
+    보여준다.
+
+    지표 정의: ``쏠림% = 코스피_활동량 / (코스피_활동량 + 코스닥_활동량) * 100``,
+    ``활동량 = |외국인 순매수| + |기관계 순매수|``(방향 무관 절댓값 — "어디에 돈이
+    몰리는지"를 보는 것이라 순매수/순매도 방향은 상관없다). 50%=균등 분산,
+    100%=코스피 완전 쏠림, 0%=코스닥 완전 쏠림.
+
+    ``flow_kospi_외국인``/``flow_kospi_기관계``/``flow_kosdaq_외국인``/
+    ``flow_kosdaq_기관계`` 4개 series_key를 §5.10/`get_foreign_position_series`와
+    동일한 방식으로 time(정확히 일치하는 timestamp) 매칭한다(같은
+    `record_flow_snapshot` 호출 안에서 네 값 모두 동일한 ``dt.datetime.now(KST)``로
+    쓰이므로 timestamp가 정확히 일치한다). 한 시각에 4개 중 일부만 있으면 없는
+    쪽은 0(그 순간 그 시장/투자자는 활동 없음)으로 취급해 계산한다 — 완전히 다
+    없어서 분모(코스피_활동량+코스닥_활동량)가 0이면 쏠림을 정의할 수 없으므로
+    그 시각은 건너뛴다(억지로 50%를 채우지 않는다)."""
+    days = _clamp_days(days)
+    cutoff = _cutoff(days)
+
+    rows = (
+        await session.execute(
+            select(IntradaySample.series_key, IntradaySample.time, IntradaySample.value)
+            .where(IntradaySample.series_key.in_(_CONCENTRATION_SERIES_KEYS), IntradaySample.time >= cutoff)
+            .order_by(IntradaySample.time)
+        )
+    ).all()
+
+    order: list[dt.datetime] = []
+    by_time: dict[dt.datetime, dict[str, float]] = {}
+    prefix = "flow_"
+    for series_key, time, value in rows:
+        market, investor = series_key[len(prefix) :].split("_", 1)
+        if time not in by_time:
+            order.append(time)
+            by_time[time] = {}
+        by_time[time][f"{market}_{investor}"] = float(value)
+
+    series: list[dict[str, object]] = []
+    for time in order:
+        values = by_time[time]
+        kospi_activity = abs(values.get("kospi_외국인", 0.0)) + abs(values.get("kospi_기관계", 0.0))
+        kosdaq_activity = abs(values.get("kosdaq_외국인", 0.0)) + abs(values.get("kosdaq_기관계", 0.0))
+        denom = kospi_activity + kosdaq_activity
+        if denom <= 0:
+            continue
+        ratio = kospi_activity / denom * 100
+        series.append({"time": _format_time(time, days), "value": ratio})
 
     return {
         "date": _today_kst().isoformat(),
