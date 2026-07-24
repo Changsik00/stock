@@ -24,6 +24,23 @@ change_rate(최대 7분 캐시)로 폴백한다. 처음엔 무조건 value-rank�
 소스를 참조하고 있었던 것. 완전한 해법(종목코드별 단일 시세 캐시)은 지금 규모에선
 과해 이 우선순위 절충안을 택했다.
 
+**가격제한폭 근접/과도한 하락 처리(2026-07-24, PLAN.md §5.27, 사용자 지적)**:
+실 데이터에서 "일승"이 +29.86%(KRX ±30% 가격제한폭에 사실상 도달 — 틱 단위
+반올림 탓에 정확히 30.00%로는 안 찍힌다)로 스켈핑 후보 상위에 오른 사례가
+있었다. 사용자 지적대로 가격제한폭에 도달/근접한 종목은 그 방향으로 오늘 더
+움직일 "room"이 물리적으로 없어(상한가는 매수 체결 자체가 막히고, 하한가는
+매수 호가가 사라져 유동성이 증발하는 경우가 흔함) 스켈핑(당일 변동성 포착)의
+전제 자체가 성립하지 않는다 — 그래서 ``_scored_candidates``가 이런 종목을
+후보 리스트 구성 단계에서 **아예 제외**한다(ETF 제외와 동일한 카테고리의
+"애초에 후보 자격 없음" 처리, 스코어 조정이 아니다). 이때 반드시
+``_change_rate_lookup``으로 소스 우선순위가 이미 적용된 값을 기준으로 판단해야
+한다 — value-rank 원본 값만 보면 attention이 더 신선한 값을 갖고 있을 때 필터가
+실제 노출되는 change_rate와 어긋난다. 한편 가격제한폭까지는 아니지만 큰 폭
+하락(``change_rate <= -15.0``)인 종목은 상승과 "변동성 크기"는 같아도 리스크
+성격이 달라(악재/유동성 위기로 인한 붕괴일 가능성) 배제하지 않되
+``at_risk`` 플래그로만 노출한다(``quant/screener.py`` 모듈 docstring "at_risk
+플래그" 참고 — 스코어 산식 자체는 건드리지 않는다, 과설계 방지).
+
 이 라우터 자체는 별도 캐시를 두지 않는다 — 두 소스 모두 이미 자체 TTL+락
 캐시를 갖고 있어(warm 함수가 캐시 히트면 즉시 반환) 매 요청마다 다시 불러도
 비용이 없고, 정렬·스코어링(순수 함수) 자체도 가볍다. ``GET
@@ -61,6 +78,17 @@ router = APIRouter(tags=["markets"])
 # PLAN.md §5.20-2 — 오늘 외국인+기관 순매수만 스코어에 반영한다(개인은 §5.16에서
 # 확인했듯 장중 실시간 값이 항상 0으로 스텁돼 있어 신호가 아니다).
 _FLOW_INVESTORS = ("외국인", "기관계")
+
+# KRX 정규 종목 가격제한폭은 ±30%(2015-06-15부터) — 틱 단위 반올림 때문에 실제
+# 표시값은 정확히 30.00%가 아니라 29.86% 같은 값으로 찍힌다(PLAN.md §5.27 실측:
+# "일승" 29.86%). 정확히 30.0만 걸러내면 실질 제한폭 종목을 놓치므로 여유를
+# 둔다.
+PRICE_LIMIT_THRESHOLD_PCT = 29.5
+
+# 이 값 이하(큰 폭 하락)면 스코어는 그대로 두되 별도 위험 플래그만 추가한다
+# (PLAN.md §5.27 — 스코어 산식 자체는 건드리지 않는다, 과설계 방지). quant/
+# screener.py에도 동일 값이 있다(의도적 중복, 그 파일의 상수 주석 참고).
+LARGE_DECLINE_WARNING_PCT = -15.0
 
 
 async def _stock_flow_lookup(session: AsyncSession, codes: list[str]) -> dict[str, int]:
@@ -125,7 +153,16 @@ async def _scored_candidates(session: AsyncSession) -> tuple[list[dict[str, Any]
     정렬해 반환한다(``compute_scalp_scores`` 그대로 적용) — ``scalp_candidates``
     라우트와 ``collectors/scalp_tracker.py``(§5.7)가 공유한다. 반환값은
     ``(scored, value_payload)`` — value_payload는 date/market_closed/cached_at
-    메타데이터 노출용으로 호출자에게 그대로 넘겨준다."""
+    메타데이터 노출용으로 호출자에게 그대로 넘겨준다.
+
+    PLAN.md §5.27-1 — 후보 구성 단계에서 가격제한폭(±30%) 근접 종목
+    (``abs(change_rate) >= PRICE_LIMIT_THRESHOLD_PCT``)을 ETF 제외와 같은
+    필터링 단계에서 함께 걸러낸다(구조적 배제, 스코어 조정이 아니다). 이때
+    비교 기준 change_rate는 반드시 ``_change_rate_lookup``으로 소스 우선순위가
+    이미 적용된 값이어야 한다 — value-rank 원본 값만 보면 attention이 더 신선한
+    값을 갖고 있을 때(§5.4-1) 실제 응답에 노출되는 change_rate와 필터 판단
+    기준이 어긋난다. change_rate가 None(데이터 없음)인 종목은 "제한폭 도달"과
+    다른 의미이므로 배제하지 않는다."""
     value_payload, attention_payload = await _fetch_live_payloads(session)
 
     attention_rows = attention_payload.get("rows") or []
@@ -137,12 +174,17 @@ async def _scored_candidates(session: AsyncSession) -> tuple[list[dict[str, Any]
             "code": row["code"],
             "name": row.get("name") or row["code"],
             "market": row.get("market"),
-            "change_rate": change_rates.get(row["code"], row.get("change_rate")),
+            "change_rate": resolved_rate,
             "turnover": row.get("turnover"),
             "value_rank": row["rank"],
         }
         for row in (value_payload.get("rows") or [])
         if not row.get("is_etf")
+        # PLAN.md §5.27-1 — walrus로 change_rate 소스 우선순위 적용 결과를
+        # 한 번만 계산해 위 dict의 change_rate 값과 아래 필터 판단에 동일하게
+        # 쓴다(둘이 어긋나면 응답에 노출되는 값과 필터 기준이 달라지는 버그가 됨).
+        if (resolved_rate := change_rates.get(row["code"], row.get("change_rate"))) is None
+        or abs(resolved_rate) < PRICE_LIMIT_THRESHOLD_PCT
     ]
 
     # PLAN.md §5.20-2 — 후보군이 정해진 뒤에 그 코드들만 stock_flow에서 조회한다
@@ -166,10 +208,15 @@ async def scalp_candidates(
 
     Returns ``{"date": iso8601|null, "market_closed": bool, "cached_at":
     iso8601|null, "rows": [{"code", "name", "market", "score", "change_rate",
-    "turnover", "in_attention_top", "value_rank_position", "flow_net_value"},
-    ...]}`` — ``flow_net_value``(PLAN.md §5.20)는 오늘 외국인+기관 순매수 합
-    (백만원 단위, stock_flow.net_value 그대로 — market_flow/종목상세 수급 차트와
-    동일 컨벤션, StockDetailModal.jsx 참고), 아직 수급 스윕이 안 돈 종목은 null.
+    "turnover", "in_attention_top", "value_rank_position", "flow_net_value",
+    "at_risk"}, ...]}`` — ``flow_net_value``(PLAN.md §5.20)는 오늘 외국인+기관
+    순매수 합(백만원 단위, stock_flow.net_value 그대로 — market_flow/종목상세
+    수급 차트와 동일 컨벤션, StockDetailModal.jsx 참고), 아직 수급 스윕이 안 돈
+    종목은 null. ``at_risk``(PLAN.md §5.27-2)는 change_rate가
+    ``LARGE_DECLINE_WARNING_PCT``(-15.0) 이하인 큰 폭 하락 종목에서 true —
+    score에는 영향 없는 순수 정보성 플래그다. 가격제한폭 근접 종목
+    (``abs(change_rate) >= PRICE_LIMIT_THRESHOLD_PCT``, 29.5 — §5.27-1)은
+    아예 rows에 나타나지 않는다(구조적 배제, ETF 제외와 동일 카테고리).
 
     market_closed는 후보군 소스(value-rank/live)의 값을 그대로 따른다 — 장
     마감이면 마지막 라이브 스냅샷을 그대로 재사용해 표시한다(value-rank/live와
@@ -192,6 +239,7 @@ async def scalp_candidates(
                 "in_attention_top": c["in_attention_top"],
                 "value_rank_position": c["value_rank"],
                 "flow_net_value": c.get("flow_net_value"),
+                "at_risk": c.get("at_risk", False),
             }
             for c in scored[:limit]
         ],

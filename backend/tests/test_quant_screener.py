@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from app.quant.screener import ATTENTION_BONUS, WEIGHTS, compute_scalp_scores
+from app.quant.screener import ATTENTION_BONUS, LARGE_DECLINE_WARNING_PCT, WEIGHTS, compute_scalp_scores
 
 
 def _cand(code, change_rate, turnover, value_rank, name=None, market="kospi", flow_net_value=None):
@@ -148,3 +148,49 @@ def test_score_output_preserves_input_fields():
     assert row["value_rank"] == 2
     assert "score" in row
     assert "in_attention_top" in row
+
+
+# -- at_risk 플래그 (PLAN.md §5.27-2) ---------------------------------------
+
+
+def test_at_risk_true_when_change_rate_at_or_below_warning_threshold():
+    candidates = [_cand("A", change_rate=LARGE_DECLINE_WARNING_PCT, turnover=5.0, value_rank=1)]
+    scored = compute_scalp_scores(candidates, attention_codes=set())
+
+    assert scored[0]["at_risk"] is True
+
+
+def test_at_risk_false_for_positive_and_small_negative_change_rate():
+    candidates = [
+        _cand("POS", change_rate=20.0, turnover=5.0, value_rank=1),
+        _cand("SMALL_NEG", change_rate=-3.0, turnover=5.0, value_rank=2),
+        _cand("NONE", change_rate=None, turnover=5.0, value_rank=3),
+    ]
+    scored = compute_scalp_scores(candidates, attention_codes=set())
+
+    by_code = {r["code"]: r for r in scored}
+    assert by_code["POS"]["at_risk"] is False
+    assert by_code["SMALL_NEG"]["at_risk"] is False
+    # change_rate가 None(데이터 없음)이면 "위험"과 다른 의미라 False여야 한다.
+    assert by_code["NONE"]["at_risk"] is False
+
+
+def test_at_risk_does_not_affect_score_computation():
+    """at_risk는 순수 정보성 플래그라 score 산식에 전혀 관여하지 않아야 한다.
+
+    change 요소는 abs(change_rate)를 쓰므로(모듈 docstring 참고) -15.0과
+    +15.0은 abs() 이후 완전히 동일한 입력이 된다 — 나머지 요소(turnover/
+    value_rank/attention/flow)도 동일하게 고정하면, at_risk만 다르고 score는
+    완전히 같아야 한다는 것으로 "at_risk 추가가 score 계산 경로를 건드리지
+    않았다"를 증명할 수 있다.
+    """
+    candidates = [
+        _cand("DOWN", change_rate=-15.0, turnover=5.0, value_rank=1, flow_net_value=1000),
+        _cand("UP", change_rate=15.0, turnover=5.0, value_rank=1, flow_net_value=1000),
+    ]
+    scored = compute_scalp_scores(candidates, attention_codes=set())
+
+    by_code = {r["code"]: r for r in scored}
+    assert by_code["DOWN"]["at_risk"] is True
+    assert by_code["UP"]["at_risk"] is False
+    assert by_code["DOWN"]["score"] == by_code["UP"]["score"]

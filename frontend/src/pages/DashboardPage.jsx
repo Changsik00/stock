@@ -299,6 +299,17 @@ function flowBadgeLabel(flowNetValue) {
   return `수급 ${signedEokLabel(flowNetValue)}`
 }
 
+// PLAN.md §5.27-2(2026-07-24, 사용자 지적) — 큰 폭 하락(change_rate <= -15.0)
+// 종목 플래그 배지. 가격제한폭 근접 종목은 §5.27-1에서 후보 목록 자체에서
+// 구조적으로 제외되므로 이 배지가 보이는 종목은 항상 "제한폭까지는 아니지만
+// 하락폭이 큰" 경우다. turnoverBadgeLabel/flowBadgeLabel과 동일하게
+// Badge kind="info"(중립색)만 쓴다 — "매도/회피" 같은 매매 판단 문구나 별도
+// 경고색은 넣지 않는다(§5 "관찰 사실만 서술" 원칙, 이 파일의 다른 배지들과
+// 동일한 판단).
+function atRiskBadgeLabel(atRisk) {
+  return atRisk ? '하락폭 과다' : null
+}
+
 // MM-DD만 뽑는다 (StaleDate/TOP5 "…기준" 라벨 공용) — formatDate가 이미
 // 'YYYY-MM-DD'로 정규화하므로 뒤 5글자만 자르면 된다.
 function mmdd(date) {
@@ -1732,6 +1743,7 @@ function ScalpCandidatesFullModal({ onSelectStock }) {
                 {turnoverBadgeLabel(row.turnover) && <Badge kind="info">{turnoverBadgeLabel(row.turnover)}</Badge>}
                 {scalpScoreBadgeLabel(row.score) && <Badge kind="info">{scalpScoreBadgeLabel(row.score)}</Badge>}
                 {flowBadgeLabel(row.flow_net_value) && <Badge kind="info">{flowBadgeLabel(row.flow_net_value)}</Badge>}
+                {atRiskBadgeLabel(row.at_risk) && <Badge kind="info">{atRiskBadgeLabel(row.at_risk)}</Badge>}
                 {row.in_attention_top && <Badge kind="live">관심 TOP</Badge>}
               </span>
               <span className={`top5-row-value ${rateClass(row.change_rate)}`}>{rateLabel(row.change_rate)}</span>
@@ -3402,13 +3414,18 @@ export default function DashboardPage() {
                   카드에도 남긴다 — 이번 기능 자체가 "오늘 수급이 몰리는 종목을
                   찾는다"는 사용자 요청(알테오젠 사례)에서 시작됐고, 스코어 가중치도
                   flow가 0.40으로 가장 크므로(quant/screener.py 참고) 왜 이 종목이
-                  상위인지 압축 카드에서도 바로 보여야 의미가 있다는 판단. */}
+                  상위인지 압축 카드에서도 바로 보여야 의미가 있다는 판단.
+                  PLAN.md §5.27-2: at_risk(하락폭 과다) 배지도 같은 이유로 압축
+                  카드에 남긴다 — "위험 성격이 다르다"는 사용자 지적이 이번 기능의
+                  직접 계기라 정보 밀도가 낮은 보조 배지(회전율/스코어)와 달리
+                  전체 보기로 넘어가지 않아도 바로 보여야 의미가 있다. */}
               <span className="top5-row-name">
                 <span className="top5-row-label">
                   {i + 1}. {row.name || row.code}
                 </span>
                 {row.market && <Badge kind={row.market} />}
                 {flowBadgeLabel(row.flow_net_value) && <Badge kind="info">{flowBadgeLabel(row.flow_net_value)}</Badge>}
+                {atRiskBadgeLabel(row.at_risk) && <Badge kind="info">{atRiskBadgeLabel(row.at_risk)}</Badge>}
                 {row.in_attention_top && <Badge kind="live">관심 TOP</Badge>}
               </span>
               <span className={`top5-row-value ${rateClass(row.change_rate)}`}>{rateLabel(row.change_rate)}</span>

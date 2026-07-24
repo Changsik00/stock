@@ -62,7 +62,23 @@ routers/scalp.py가 담당한다(quant/signals.py·sentiment.py의 "계산부/�
 후보군 자체(어떤 종목을 스코어링 대상으로 삼을지)는 이 모듈이 정하지 않는다
 — 호출부가 거래대금 상위 스냅샷(value-rank/live)에서 이미 "돈이 몰리는 곳"
 상위 종목만 추려 넘겨준다는 전제다(ETF 제외는 호출부 책임, §5.2 "ETF는
-제외(개별주만)").
+제외(개별주만)"). **PLAN.md §5.27(2026-07-24)** — 가격제한폭 근접 종목의
+구조적 배제(``abs(change_rate) >= 29.5``) 역시 같은 이유로 호출부
+(``routers/scalp.py``의 ``PRICE_LIMIT_THRESHOLD_PCT``)의 책임이다. 이 모듈은
+그 필터를 통과한 후보만 받는다는 전제라 여기엔 배제 로직이 없다.
+
+## at_risk 플래그 (PLAN.md §5.27-2, 2026-07-24)
+
+큰 폭 하락(``change_rate <= LARGE_DECLINE_WARNING_PCT``, 기본 -15.0%)인 후보는
+결과에 ``at_risk: True``가 붙는다. 사용자 지적("하한가 혹은 마이너스 폭이 큰
+녀석은 위험한 상태로 볼 수 있음")대로, 상승과 하락은 "변동성 크기"(1번 요소가
+``abs()``로 다루는 것)는 같아도 리스크 성격이 다르다 — 그렇다고 스코어 산식
+자체를 방향에 따라 다시 설계하면 과설계고, 이미 검증되지 않은 §5.20 가중치를
+또 건드리는 셈이다. 그래서 **``score`` 계산에는 전혀 관여하지 않는 순수
+정보성 필드**로만 추가한다 — ``flow_net_value``/``turnover``가 스코어 산식에
+녹아들면서도 동시에 원본 값 그대로 응답에 노출돼 사용자가 근거를 직접 보는
+것과 같은 위치다. 다만 ``flow_net_value``와 달리 ``at_risk``는 스코어에
+반영되지 않는 순수 파생 불리언이라는 점이 다르다.
 """
 
 from __future__ import annotations
@@ -82,6 +98,15 @@ WEIGHTS: dict[str, float] = {
 
 # 관심순위 편입 가산점 — z-score 단위(대략 1 표준편차)에 맞춘 고정값.
 ATTENTION_BONUS = 1.0
+
+# PLAN.md §5.27-2(2026-07-24) — 이 값 이하(큰 폭 하락)면 at_risk 플래그만
+# 추가하고 score 계산에는 관여하지 않는다. routers/scalp.py에도 동일 값의
+# LARGE_DECLINE_WARNING_PCT 상수가 있다(의도적 중복) — 이 모듈은 DB/네트워크는
+# 물론 다른 앱 모듈에도 의존하지 않는 순수 계산부라는 게 위 모듈 docstring이
+# 명시한 설계 원칙이라, screener.py가 routers.scalp를 import하는 방향은 상위
+# 계층을 하위 계층이 참조하는 역전이라 피한다. 두 값이 어긋나면 안 되므로
+# 값을 바꿀 때는 항상 두 파일을 함께 수정해야 한다.
+LARGE_DECLINE_WARNING_PCT = -15.0
 
 
 class ScalpCandidate(TypedDict, total=False):
@@ -122,8 +147,10 @@ def compute_scalp_scores(
     ``flow_net_value``도 None이면(그 종목이 아직 ``_run_stock_flow_scan`` 스윕을
     못 돈 경우) 0.0 중립으로 취급한다 — 동일한 관례(PLAN.md §5.20).
 
-    반환 원소는 입력 dict를 그대로 복사한 뒤 ``in_attention_top``(bool)과
-    ``score``(round 3자리)를 추가한 것 — 정렬은 score 내림차순, 동점이면
+    반환 원소는 입력 dict를 그대로 복사한 뒤 ``in_attention_top``(bool),
+    ``score``(round 3자리), ``at_risk``(bool, PLAN.md §5.27-2 — change_rate가
+    ``LARGE_DECLINE_WARNING_PCT`` 이하인 큰 폭 하락 종목 표시, score에는 영향
+    없는 순수 정보성 필드)를 추가한 것 — 정렬은 score 내림차순, 동점이면
     value_rank 오름차순(거래대금이 더 많이 몰린 쪽을 우선).
     """
     if not candidates:
@@ -155,7 +182,13 @@ def compute_scalp_scores(
             + w["attention"] * (ATTENTION_BONUS if in_attention else 0.0)
             + w["flow"] * z_flow[i]
         )
-        scored.append({**c, "in_attention_top": in_attention, "score": round(score, 3)})
+        # PLAN.md §5.27-2 — score 계산과 무관한 순수 정보성 플래그. change_rate가
+        # None(데이터 없음)이면 "위험"과 다른 의미이므로 False로 둔다(제한폭
+        # 배제 필터의 None 처리와 동일한 관례, routers/scalp.py 참고).
+        at_risk = c.get("change_rate") is not None and c["change_rate"] <= LARGE_DECLINE_WARNING_PCT
+        scored.append(
+            {**c, "in_attention_top": in_attention, "score": round(score, 3), "at_risk": at_risk}
+        )
 
     scored.sort(key=lambda r: (-r["score"], r["value_rank"]))
     return scored

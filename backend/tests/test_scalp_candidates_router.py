@@ -272,3 +272,84 @@ async def test_flow_net_value_appears_in_scalp_candidates_response(seeded_stocks
     by_code = {r["code"]: r for r in resp.json()["rows"]}
     assert by_code[TEST_CODE_KOSPI]["flow_net_value"] == 5000
     assert by_code[TEST_CODE_KOSDAQ]["flow_net_value"] == -500
+
+
+# -- 가격제한폭 근접 배제 / at_risk 플래그 (PLAN.md §5.27) --------------------
+
+
+async def test_near_price_limit_candidate_excluded_from_response(seeded_stocks, monkeypatch):
+    """PLAN.md §5.27 실측 사례("일승" +29.86%) 그대로 재현 — 가격제한폭 근접
+    종목은 rows에서 아예 사라져야 한다(스코어 조정이 아니라 구조적 배제)."""
+
+    async def _near_limit_value_rank():
+        payload = {**VALUE_RANK_PAYLOAD, "rows": [dict(r) for r in VALUE_RANK_PAYLOAD["rows"]]}
+        payload["rows"][0] = {**payload["rows"][0], "change_rate": 29.86}
+        return payload
+
+    monkeypatch.setattr(scalp, "_warm_value_rank_live", _near_limit_value_rank)
+    _apply_session_override()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/scalp-candidates")
+
+    assert resp.status_code == 200
+    codes = [r["code"] for r in resp.json()["rows"]]
+    assert TEST_CODE_KOSPI not in codes
+
+
+async def test_price_limit_threshold_boundary(seeded_stocks, monkeypatch):
+    """경계값 확인: 정확히 PRICE_LIMIT_THRESHOLD_PCT(29.5)는 제외, 29.4는 포함
+    (§5.27-1 — abs(change_rate) >= 29.5가 배제 조건)."""
+
+    async def _boundary_value_rank():
+        payload = {**VALUE_RANK_PAYLOAD, "rows": [dict(r) for r in VALUE_RANK_PAYLOAD["rows"]]}
+        payload["rows"][0] = {**payload["rows"][0], "change_rate": 29.5}
+        return payload
+
+    monkeypatch.setattr(scalp, "_warm_value_rank_live", _boundary_value_rank)
+    _apply_session_override()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/scalp-candidates")
+
+    codes = [r["code"] for r in resp.json()["rows"]]
+    assert TEST_CODE_KOSPI not in codes  # 29.5는 배제
+
+    async def _just_under_value_rank():
+        payload = {**VALUE_RANK_PAYLOAD, "rows": [dict(r) for r in VALUE_RANK_PAYLOAD["rows"]]}
+        payload["rows"][0] = {**payload["rows"][0], "change_rate": 29.4}
+        return payload
+
+    monkeypatch.setattr(scalp, "_warm_value_rank_live", _just_under_value_rank)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/scalp-candidates")
+
+    codes = [r["code"] for r in resp.json()["rows"]]
+    assert TEST_CODE_KOSPI in codes  # 29.4는 포함
+
+
+async def test_large_decline_candidate_flagged_at_risk_but_not_excluded(seeded_stocks, monkeypatch):
+    """가격제한폭(-30%)까지는 아니지만 큰 폭 하락(-20%, <= -15.0 임계값)인
+    종목은 배제되지 않고 정상적으로 스코어가 계산되며 at_risk: true만 붙는다
+    (§5.27-2 — 배제와 플래그는 서로 다른 처리)."""
+
+    async def _large_decline_value_rank():
+        payload = {**VALUE_RANK_PAYLOAD, "rows": [dict(r) for r in VALUE_RANK_PAYLOAD["rows"]]}
+        payload["rows"][0] = {**payload["rows"][0], "change_rate": -20.0}
+        return payload
+
+    monkeypatch.setattr(scalp, "_warm_value_rank_live", _large_decline_value_rank)
+    _apply_session_override()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/scalp-candidates")
+
+    assert resp.status_code == 200
+    by_code = {r["code"]: r for r in resp.json()["rows"]}
+    assert TEST_CODE_KOSPI in by_code  # 배제되지 않음
+    assert by_code[TEST_CODE_KOSPI]["at_risk"] is True
+    assert by_code[TEST_CODE_KOSPI]["change_rate"] == -20.0
+    assert by_code[TEST_CODE_KOSPI]["score"] is not None
+    # 다른 후보(-6.1%)는 임계값 아래라 at_risk가 아니어야 한다.
+    assert by_code[TEST_CODE_KOSDAQ]["at_risk"] is False
