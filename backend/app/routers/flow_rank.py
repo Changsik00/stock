@@ -289,14 +289,17 @@ async def etf_weight_changes_top(
         None, description="특정 종목 코드로 필터(예: 196170) — 없으면 시장 전체 스크리닝"
     ),
     active_only: bool = Query(False, description="액티브 펀드(이름에 '액티브' 포함)의 변화만"),
+    exclude_leveraged: bool = Query(
+        False, description="레버리지/인버스 ETF(이름 기반 판정)의 변화는 제외"
+    ),
     event: str | None = Query(
         None, description="신규편입/비중확대/비중축소/편출 중 하나로 필터 — 생략 시 4종 전부"
     ),
     limit: int = Query(50, ge=1, le=200),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """ETF 비중 변화 감별 스크리너 (PLAN.md §5.25) — `etf_holdings`(ETF별 일별
-    top10 구성 스냅샷)에서 실제로 존재하는 날짜 중 가장 최근 2개를 비교해
+    """ETF 비중 변화 감별 스크리너 (PLAN.md §5.25/§5.26) — `etf_holdings`(ETF별
+    일별 top10 구성 스냅샷)에서 실제로 존재하는 날짜 중 가장 최근 2개를 비교해
     (ETF, 종목) 쌍별 비중 변화를 신규편입/비중확대/비중축소/편출 4종으로
     분류한다(계산 자체는 `app.quant.etf_weight_changes.compute_etf_weight_changes`,
     순수 DB 조회 — 이 라우터에서 새로 수집하지 않는다).
@@ -319,18 +322,42 @@ async def etf_weight_changes_top(
     리밸런싱과 달리 펀드매니저 재량을 반영할 가능성이 커서 별도로 구분해
     보여줄 가치가 있다.
 
+    **§5.26 확장 — 레버리지/인버스 플래그 + 실제 수급·가격 컨텍스트**: 사용자가
+    SK하이닉스(000660)에서 "KODEX 반도체레버리지"의 비중이 하루 만에
+    46.87%→53.41%(+6.54%p)로 급등한 사례를 지적했다 — 레버리지 ETF는 목표
+    배율(예: 2배)을 유지하려고 매일 기계적으로 리밸런싱하므로, 이런 변화는
+    "의미 있는 자금 유입"이 아니라 레버리지 구조 자체의 부산물일 가능성이
+    크다. 응답의 각 변화 행에는 이제 `is_leveraged`(이름에 "레버리지" 또는
+    "인버스" 포함 — §5.26 실측: 추적 358개 중 48개), `stock_flow_delta`(그
+    종목의 prev_date~curr_date 구간 외국인+기관계 net_value 합), `price_change_pct`
+    (같은 구간 stock_ohlcv 종가 등락률)가 추가로 들어있다. **이 두 수치는
+    통계적 검증이 아니라 사람이 눈으로 대조 판단하기 위한 참고 자료일 뿐이다**
+    — ETF 비중 변화가 실제 수급/가격에 반영됐는지 증명하지 않는다(엄밀한
+    상관관계 검증은 `app.quant.etf_weight_backtest`가 별도로 인프라만 갖춰뒀고,
+    현재 `etf_holdings` 스냅샷이 4일치뿐이라 아직 신뢰할 수 있는 결과를 낼 수
+    없어 이 엔드포인트에는 노출하지 않는다). 둘 다 결측이면 `null`이지 `0`이
+    아니다(해당 구간에 데이터가 아예 없다는 뜻). `exclude_leveraged=true`면
+    이 플래그가 true인 행을 아예 결과에서 뺀다(기본 false — `active_only`와
+    동일한 관례로, 숨기지 않고 플래그로 노출하는 쪽을 기본으로 한다).
+
     Returns ``{"prev_date": iso|null, "curr_date": iso|null, "changes": [
-    {"code", "name", "etf_code", "etf_name", "is_active", "event",
-    "prev_weight", "curr_weight", "delta"}, ...]}``. prev_weight/curr_weight/
-    delta는 신규편입/편출이면 한쪽이 null(비교 대상이 없다는 뜻, 0이 아니다).
-    `etf_holdings` 스냅샷이 아직 2개 미만이면(수집 이력 부족) 에러가 아니라
-    ``prev_date/curr_date: null, changes: []``로 응답한다.
+    {"code", "name", "etf_code", "etf_name", "is_active", "is_leveraged", "event",
+    "prev_weight", "curr_weight", "delta", "stock_flow_delta", "price_change_pct"},
+    ...]}``. prev_weight/curr_weight/delta는 신규편입/편출이면 한쪽이 null(비교
+    대상이 없다는 뜻, 0이 아니다). `etf_holdings` 스냅샷이 아직 2개 미만이면
+    (수집 이력 부족) 에러가 아니라 ``prev_date/curr_date: null, changes: []``로
+    응답한다.
     """
     if event is not None and event not in ETF_WEIGHT_CHANGE_EVENTS:
         raise HTTPException(400, f"event must be one of {sorted(ETF_WEIGHT_CHANGE_EVENTS)}")
 
     return await etf_weight_changes.compute_etf_weight_changes(
-        session, code=code, active_only=active_only, event=event, limit=limit
+        session,
+        code=code,
+        active_only=active_only,
+        exclude_leveraged=exclude_leveraged,
+        event=event,
+        limit=limit,
     )
 
 

@@ -54,20 +54,54 @@ ETF의 기계적 리밸런싱과 달리 펀드매니저의 재량적 종목 선�
 이벤트 타입을 만들지 않는다 — 그냥 조용히 뺀다). 신규편입/편출은 애초에 비교할
 "더 작은 쪽" 크기가 없으므로(한쪽이 아예 없음) 이 임계값을 적용하지 않고
 항상 포함한다.
+
+**레버리지/인버스 판정 + 실제 수급·가격 컨텍스트(PLAN.md §5.26, 하이닉스
+사례)**: 사용자가 SK하이닉스(000660)에서 "KODEX 반도체레버리지"의 비중이
+하루 만에 46.87%→53.41%(+6.54%p)로 급등한 사례를 지적했다 — 레버리지 ETF는
+목표 배율(예: 2배)을 유지하려고 **매일 기계적으로 리밸런싱**하므로, 이런
+변화는 "의미 있는 자금 유입(스마트 머니 신호)"이 아니라 레버리지 구조 자체의
+부산물일 가능성이 크다. `is_leveraged`(이름에 "레버리지" 또는 "인버스" 포함 —
+`is_active`와 동일한 이름 기반 휴리스틱, §5.26 실측: 추적 358개 ETF 중 48개가
+해당)로 이 가능성을 플래그해 노출한다. `exclude_leveraged=True`면 이 플래그가
+True인 행을 결과에서 아예 뺀다(`active_only`와 같은 방식의 필터, 기본값은
+False — 숨기지 않고 항상 플래그로 보여주는 쪽을 기본으로 한다).
+
+추가로 각 변화 행에는 그 종목의 같은 기간(`prev_date`~`curr_date`, 양끝 포함)
+**실제** 수급·가격 변동을 나란히 붙인다 — `stock_flow_delta`(외국인+기관계
+net_value 합, routers/scalp.py `_stock_flow_lookup`과 동일한 투자자 조합·NULL
+스킵 관례를 날짜 범위로 넓힌 것)와 `price_change_pct`(`stock_ohlcv` 종가 기준
+등락률, 소수 2자리). **이 두 값은 통계적 검증이 아니다** — ETF 비중 변화가
+실제로 그 종목의 수급/가격에 반영됐는지 사람이 눈으로 대조 판단할 수 있게
+곁들이는 참고 수치일 뿐, 상관관계를 증명하거나 반증하지 않는다(엄밀한 통계
+검증은 `etf_weight_backtest.py`가 별도로 다루며, 그마저도 현재 표본(n≈3
+날짜쌍)으로는 신뢰할 수 없다 — 그 모듈 독스트링 참고). 둘 다 **결측이면
+`None`이지 `0`이 아니다** — 해당 구간에 `stock_flow` 행이 전혀 없거나
+`stock_ohlcv`에 두 날짜 중 하나라도 없으면(수집 공백) 억지로 0이나 다른
+날짜로 대체하지 않고 정직하게 "알 수 없음"으로 남긴다(대체하면 이 비중
+변화 구간과 다른 기간을 비교하는 셈이 되어 침묵하는 것보다 나쁘다).
 """
 
 from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import EtfHolding, Stock
+from ..models import EtfHolding, Stock, StockFlow, StockOhlcv
 
 # 한국 ETF 네이밍 규정상 액티브 펀드는 상품명에 이 문자열을 반드시 포함한다
 # (모듈 독스트링 "액티브 펀드 식별" 참고 — §5.25 실측: 358개 중 65개).
 ACTIVE_ETF_NAME_MARKER = "액티브"
+
+# 레버리지/인버스 ETF는 상품명에 이 중 하나를 반드시 포함한다(모듈 독스트링
+# "레버리지/인버스 판정" 참고 — §5.26 실측: 358개 중 48개). 둘 중 어느 쪽
+# 문자열이든 매칭되면 "기계적 리밸런싱 가능성 있음"으로 간주한다.
+LEVERAGED_INVERSE_NAME_MARKERS = ("레버리지", "인버스")
+
+# stock_flow_delta 집계에 쓰는 투자자 조합 — routers/scalp.py `_stock_flow_lookup`
+# (`_FLOW_INVESTORS`)과 동일한 관례를 이 모듈에서도 그대로 쓴다.
+FLOW_INVESTORS = ("외국인", "기관계")
 
 # 이 값(%p) 미만인 비중 변화는 노이즈로 간주해 비중확대/비중축소 분류에서
 # 제외한다(모듈 독스트링 "노이즈 필터" 참고). 신규편입/편출에는 적용하지 않는다.
@@ -126,10 +160,68 @@ def _sort_key(change: dict) -> tuple[int, float]:
     return (1, -(weight or 0.0))
 
 
+async def _stock_flow_delta_map(
+    session: AsyncSession, codes: list[str], prev_date: dt.date, curr_date: dt.date
+) -> dict[str, int]:
+    """code -> [prev_date, curr_date] 구간(양끝 포함) 외국인+기관계 net_value 합계
+    (모듈 독스트링 "레버리지/인버스 판정 + 실제 수급·가격 컨텍스트" 참고 —
+    routers/scalp.py `_stock_flow_lookup`의 단일 날짜 조회를 날짜 범위로 넓힌
+    버전, 투자자 조합·NULL 스킵 관례는 그대로 재사용). net_value가 NULL인 행은
+    합계에서 제외한다(0으로 취급하면 진짜 순매수 0과 구분이 안 된다). 그 구간에
+    해당 code의 유효한 행이 전혀 없으면 반환 dict에 그 code가 아예 없다 —
+    호출부가 ``.get(code)``로 자연스럽게 ``None``(값 없음, 0이 아님)을 받는다.
+    """
+    if not codes:
+        return {}
+    stmt = (
+        select(StockFlow.code, func.sum(StockFlow.net_value))
+        .where(
+            StockFlow.code.in_(codes),
+            StockFlow.date.between(prev_date, curr_date),
+            StockFlow.investor.in_(FLOW_INVESTORS),
+            StockFlow.net_value.isnot(None),
+        )
+        .group_by(StockFlow.code)
+    )
+    rows = (await session.execute(stmt)).all()
+    # Postgres SUM(bigint) -> numeric(Decimal) — int로 캐스트해 이 모듈의 나머지
+    # 정수/실수 연산과 깔끔히 섞이게 한다(routers/flow_rank.py의 동일 캐스팅
+    # 주석 참고).
+    return {code: int(total) for code, total in rows}
+
+
+async def _price_change_pct_map(
+    session: AsyncSession, codes: list[str], prev_date: dt.date, curr_date: dt.date
+) -> dict[str, float]:
+    """code -> prev_date 대비 curr_date `stock_ohlcv.close` 변동률(%, 소수 2자리).
+    두 날짜 중 하나라도 그 code의 행이 없으면(수집 공백) 그 code는 반환 dict에
+    없다 — 다른 가까운 날짜로 대체하지 않는다(모듈 독스트링 참고: 대체하면 이
+    비중 변화 구간과 다른 기간을 비교하게 되어 "알 수 없음"보다 나쁘다)."""
+    if not codes:
+        return {}
+    stmt = select(StockOhlcv.code, StockOhlcv.date, StockOhlcv.close).where(
+        StockOhlcv.code.in_(codes), StockOhlcv.date.in_((prev_date, curr_date))
+    )
+    rows = (await session.execute(stmt)).all()
+    close_map: dict[tuple[str, dt.date], int] = {
+        (code, date): close for code, date, close in rows if close is not None
+    }
+
+    result: dict[str, float] = {}
+    for code in codes:
+        prev_close = close_map.get((code, prev_date))
+        curr_close = close_map.get((code, curr_date))
+        if prev_close is None or curr_close is None or prev_close == 0:
+            continue
+        result[code] = round((curr_close - prev_close) / prev_close * 100, 2)
+    return result
+
+
 async def compute_etf_weight_changes(
     session: AsyncSession,
     code: str | None = None,
     active_only: bool = False,
+    exclude_leveraged: bool = False,
     event: str | None = None,
     limit: int = 50,
 ) -> dict:
@@ -141,6 +233,9 @@ async def compute_etf_weight_changes(
         code: 지정하면 이 종목코드를 담은 ETF들의 변화만(§5.25 "종목 지정
             조회" — 예: 196170). None이면 시장 전체 스크리닝.
         active_only: True면 액티브 펀드(이름에 "액티브" 포함)의 변화만 남긴다.
+        exclude_leveraged: True면 레버리지/인버스 ETF(이름에 "레버리지" 또는
+            "인버스" 포함, 모듈 독스트링 참고)를 경유한 변화를 결과에서 뺀다.
+            기본 False — 숨기지 않고 `is_leveraged` 플래그로 항상 노출한다.
         event: "신규편입"/"비중확대"/"비중축소"/"편출" 중 하나로 필터. None이면
             4종 전부.
         limit: 반환할 최대 행 수(정렬 후 자름).
@@ -151,10 +246,15 @@ async def compute_etf_weight_changes(
         정상 상태" — 예외를 던지지 않는다).
 
         그렇지 않으면 ``{"prev_date": iso, "curr_date": iso, "changes": [
-        {"code", "name", "etf_code", "etf_name", "is_active", "event",
-        "prev_weight", "curr_weight", "delta"}, ...]}``. prev_weight/curr_weight/
-        delta는 이벤트가 신규편입/편출이면 한쪽이 None(모듈 독스트링 "delta = None"
-        참고). abs(delta) 내림차순 정렬(신규편입/편출은 `_sort_key` 참고).
+        {"code", "name", "etf_code", "etf_name", "is_active", "is_leveraged",
+        "event", "prev_weight", "curr_weight", "delta", "stock_flow_delta",
+        "price_change_pct"}, ...]}``. prev_weight/curr_weight/delta는 이벤트가
+        신규편입/편출이면 한쪽이 None(모듈 독스트링 "delta = None" 참고).
+        abs(delta) 내림차순 정렬(신규편입/편출은 `_sort_key` 참고).
+        `stock_flow_delta`/`price_change_pct`는 정렬·`limit` 절단 **이후** 최종
+        노출 행에 대해서만 조회한다(어차피 화면에 안 보일 후보까지 조회하지
+        않기 위함) — 모듈 독스트링 "레버리지/인버스 판정 + 실제 수급·가격
+        컨텍스트" 참고, 둘 다 결측이면 None(0이 아니다).
     """
     dates = await _two_most_recent_dates(session)
     if dates is None:
@@ -215,7 +315,10 @@ async def compute_etf_weight_changes(
     for c in raw_changes:
         etf_name = name_map.get(c["etf_code"], c["etf_code"])
         is_active = ACTIVE_ETF_NAME_MARKER in etf_name
+        is_leveraged = any(marker in etf_name for marker in LEVERAGED_INVERSE_NAME_MARKERS)
         if active_only and not is_active:
+            continue
+        if exclude_leveraged and is_leveraged:
             continue
         if event is not None and c["event"] != event:
             continue
@@ -226,6 +329,7 @@ async def compute_etf_weight_changes(
                 "etf_code": c["etf_code"],
                 "etf_name": etf_name,
                 "is_active": is_active,
+                "is_leveraged": is_leveraged,
                 "event": c["event"],
                 "prev_weight": c["prev_weight"],
                 "curr_weight": c["curr_weight"],
@@ -235,6 +339,18 @@ async def compute_etf_weight_changes(
 
     changes.sort(key=_sort_key)
     changes = changes[:limit]
+
+    # 실제 수급/가격 컨텍스트는 최종 노출 행(정렬+limit 절단 이후)에 대해서만
+    # 조회한다(모듈 독스트링 참고 — 화면에 안 보일 후보까지 쿼리하지 않는다).
+    # 같은 종목이 여러 ETF 행에 걸쳐 나타나도 그 종목 자체의 수급/가격 컨텍스트는
+    # 동일하므로 종목당 한 번만 조회해 모든 매칭 행에 그대로 붙인다.
+    if changes:
+        stock_codes = sorted({c["code"] for c in changes})
+        flow_map = await _stock_flow_delta_map(session, stock_codes, prev_date, curr_date)
+        price_map = await _price_change_pct_map(session, stock_codes, prev_date, curr_date)
+        for c in changes:
+            c["stock_flow_delta"] = flow_map.get(c["code"])
+            c["price_change_pct"] = price_map.get(c["code"])
 
     return {
         "prev_date": prev_date.isoformat(),

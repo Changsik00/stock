@@ -21,15 +21,20 @@ import datetime as dt
 import pytest
 
 from app.db import async_session_factory, engine
-from app.models import EtfHolding, Stock
+from app.models import EtfHolding, Stock, StockFlow, StockOhlcv
 from app.quant import etf_weight_changes as ewc
 
 OLDER_DATE = dt.date(2099, 4, 1)  # _two_most_recent_dates가 무시해야 하는, 더 오래된 날짜
 PREV_DATE = dt.date(2099, 4, 2)
 CURR_DATE = dt.date(2099, 4, 3)
+# stock_flow_delta 범위 필터([PREV_DATE, CURR_DATE] 양끝 포함)가 정확한지
+# 검증하기 위한, CURR_DATE보다 "이후"인 윈도우 밖 날짜(§5.26-1).
+ADDITIONAL_DATE = dt.date(2099, 4, 4)
 
 ETF_ACTIVE = "990001"  # 이름에 "액티브" 포함
 ETF_PASSIVE = "990002"  # 이름에 "액티브" 없음
+ETF_LEVERAGED = "990003"  # 이름에 "레버리지" 포함 (§5.26-1)
+ETF_INVERSE = "990004"  # 이름에 "인버스" 포함 (§5.26-1)
 
 STOCK_A = "990010"  # 비중확대(작은 폭)
 STOCK_B = "990011"  # 비중축소(큰 폭)
@@ -38,10 +43,18 @@ STOCK_D = "990013"  # 신규편입(작은 비중)
 STOCK_E = "990014"  # 편출(작은 비중)
 STOCK_F = "990015"  # 신규편입(큰 비중)
 STOCK_G = "990016"  # 편출(큰 비중)
+STOCK_H = "990017"  # 레버리지 ETF 경유 비중확대 -> is_leveraged/exclude_leveraged 검증
+STOCK_I = "990018"  # 인버스 ETF 경유 비중확대 -> is_leveraged/exclude_leveraged 검증
+STOCK_J = "990019"  # stock_flow_delta 윈도우 정확성(양끝 포함, 밖은 제외) 검증
+STOCK_K = "990020"  # stock_flow_delta None(행 없음) 검증
+STOCK_L = "990021"  # price_change_pct 계산 검증
+STOCK_M = "990022"  # price_change_pct None(한쪽 날짜 결측) 검증
 
 STOCKS = {
     ETF_ACTIVE: ("테스트바이오액티브", True),
     ETF_PASSIVE: ("테스트바이오ETF", True),
+    ETF_LEVERAGED: ("테스트반도체레버리지", True),
+    ETF_INVERSE: ("테스트인버스ETF", True),
     STOCK_A: ("테스트종목A", False),
     STOCK_B: ("테스트종목B", False),
     STOCK_C: ("테스트종목C", False),
@@ -49,15 +62,25 @@ STOCKS = {
     STOCK_E: ("테스트종목E", False),
     STOCK_F: ("테스트종목F", False),
     STOCK_G: ("테스트종목G", False),
+    STOCK_H: ("테스트종목H", False),
+    STOCK_I: ("테스트종목I", False),
+    STOCK_J: ("테스트종목J", False),
+    STOCK_K: ("테스트종목K", False),
+    STOCK_L: ("테스트종목L", False),
+    STOCK_M: ("테스트종목M", False),
 }
 
 ALL_TEST_STOCK_CODES = list(STOCKS.keys())
-ALL_TEST_DATES = [OLDER_DATE, PREV_DATE, CURR_DATE]
+ALL_TEST_DATES = [OLDER_DATE, PREV_DATE, CURR_DATE, ADDITIONAL_DATE]
 
 
 async def _clear_test_rows() -> None:
     async with async_session_factory() as session:
         await session.execute(EtfHolding.__table__.delete().where(EtfHolding.date.in_(ALL_TEST_DATES)))
+        # StockFlow/StockOhlcv는 이 테스트 전용 코드 공간(990xxx)만 쓰므로 날짜와
+        # 무관하게 code 기준으로 지운다 — 실데이터와 겹칠 수 없는 코드라 안전하다.
+        await session.execute(StockFlow.__table__.delete().where(StockFlow.code.in_(ALL_TEST_STOCK_CODES)))
+        await session.execute(StockOhlcv.__table__.delete().where(StockOhlcv.code.in_(ALL_TEST_STOCK_CODES)))
         await session.execute(Stock.__table__.delete().where(Stock.code.in_(ALL_TEST_STOCK_CODES)))
         await session.commit()
 
@@ -220,6 +243,109 @@ async def test_compute_limit_truncates_after_sort(seeded_full):
         result = await ewc.compute_etf_weight_changes(session, limit=2)
     # 정렬 후 상위 2개(|delta| 최대 두 건) = STOCK_B, STOCK_A.
     assert [c["code"] for c in result["changes"]] == [STOCK_B, STOCK_A]
+
+
+# ---------------------------------------------------------------------------
+# §5.26-1 확장: is_leveraged / exclude_leveraged / stock_flow_delta / price_change_pct
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def seeded_context():
+    """레버리지/인버스 판정 + stock_flow_delta/price_change_pct 컨텍스트(§5.26-1)
+    전용 픽스처 — `seeded_full`과 완전히 다른 종목/ETF 코드를 써서 격리한다
+    (같은 PREV_DATE/CURR_DATE를 공유해도 코드 집합이 겹치지 않아 두 픽스처가
+    서로 간섭하지 않는다). STOCK_H/STOCK_I는 각각 레버리지/인버스 ETF를 경유한
+    비중확대, STOCK_J/K는 stock_flow_delta(범위 정확성/None), STOCK_L/M은
+    price_change_pct(정상 계산/None) 검증용이다."""
+    await _clear_test_rows()
+    async with async_session_factory() as session:
+        for code, (name, is_etf) in STOCKS.items():
+            session.add(Stock(code=code, name=name, market="KOSDAQ", is_etf=is_etf))
+        await session.flush()
+
+        # is_leveraged 판정 + exclude_leveraged 필터용 — 둘 다 노이즈 임계값
+        # 이상(+1.0%p)으로 비중확대시켜 결과에 남게 한다.
+        session.add(EtfHolding(etf_code=ETF_LEVERAGED, date=PREV_DATE, stock_code=STOCK_H, weight=5.0))
+        session.add(EtfHolding(etf_code=ETF_LEVERAGED, date=CURR_DATE, stock_code=STOCK_H, weight=6.0))
+        session.add(EtfHolding(etf_code=ETF_INVERSE, date=PREV_DATE, stock_code=STOCK_I, weight=5.0))
+        session.add(EtfHolding(etf_code=ETF_INVERSE, date=CURR_DATE, stock_code=STOCK_I, weight=6.0))
+
+        # STOCK_J/K/L/M은 전부 ETF_ACTIVE(레버리지/인버스 아님) 경유 비중확대.
+        for code in (STOCK_J, STOCK_K, STOCK_L, STOCK_M):
+            session.add(EtfHolding(etf_code=ETF_ACTIVE, date=PREV_DATE, stock_code=code, weight=5.0))
+            session.add(EtfHolding(etf_code=ETF_ACTIVE, date=CURR_DATE, stock_code=code, weight=6.0))
+
+        # STOCK_J: 윈도우 [PREV_DATE, CURR_DATE] 안(외국인 100 + 기관계 200 = 300)
+        # + 윈도우 밖(OLDER_DATE/ADDITIONAL_DATE)에 큰 값(999999)을 심어, 범위
+        # 필터가 양끝을 포함하면서도 밖의 값은 절대 새어 들어오지 않는지 검증.
+        session.add(StockFlow(code=STOCK_J, date=PREV_DATE, investor="외국인", net_value=100))
+        session.add(StockFlow(code=STOCK_J, date=CURR_DATE, investor="기관계", net_value=200))
+        session.add(StockFlow(code=STOCK_J, date=OLDER_DATE, investor="외국인", net_value=999_999))
+        session.add(StockFlow(code=STOCK_J, date=ADDITIONAL_DATE, investor="기관계", net_value=999_999))
+        # STOCK_K: stock_flow 행을 아예 심지 않는다 -> None 기대(0이 아니다).
+
+        # STOCK_L: 종가 10000 -> 11000 (+10.00%).
+        session.add(
+            StockOhlcv(code=STOCK_L, date=PREV_DATE, open=10000, high=10000, low=10000, close=10000, volume=1, value=1)
+        )
+        session.add(
+            StockOhlcv(code=STOCK_L, date=CURR_DATE, open=11000, high=11000, low=11000, close=11000, volume=1, value=1)
+        )
+        # STOCK_M: CURR_DATE 종가 행이 없음 -> price_change_pct None 기대.
+        session.add(
+            StockOhlcv(code=STOCK_M, date=PREV_DATE, open=10000, high=10000, low=10000, close=10000, volume=1, value=1)
+        )
+        await session.commit()
+    yield
+    await _clear_test_rows()
+    await engine.dispose()
+
+
+async def test_is_leveraged_detected_via_either_marker(seeded_context):
+    async with async_session_factory() as session:
+        result = await ewc.compute_etf_weight_changes(session, limit=200)
+    by_code = {c["code"]: c for c in result["changes"]}
+    assert by_code[STOCK_H]["is_leveraged"] is True  # "레버리지" 매칭
+    assert by_code[STOCK_I]["is_leveraged"] is True  # "인버스" 매칭
+    assert by_code[STOCK_J]["is_leveraged"] is False  # ETF_ACTIVE는 둘 다 아님
+
+
+async def test_exclude_leveraged_drops_flagged_rows(seeded_context):
+    async with async_session_factory() as session:
+        result = await ewc.compute_etf_weight_changes(session, exclude_leveraged=True, limit=200)
+    codes = {c["code"] for c in result["changes"]}
+    assert STOCK_H not in codes
+    assert STOCK_I not in codes
+    assert STOCK_J in codes  # 레버리지/인버스가 아니므로 그대로 남는다
+
+
+async def test_stock_flow_delta_sums_exact_window(seeded_context):
+    async with async_session_factory() as session:
+        result = await ewc.compute_etf_weight_changes(session, code=STOCK_J)
+    by_code = {c["code"]: c for c in result["changes"]}
+    assert by_code[STOCK_J]["stock_flow_delta"] == 300  # 100+200, 윈도우 밖 999999는 제외
+
+
+async def test_stock_flow_delta_none_when_no_rows(seeded_context):
+    async with async_session_factory() as session:
+        result = await ewc.compute_etf_weight_changes(session, code=STOCK_K)
+    by_code = {c["code"]: c for c in result["changes"]}
+    assert by_code[STOCK_K]["stock_flow_delta"] is None  # 0이 아니라 None
+
+
+async def test_price_change_pct_computed_from_ohlcv(seeded_context):
+    async with async_session_factory() as session:
+        result = await ewc.compute_etf_weight_changes(session, code=STOCK_L)
+    by_code = {c["code"]: c for c in result["changes"]}
+    assert by_code[STOCK_L]["price_change_pct"] == pytest.approx(10.0)
+
+
+async def test_price_change_pct_none_when_missing_date(seeded_context):
+    async with async_session_factory() as session:
+        result = await ewc.compute_etf_weight_changes(session, code=STOCK_M)
+    by_code = {c["code"]: c for c in result["changes"]}
+    assert by_code[STOCK_M]["price_change_pct"] is None
 
 
 async def test_compute_returns_empty_with_reason_when_insufficient_history(monkeypatch):
