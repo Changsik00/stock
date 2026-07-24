@@ -596,3 +596,173 @@ async def test_series_turnover_is_null_when_no_value_rank_row(monkeypatch, seede
 
     assert resp.status_code == 200
     assert resp.json()["turnover"] is None
+
+
+# -- stub 마스터 upsert (PLAN.md §5.28, FK 위반 크래시 수정) ---------------------
+#
+# "에이치엘지노믹스"(0156T0) 재현 시나리오: stocks 마스터에 없는 code로
+# /series를 호출하면(EOD 배치가 아직 못 따라잡은 신규/이형 코드), stub 마스터
+# 행을 먼저 만들어 stock_ohlcv/stock_flow의 FK를 만족시켜야 502로 죽지 않는다.
+# seeded_stock(TEST_CODE, 이미 stocks에 있음)과 겹치지 않게 별도 code를 쓴다.
+
+STUB_CODE = "999777"
+STUB_NAME = "테스트리서치스텁전자"
+
+
+async def _clear_stub_rows() -> None:
+    async with async_session_factory() as session:
+        await session.execute(delete(StockFlow).where(StockFlow.code == STUB_CODE))
+        await session.execute(delete(StockOhlcv).where(StockOhlcv.code == STUB_CODE))
+        await session.execute(delete(Stock).where(Stock.code == STUB_CODE))
+        await session.commit()
+
+
+@pytest.fixture
+async def stub_code_cleanup():
+    """STUB_CODE가 stocks 마스터에 아직 없는 상태를 보장하고(테스트 시작 전
+    잔여 행 제거), 테스트 후에도 정리한다 — seeded_stock과 달리 이 픽스처는
+    Stock 행을 미리 만들지 않는다(그게 이 테스트들의 핵심 전제: "마스터에
+    없음")."""
+    await _clear_stub_rows()
+    yield
+    await _clear_stub_rows()
+
+
+def _monkeypatch_series_externals(monkeypatch, code: str, target_end: dt.date) -> None:
+    """캔들/수급 외부 호출을 최소 응답으로 monkeypatch — 이 섹션 테스트들은
+    stub 마스터 upsert 자체가 관심사라 캔들/수급 내용은 중요하지 않다."""
+
+    def fake_fetch_stock_series(c, start, end):
+        assert c == code
+        return [
+            {
+                "date": target_end,
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "volume": 1,
+            }
+        ]
+
+    monkeypatch.setattr(stocks.naver_index, "fetch_stock_series", fake_fetch_stock_series)
+    monkeypatch.setattr(
+        stocks,
+        "KiwoomClient",
+        _make_fake_kiwoom_client({}, KiwoomAPIError(3, "존재하지 않는 종목코드입니다")),
+    )
+
+
+async def test_series_creates_stub_master_row_with_hints_when_code_missing(
+    monkeypatch, stub_code_cleanup
+):
+    """0156T0 재현 시나리오의 핵심 케이스: 마스터에 없는 code + 힌트 쿼리파라미터
+    -> 502가 아니라 200, stocks에 힌트 값 그대로 stub 행 생성, 응답 바디도 힌트를
+    반영한다(§5.28-1 완료 기준)."""
+    target_end = stocks._latest_trading_day()
+    _monkeypatch_series_externals(monkeypatch, STUB_CODE, target_end)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(
+            f"/api/stocks/{STUB_CODE}/series",
+            params={"days": 30, "name": STUB_NAME, "market": "kosdaq", "is_etf": "true"},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["name"] == STUB_NAME
+    assert body["market"] == "KOSDAQ"  # 대문자 정규화(value_rank.py MARKET_LABEL 관례)
+    assert body["is_etf"] is True
+
+    async with async_session_factory() as session:
+        row = await session.get(Stock, STUB_CODE)
+    assert row is not None
+    assert row.name == STUB_NAME
+    assert row.market == "KOSDAQ"
+    assert row.is_etf is True
+
+
+async def test_series_creates_stub_master_row_with_defaults_when_no_hints(
+    monkeypatch, stub_code_cleanup
+):
+    """힌트 쿼리파라미터를 전혀 안 보내도(실무에서 프런트가 initial 없이 호출하는
+    경우) 502로 죽지 않고, 문서화된 fallback(name=code, market=KOSPI,
+    is_etf=False)으로 stub이 채워진다."""
+    target_end = stocks._latest_trading_day()
+    _monkeypatch_series_externals(monkeypatch, STUB_CODE, target_end)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/stocks/{STUB_CODE}/series", params={"days": 30})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["name"] == STUB_CODE
+    assert body["market"] == "KOSPI"
+    assert body["is_etf"] is False
+
+    async with async_session_factory() as session:
+        row = await session.get(Stock, STUB_CODE)
+    assert row is not None
+    assert row.name == STUB_CODE
+    assert row.market == "KOSPI"
+    assert row.is_etf is False
+
+
+async def test_series_does_not_overwrite_existing_real_stock_row_with_hints(
+    monkeypatch, stub_code_cleanup
+):
+    """마스터에 이미 실제 행이 있으면(배치가 이미 정확히 채워둔 경우), 힌트
+    쿼리파라미터가 그것과 달라도 절대 덮어쓰지 않는다 — `stock is not None`이면
+    애초에 stub 로직 자체를 타지 않는다는 것을 라우터 레벨에서 확인한다."""
+    real_name, real_market = "진짜종목명", "KOSPI"
+    async with async_session_factory() as session:
+        session.add(Stock(code=STUB_CODE, name=real_name, market=real_market, is_etf=False))
+        await session.commit()
+
+    target_end = stocks._latest_trading_day()
+    _monkeypatch_series_externals(monkeypatch, STUB_CODE, target_end)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(
+            f"/api/stocks/{STUB_CODE}/series",
+            params={"days": 30, "name": "가짜힌트이름", "market": "kosdaq", "is_etf": "true"},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["name"] == real_name
+    assert body["market"] == real_market
+    assert body["is_etf"] is False
+
+    async with async_session_factory() as session:
+        row = await session.get(Stock, STUB_CODE)
+    assert row.name == real_name
+    assert row.market == real_market
+    assert row.is_etf is False
+
+
+async def test_ensure_stock_master_stub_on_conflict_do_nothing_never_overwrites(
+    stub_code_cleanup,
+):
+    """`_ensure_stock_master_stub`을 직접 호출해 ON CONFLICT DO NOTHING을 SQL
+    레벨에서 검증한다(§5.28의 가장 중요한 정합성: 경합 상황 — 이 요청의 stub
+    upsert가 동시 실행 중인 EOD 배치의 정확한 값과 경합해도 절대 이기면 안
+    된다). 위 라우터 레벨 테스트는 `stock is not None`이면 애초에 이 함수를
+    안 부르는 경로만 확인하므로, 이 테스트는 그 가드를 건너뛰고 함수 자체의
+    SQL을 직접 검증한다."""
+    real_name, real_market = "진짜종목명2", "KOSDAQ"
+    async with async_session_factory() as session:
+        session.add(Stock(code=STUB_CODE, name=real_name, market=real_market, is_etf=True))
+        await session.commit()
+
+    async with async_session_factory() as session:
+        await stocks._ensure_stock_master_stub(
+            session, STUB_CODE, "가짜힌트이름", "kospi", False
+        )
+        await session.commit()
+
+    async with async_session_factory() as session:
+        row = await session.get(Stock, STUB_CODE)
+    assert row.name == real_name
+    assert row.market == real_market
+    assert row.is_etf is True

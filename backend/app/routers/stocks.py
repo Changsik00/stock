@@ -414,6 +414,53 @@ async def _read_flows(session: AsyncSession, code: str, days: int) -> dict[str, 
     return flows
 
 
+async def _ensure_stock_master_stub(
+    session: AsyncSession,
+    code: str,
+    name: str | None,
+    market: str | None,
+    is_etf: bool | None,
+) -> None:
+    """`stocks`에 code가 아직 없을 때 최소 정보로 stub 행을 upsert한다(PLAN.md
+    §5.28) — `stock_ohlcv.code`/`stock_flow.code`가 `stocks.code`에 대한 FK라서,
+    마스터에 없는 code로 `_ensure_candles_cached`/`_ensure_flows_cached`가 그대로
+    INSERT를 시도하면 FK 위반으로 크래시한다(§5.28 원인 진단 — 실제로
+    "에이치엘지노믹스"(0156T0)에서 502로 재현됨). 이 함수를 그 INSERT들보다
+    먼저 호출해 FK가 항상 만족되도록 한다.
+
+    호출측(프런트 `StockDetailModal`이 `initial` prop — 검색/랭킹 카드가 이미
+    갖고 있던 이름/시장 정보)이 넘겨준 힌트로 최대한 정확히 채우되, 힌트가
+    없으면 `name=code`, `market="KOSPI"`, `is_etf=False`로 채운다. 이 fallback은
+    임의 추정값이지만 영구 오류가 아니다 — 다음 EOD 배치
+    (`collectors/value_rank.py::_upsert_stock_master`)가 전 종목을 매일
+    `ON CONFLICT DO UPDATE`로 다시 upsert하면서 정확한 name/market으로 자동
+    교정한다.
+
+    **ON CONFLICT DO NOTHING(중요, DO UPDATE 아님)**: `_upsert_stock_master`와
+    반대 방향의 신중함이 필요하다 — 그쪽은 신뢰할 수 있는 전체 시장 소스라 매번
+    최신값으로 갱신하는 게 맞지만, 여기는 "이 종목상세를 어쩌다 먼저 연 특정
+    요청의 best-guess 힌트"일 뿐이다. 이미 배치가 정확히 채워둔 행이 있든,
+    이 함수가 커밋하는 순간과 동시에 배치가 막 써넣은 행이든, 이 stub이 그걸
+    덮어써서는 절대 안 된다 — 그래서 DO NOTHING으로 "없을 때만 채운다"만
+    보장한다.
+
+    `stocks.market`은 대문자 표기 관례(`value_rank.py`의 `MARKET_LABEL`:
+    "KOSPI"/"KOSDAQ")를 따라 힌트를 대문자로 정규화한다. 커밋은 호출측
+    (`stock_series`)이 기존 트랜잭션 경계에 맞춰 담당한다 — 이 함수는 실행만
+    한다.
+    """
+    stmt = pg_insert(Stock).values(
+        code=code,
+        name=name or code,
+        market=(market.upper() if market else "KOSPI"),
+        # is_etf 힌트가 없으면(None) False로 채운다 — bool(None)이 False라는
+        # 암묵적 형변환에 기대지 않고, 의도를 코드로 명시한다.
+        is_etf=is_etf if is_etf is not None else False,
+    )
+    stmt = stmt.on_conflict_do_nothing(index_elements=[Stock.code])
+    await session.execute(stmt)
+
+
 async def _read_turnover(session: AsyncSession, code: str) -> dict | None:
     """value_rank에서 이 종목의 최신 회전율(%)을 가져온다. value_rank는 거래대금
     상위 종목만 적재되므로(PLAN.md §5.16) 없는 종목은 None을 그대로 반환 —
@@ -437,16 +484,53 @@ async def _read_turnover(session: AsyncSession, code: str) -> dict | None:
 async def stock_series(
     code: str,
     days: int = Query(180, ge=1, le=1500),
+    name: str | None = Query(
+        None, description="stocks 마스터에 없을 때 stub 생성에 쓸 이름 힌트(§5.28)"
+    ),
+    market: str | None = Query(
+        None, description="stocks 마스터에 없을 때 stub 생성에 쓸 시장 힌트(§5.28)"
+    ),
+    is_etf: bool | None = Query(
+        None, description="stocks 마스터에 없을 때 stub 생성에 쓸 ETF 여부 힌트(§5.28)"
+    ),
     session: AsyncSession = Depends(get_session),
 ):
+    """종목 캔들+수급 조회. PLAN.md §5.28: `stock is None`(아직 `stocks` 마스터
+    EOD 배치가 못 따라잡은 신규/이형 코드 — 실사례: "에이치엘지노믹스" 0156T0)
+    이면, `stock_ohlcv`/`stock_flow`에 FK로 물려있는 `stocks.code`를 만족시키기
+    위해 `_ensure_candles_cached`/`_ensure_flows_cached`를 부르기 **전에** 먼저
+    stub 행을 만든다(`_ensure_stock_master_stub`) — 그렇게 안 하면 그 함수들의
+    INSERT가 FK 위반으로 그대로 502 크래시한다(§5.28 원인 진단, 실제로 재현됨).
+    `name`/`market`/`is_etf` 쿼리파라미터는 프런트가 이미 알고 있는 값(검색/
+    랭킹 카드가 `initial` prop으로 들고 있던 정보)을 전달하기 위한 선택적
+    힌트이고, 없으면 `_ensure_stock_master_stub`의 fallback(`name=code`,
+    `market="KOSPI"`, `is_etf=False`)을 그대로 쓴다.
+    """
     stock = await session.get(Stock, code)
     # 이름/시장/ETF 여부를 지금 바로 일반 값으로 떼어 둔다 — 아래에서 실패 시
     # session.rollback()을 호출하면 expire_on_commit 설정과 무관하게 이 ORM
     # 인스턴스가 expire되어, 나중에 stock.name에 접근하면 (동기 컨텍스트에서)
     # 지연 재조회를 시도하다 MissingGreenlet으로 죽는다 — 그걸 피하기 위함.
-    stock_name = stock.name if stock else None
-    stock_market = stock.market if stock else None
-    stock_is_etf = stock.is_etf if stock else None
+    # stock이 존재하면 DB 값을 그대로 쓰고(신뢰할 수 있는 SOT), stock이 없을
+    # 때만 쿼리파라미터 힌트로 대체한다 — 이 값들이 그대로 응답 바디의
+    # name/market/is_etf가 되므로, stub 생성 이후에도 힌트가 null로 보이지
+    # 않게 하기 위함(§5.28). fallback 값은 아래 _ensure_stock_master_stub이
+    # 실제로 DB에 쓰는 값과 정확히 일치시킨다(대문자 정규화 포함) — 응답이
+    # DB 상태와 어긋나지 않도록.
+    stock_name = stock.name if stock else (name or code)
+    stock_market = stock.market if stock else (market.upper() if market else "KOSPI")
+    stock_is_etf = stock.is_etf if stock else (is_etf if is_etf is not None else False)
+
+    if stock is None:
+        # FK(stock_ohlcv.code/stock_flow.code -> stocks.code)를 만족시키기 위해
+        # 아래 캐시 함수들의 INSERT보다 먼저 stub을 확정한다. ON CONFLICT DO
+        # NOTHING이라 동시 요청/배치와 경합해도 예외가 나지 않으므로(중복 키가
+        # 조용히 no-op 처리됨) 별도 try/except 없이 바로 커밋한다 — 여기서
+        # 실패할 수 있는 유일한 경우는 DB 연결 자체의 문제인데, 그건 아래
+        # _ensure_candles_cached 호출도 똑같이 겪을 문제라 이 지점만 따로
+        # 방어할 이유가 없다.
+        await _ensure_stock_master_stub(session, code, name, market, is_etf)
+        await session.commit()
 
     try:
         await _ensure_candles_cached(session, code, days)

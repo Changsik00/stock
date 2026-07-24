@@ -1973,6 +1973,47 @@ docstring에 명시한다. `etf_holdings`가 충분히 쌓인 뒤 재실행해 �
 | 5.27-2 ✅ | 큰 폭 하락 플래그 추가 | `change_rate <= LARGE_DECLINE_WARNING_PCT`(-15.0)이면 응답 행에 `at_risk: true` 필드 추가(스코어 산식은 변경 안 함) | **완료(2026-07-24)** — curl로 실데이터 재확인: 에이치엘지노믹스(-27.81%)·티에스이(-15.66%)·한솔아이원스(-15.93%) 모두 `at_risk: true`로 정상 표시되면서 결과에서 배제되지 않음(스코어 그대로 유지), 516 passed |
 | 5.27-3 ✅ | 프런트 반영 | 스켈핑 후보 카드/모달에 `at_risk` 종목에 "하락폭 과다" 배지 표시(중립 톤, 매매 판단 문구 없음) | **완료(2026-07-24)** — 코드 리뷰(중립색 Badge kind="info", 매매 판단 문구 없음 확인) + `vite build` 클린 확인 |
 
+### Phase 5.28 — 종목상세 FK 위반 크래시 수정 (2026-07-24 사용자 제보)
+
+사용자가 스켈핑 후보의 "에이치엘지노믹스"(0156T0) 종목상세를 열었다가
+502 에러를 만났다: `IntegrityError: ForeignKeyViolationError: insert or
+update on table "stock_ohlcv" violates foreign key constraint
+"stock_ohlcv_code_fkey" ... Key (code)=(0156T0) is not present in table
+"stocks"`.
+
+**원인 진단(실 DB 확인)**: `routers/stocks.py::stock_series`가
+`stock = await session.get(Stock, code)`로 마스터 존재 여부를 확인하지만,
+없어도(`stock is None`) 그냥 `stock_name/market/is_etf = None`으로 두고
+계속 진행해 `_ensure_candles_cached`를 호출한다 — 그 함수는 `stock_ohlcv`에
+그 code로 INSERT를 시도하는데, `stocks.code`에 대한 FK 제약이 있어서
+마스터에 없는 code는 무조건 실패한다. "0156T0"이 마스터에 없는 이유:
+`collectors/value_rank.py::_upsert_stock_master`가 매일 전 종목을
+`stocks`에 upsert하긴 하지만(EOD 배치), 이 종목이 그 소스의 "전체 목록"에
+아직 안 잡혔거나 최근 상장/코드체계 변경(0156T0처럼 문자 포함 신형
+코드 — 실측: `stocks`에 이미 361개의 문자 포함 코드가 있고 대부분 ETF,
+"에이치엘지노믹스"만 아직 없음) 등으로 배치가 아직 못 따라잡은 것으로
+보인다 — **근본 원인은 배치 커버리지 공백이지만, 이 공백 자체를 없애는
+것과 별개로 앱이 이런 공백을 만나도 크래시하지 않게 방어하는 게 이번
+수정의 목표**(배치가 언제 이 종목을 따라잡을지와 무관하게 즉시 고쳐야
+하는 방어 코드).
+
+**해결**: `stock_series`가 `stock is None`이면 `stock_ohlcv`/`stock_flow`
+INSERT를 시도하기 **전에** 최소 정보로 `stocks`에 stub 행을 먼저
+upsert한다(FK를 항상 만족시킨다). 프런트가 이미 알고 있는 이름/시장
+정보(스켈핑 후보·검색·랭킹 카드에서 종목상세를 열 때 `initial` prop으로
+갖고 있음, `DashboardPage.jsx`의 `openStockModal(code, name, {market,
+is_etf})` 패턴)를 옵션 쿼리파라미터로 전달받아 정확한 값으로 stub을
+채우고, 힌트가 없으면 `name=code`/`market="KOSPI"`(임의 기본값, 다음
+EOD 배치가 `_upsert_stock_master`의 `on_conflict_do_update`로 정확한
+값으로 자동 교정함 — 영구 오류 아님)로 채운다. `stocks.market`은
+대문자로 저장하는 기존 관례(`value_rank.py`의 `MARKET_LABEL`)를 그대로
+따라 전달받은 값을 대문자로 정규화한다.
+
+| # | 작업 | 내용 | 완료 기준 |
+|---|---|---|---|
+| 5.28-1 ✅ | 종목상세 stub 마스터 upsert | `routers/stocks.py::stock_series`에 `name`/`market`/`is_etf` 옵션 쿼리파라미터 추가, `stock is None`이면 `_ensure_candles_cached` 호출 전 `stocks`에 stub 행 upsert(ON CONFLICT DO NOTHING — 기존 배치 데이터를 덮어쓰지 않는다) | **완료(2026-07-24)** — 0156T0 재현 curl 결과 502→200(캔들/수급 정상), `stocks` 테이블에 `에이치엘지노믹스`/`KOSDAQ` 정확히 기록 확인, 520 passed(신규 4개: 힌트 있음/없음/기존 행 보존/DO NOTHING 단위테스트) |
+| 5.28-2 ✅ | 프런트 힌트 전달 | `fetchStockSeries`가 옵션 인자로 name/market/is_etf를 받아 쿼리파라미터로 전달, `StockDetailModal`이 `initial` prop 값을 그대로 넘긴다 | **완료(2026-07-24)** — 코드 리뷰 + `vite build` 클린 확인 |
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 - **계획·리뷰는 메인 세션, 코딩은 Sonnet 서브에이전트**: 위 표의 작업(1-1, 1-2, …)

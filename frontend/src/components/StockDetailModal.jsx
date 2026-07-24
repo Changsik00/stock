@@ -330,7 +330,10 @@ export default function StockDetailModal({ code, initial }) {
     let cancelled = false
     setLoading(true)
     setError(null)
-    fetchStockSeries(code, days)
+    // initial(검색/랭킹 카드가 이미 갖고 있던 {name, market, is_etf})을 힌트로
+    // 넘긴다 — stocks 마스터에 아직 없는 종목(§5.28, 예: 0156T0)이면 백엔드가
+    // 이 힌트로 stub 마스터 행을 채운다(없으면 name=code/market=KOSPI 기본값).
+    fetchStockSeries(code, days, { name: initial?.name, market: initial?.market, is_etf: initial?.is_etf })
       .then((body) => {
         if (!cancelled) setSeries(body)
       })
