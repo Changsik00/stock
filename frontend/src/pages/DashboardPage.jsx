@@ -8,6 +8,7 @@ import {
   fetchBreadthIntradayAccumulated,
   fetchBreadthLive,
   fetchDerivativeFlow,
+  fetchEtfWeightChanges,
   fetchFlowConcentrationIntradayAccumulated,
   fetchFlowIntradayAccumulated,
   fetchFlowLive,
@@ -1529,6 +1530,100 @@ function FlowPathFullModal({ onRowClick }) {
   )
 }
 
+// ETF 비중 변화 상위 — 전체 보기 (PLAN.md §5.25). FlowPathFullModal과 동일한
+// 자기완결 컴포넌트 패턴(마운트 시 자기 데이터를 불러온다)이지만, 유입/유출 같은
+// 토글은 없다(4가지 이벤트가 이미 한 목록에 섞여 나온다 — event 파라미터로 필터를
+// 걸 수도 있지만 "감별"이라는 원래 요청 취지상 기본은 전부 보여주는 쪽을 택했다).
+// code를 넘기지 않아 시장 전체 스크리닝 결과를 받는다(카드 자체가 "market-wide").
+function EtfWeightChangesFullModal({ onRowClick }) {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    fetchEtfWeightChanges({ limit: 50 })
+      .then((body) => {
+        if (!cancelled) setData(body)
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const rows = data?.changes || []
+
+  return (
+    <div>
+      {data?.curr_date && (
+        <div className="toggle-hint">
+          {formatDate(data.prev_date)} → {formatDate(data.curr_date)} 스냅샷 비교 · etf_holdings는 각 ETF의 top10
+          구성만 매일 스냅샷이라 "신규편입"/"편출"이 top10 안팎 이동일 수 있습니다 — 실제 매수/매도가 시작됐다는
+          뜻은 아닙니다.
+        </div>
+      )}
+
+      {loading && <div className="state">불러오는 중…</div>}
+      {error && <div className="state error">{error}</div>}
+      {!loading && !error && rows.length === 0 && <div className="state">표시할 데이터가 없습니다.</div>}
+
+      {!loading && !error && rows.length > 0 && (
+        <div className="flow-rank-card">
+          <div className="table-scroll">
+            <table className="flow-rank-table">
+              <thead>
+                <tr>
+                  <th>이벤트</th>
+                  <th>종목명</th>
+                  <th>ETF</th>
+                  <th className="num">비중 변화</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, i) => (
+                  <tr
+                    key={`${i}-${row.etf_code}-${row.code}`}
+                    className={onRowClick ? 'flow-rank-row-clickable' : undefined}
+                    onClick={onRowClick ? () => onRowClick(row.code, row.name) : undefined}
+                  >
+                    <td>
+                      <span
+                        className={`etf-weight-event ${row.event === '비중확대' || row.event === '신규편입' ? 'up' : 'down'}`}
+                      >
+                        {row.event}
+                      </span>
+                    </td>
+                    <td>
+                      <span className="flow-rank-name">{row.name || row.code}</span>
+                    </td>
+                    <td>
+                      {row.etf_name || row.etf_code}
+                      {row.is_active && <Badge kind="info">액티브</Badge>}
+                    </td>
+                    <td className={`num ${row.delta == null ? '' : row.delta >= 0 ? 'up' : 'down'}`}>
+                      {row.prev_weight != null ? `${row.prev_weight.toFixed(2)}%` : '–'}
+                      {' → '}
+                      {row.curr_weight != null ? `${row.curr_weight.toFixed(2)}%` : '–'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // 실시간 관심 종목 TOP20 전체 보기 — ValueRankFullModal/FlowPathFullModal과 동일하게
 // 마운트 시(모달이 열릴 때) 자기 데이터를 불러오는 자기완결 컴포넌트다. 다른
 // FullModal들과 달리 행이 클릭 가능해야 하므로(종목 상세 모달로 전환) 호출부
@@ -1812,6 +1907,11 @@ export default function DashboardPage() {
   // `!STATIC_DATA && valueRankLive ? valueRankLive : valueRankTop`).
   const [valueRankLive, setValueRankLive] = useState(null)
   const [flowPathTop, setFlowPathTop] = useState(null)
+  // ETF 비중 변화 상위(PLAN.md §5.25, 시장 전체 스크리닝) — code 없이 조회한
+  // GET /api/markets/etf-weight-changes 응답을 그대로 담는다({prev_date, curr_date,
+  // changes}). flowPathTop과 동일하게 하루 1회 배치(etf_holdings) 산출물이라 별도
+  // 라이브 폴링 티어에 넣지 않고 마운트 시 1회만 불러온다.
+  const [etfWeightChangesTop, setEtfWeightChangesTop] = useState(null)
   // 실시간 관심 종목 TOP20(PLAN.md 사용자 지시, live-only) — API 응답 바디를 그대로
   // 담는다({ rows, qry_tp, queried_at }). flowLive와 동일하게 정적 배포에서는 항상
   // null로 남는다.
@@ -2176,6 +2276,18 @@ export default function DashboardPage() {
     fetchFlowPath(FLOW_RANK_LOOKBACK_DAYS, 5, 'in')
       .then((body) => {
         if (!cancelled) setFlowPathTop(body)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    fetchEtfWeightChanges({ limit: 5 })
+      .then((body) => {
+        if (!cancelled) setEtfWeightChangesTop(body)
       })
       .catch(() => {})
     return () => {
@@ -3197,6 +3309,43 @@ export default function DashboardPage() {
             </Top5RowTile>
           )}
         />
+        {/* ETF 비중 변화 상위 (PLAN.md §5.25, 알테오젠 사례) — "어떤 종목이 최근 ETF
+            비중 변화를 겪었는지" 시장 전체 스크리닝. "ETF 경유 상위"(수급 금액 추정)와는
+            완전히 다른 지표(비중 %p 변화)라 카드도 분리했다 — 두 카드 모두 하루 1회
+            배치(etf_holdings/flow_path) 산출물이라 나란히 두어도 자연스럽다. */}
+        <Top5Card
+          title="ETF 비중 변화 상위"
+          hint={
+            <span title="etf_holdings는 각 ETF의 top10 구성만 매일 스냅샷합니다 — '신규편입'/'편출'이 top10 안팎 이동일 수 있어 실제 매수/매도 시작을 뜻하지 않습니다.">
+              감별 · 일 1회 배치
+              {etfWeightChangesTop?.curr_date && (
+                <span className="stale-date"> · 확정 {mmdd(etfWeightChangesTop.curr_date)}</span>
+              )}
+            </span>
+          }
+          hoverDate={etfWeightChangesTop?.curr_date ? formatDate(etfWeightChangesTop.curr_date) : undefined}
+          rows={etfWeightChangesTop?.changes}
+          onMore={() => setModal({ type: 'etfWeightChanges', title: 'ETF 비중 변화 상위 — 전체' })}
+          renderRow={(row, i) => (
+            <Top5RowTile
+              key={`${i}-${row.etf_code}-${row.code}`}
+              clickable={!STATIC_DATA}
+              onClick={() => openStockModal(row.code, row.name)}
+            >
+              <span className="top5-row-name">
+                <span className="top5-row-label">
+                  {i + 1}. {row.name || row.code} · {row.etf_name || row.etf_code}
+                </span>
+                {row.is_active && <Badge kind="info">액티브</Badge>}
+              </span>
+              <span
+                className={`top5-row-value ${row.event === '비중확대' || row.event === '신규편입' ? 'up' : 'down'}`}
+              >
+                {row.event}
+              </span>
+            </Top5RowTile>
+          )}
+        />
         {/* 실시간 관심 종목 TOP20(조회수 기준, live-only) — flowLive와 동일하게 정적
             배포에서는 attentionTop이 항상 null이라 카드가 "표시할 데이터가 없습니다"로
             자연히 빈 상태를 보여준다. 다른 3개 카드와 달리 행 자체가 클릭 가능해
@@ -3289,6 +3438,11 @@ export default function DashboardPage() {
         )}
         {modal?.type === 'flowPath' && (
           <FlowPathFullModal onRowClick={STATIC_DATA ? undefined : (code, name) => openStockModal(code, name)} />
+        )}
+        {modal?.type === 'etfWeightChanges' && (
+          <EtfWeightChangesFullModal
+            onRowClick={STATIC_DATA ? undefined : (code, name) => openStockModal(code, name)}
+          />
         )}
         {modal?.type === 'attention' && (
           <AttentionFullModal

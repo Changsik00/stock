@@ -1297,6 +1297,69 @@ header h1 {
   color: var(--down);
 }
 
+/* ETF 비중 변화 섹션(PLAN.md §5.25) — 종목 상세 모달. etf-weight-event는 이
+   섹션과 대시보드의 "ETF 비중 변화 상위" 전체 보기 모달(DashboardPage.jsx
+   EtfWeightChangesFullModal)이 함께 쓰는 공용 클래스다 — 등락 색 관례(상승=빨강
+   --up/하락=파랑 --down)를 비중확대·신규편입=up, 비중축소·편출=down에 그대로
+   적용한다(사용자 메모리: 모든 등락 표현에 이 색 규칙 적용). */
+.stock-detail-etf-weight {
+  margin-top: 16px;
+}
+
+.stock-detail-etf-weight-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.stock-detail-etf-weight-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.stock-detail-etf-weight-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.stock-detail-etf-weight-value {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.etf-weight-event {
+  flex: none;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.etf-weight-event.up {
+  color: var(--up);
+}
+
+.etf-weight-event.down {
+  color: var(--down);
+}
+
 /* 공용 모달 (Modal.jsx) */
 .modal-backdrop {
   position: fixed;

@@ -109,6 +109,26 @@ export async function fetchFlowPath(days = 7, limit = 30, direction = 'in') {
   return getJson(`/api/markets/flow-path?days=${days}&limit=${limit}&direction=${direction}`)
 }
 
+// GET /api/markets/etf-weight-changes?code=&active_only=&event=&limit= -> { prev_date,
+// curr_date, changes: [{code, name, etf_code, etf_name, is_active, event, prev_weight,
+// curr_weight, delta}] } (PLAN.md §5.25, ETF 비중 변화 감지) — etf_holdings에 실제로
+// 존재하는 가장 최근 2개 스냅샷 날짜를 비교한 (ETF, 종목) 쌍별 비중 변화. **etf_holdings는
+// 각 ETF의 top10 구성만 스냅샷하므로 신규편입/편출이 top10 안팎 이동일 수 있다** — 매수/
+// 매도가 확정된 것이 아니다(백엔드 routers/flow_rank.py 해당 엔드포인트 독스트링 참고).
+// code를 넘기면 그 종목을 담은 ETF들의 변화만(종목 상세 모달), 생략하면 시장 전체
+// 스크리닝(대시보드 카드)이다. 정적 배포(VITE_STATIC_DATA) 스냅샷에는 아직 포함하지
+// 않았다 — attention/regime/scalp-candidates와 동일하게 로컬 전용 기능으로 두고, 정적
+// 배포에서는 이 호출이 실패하면 호출부가 조용히 빈 상태로 처리한다.
+export async function fetchEtfWeightChanges({ code, activeOnly, event, limit } = {}) {
+  const params = new URLSearchParams()
+  if (code) params.set('code', code)
+  if (activeOnly) params.set('active_only', 'true')
+  if (event) params.set('event', event)
+  if (limit) params.set('limit', String(limit))
+  const qs = params.toString()
+  return getJson(`/api/markets/etf-weight-changes${qs ? `?${qs}` : ''}`)
+}
+
 // GET /api/markets/sentiment -> { score, approx, components: { breadth, flow, etf } }
 // (PLAN.md §4.6 3.6-4) — 시장 종합 매수세/매도세 게이지(-100~+100). 요소별 score/
 // weight/date와 원재료(adv/dec/flat, buy_sum/sell_sum, net_inflow_sum/aum_sum)를

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis } from 'recharts'
-import { STATIC_DATA, fetchStockIntraday, fetchStockSeries, fetchStockSignals } from '../api'
+import { STATIC_DATA, fetchEtfWeightChanges, fetchStockIntraday, fetchStockSeries, fetchStockSignals } from '../api'
 import { DEFAULT_INVESTORS, INTRADAY_OPTIONS, INVESTOR_COLOR_VAR } from '../constants'
 import { formatDate, formatEok } from '../format'
 import Badge from './Badge'
@@ -253,6 +253,50 @@ function SignalPanel({ loading, error, signals }) {
   )
 }
 
+function etfWeightLabel(v) {
+  return v === null || v === undefined ? '–' : `${v.toFixed(2)}%`
+}
+
+// "이 종목을 담은 ETF 중 최근 비중 변화" (PLAN.md §5.25) — 종목 상세 모달 전용
+// 섹션. 이 파일의 다른 옵셔널 섹션(turnover 배지, 수급 섹션 등)과 동일하게 데이터가
+// 없으면(fetch 실패 포함) 섹션 헤더/빈 상태 문구 없이 통째로 렌더하지 않는다("표시할
+// 게 없으면 아예 안 보여준다"는 이 파일의 기존 관례를 그대로 따름). etf_holdings가
+// top10 스냅샷이라는 한계(신규편입/편출이 top10 안팎 이동일 수 있음, 매수/매도 확정
+// 아님)는 END USER가 코드 주석만으로는 알 수 없으므로 toggle-hint로 화면에 항상
+// 노출한다(작업 지시 — "코드 주석에만 묻지 말 것").
+function EtfWeightChangeSection({ data }) {
+  const changes = data?.changes || []
+  if (changes.length === 0) return null
+
+  return (
+    <div className="stock-detail-etf-weight">
+      <div className="toggle-hint">
+        담은 ETF 중 최근 비중 변화 ({formatDate(data.prev_date)} → {formatDate(data.curr_date)}) · etf_holdings는 각
+        ETF의 top10 구성만 매일 스냅샷이라 "신규편입"/"편출"이 top10 안팎 이동일 수 있습니다 — 실제 매수/매도가
+        시작됐다는 뜻은 아닙니다.
+      </div>
+      <ul className="stock-detail-etf-weight-list">
+        {changes.map((c, i) => (
+          <li className="stock-detail-etf-weight-row" key={`${c.etf_code}-${i}`}>
+            <span className="stock-detail-etf-weight-name">
+              {c.etf_name || c.etf_code}
+              {c.is_active && <Badge kind="info">액티브</Badge>}
+            </span>
+            <span
+              className={`etf-weight-event ${c.event === '비중확대' || c.event === '신규편입' ? 'up' : 'down'}`}
+            >
+              {c.event}
+            </span>
+            <span className="stock-detail-etf-weight-value">
+              {etfWeightLabel(c.prev_weight)} → {etfWeightLabel(c.curr_weight)}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 // 종목 상세 모달 (PLAN.md §6 3.7-2) — StockSearch에서 종목을 고르면 뜬다. initial은
 // 검색 결과 행({code, name, market, is_etf})을 그대로 넘겨받아, 헤더(이름/코드/배지)를
 // 시리즈 응답을 기다리지 않고 즉시 그릴 수 있게 한다 — 첫 조회는 외부 API를 거쳐
@@ -277,6 +321,10 @@ export default function StockDetailModal({ code, initial }) {
   const [signals, setSignals] = useState(null)
   const [signalsLoading, setSignalsLoading] = useState(false)
   const [signalsError, setSignalsError] = useState(null)
+  // ETF 비중 변화(PLAN.md §5.25) — "이 종목을 담은 ETF 중 최근 비중이 바뀐 곳".
+  // isEtf(아래에서 계산)가 true인 동안은 조회 자체를 건너뛴다 — ETF 자신이 ETF에
+  // 담기는 경우는 이 기능의 대상이 아니다(작업 지시 그대로).
+  const [etfWeightChanges, setEtfWeightChanges] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -349,9 +397,34 @@ export default function StockDetailModal({ code, initial }) {
     setIntradayMode('daily')
   }, [code])
 
+  // isEtf는 series(비동기)가 오기 전에는 initial(검색/랭킹 행이 미리 넘겨준 값)로
+  // 먼저 판단할 수 있다 — series?.is_etf가 나중에 도착해도 Boolean 값이 바뀌지
+  // 않으면(대개 그렇다) 아래 effect가 다시 실행되지 않는다.
+  const isEtfNow = Boolean(series?.is_etf ?? initial?.is_etf)
+
+  // ETF 비중 변화(PLAN.md §5.25) — ETF 자신을 보는 중이면(isEtfNow) 애초에 "이
+  // 종목을 담은 ETF" 조회가 의미 없으므로 요청 자체를 보내지 않는다.
+  useEffect(() => {
+    if (isEtfNow) {
+      setEtfWeightChanges(null)
+      return undefined
+    }
+    let cancelled = false
+    fetchEtfWeightChanges({ code })
+      .then((body) => {
+        if (!cancelled) setEtfWeightChanges(body)
+      })
+      .catch(() => {
+        if (!cancelled) setEtfWeightChanges(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [code, isEtfNow])
+
   const name = series?.name || initial?.name
   const market = series?.market || initial?.market
-  const isEtf = series?.is_etf ?? initial?.is_etf
+  const isEtf = isEtfNow
   const prices = series?.prices || []
   const latestPrice = prices.length > 0 ? prices[prices.length - 1] : null
   const flowsError = series?.meta?.flows_error
@@ -448,6 +521,8 @@ export default function StockDetailModal({ code, initial }) {
           <FlowLineChart flows={series.flows} />
         </div>
       )}
+
+      {!isEtf && <EtfWeightChangeSection data={etfWeightChanges} />}
     </div>
   )
 }

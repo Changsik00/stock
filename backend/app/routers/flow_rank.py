@@ -3,6 +3,9 @@ GET /api/markets/flow-path — ETF look-through 수급 경로 분해 상위, dir
 out(유출) 토글 (PLAN.md §4.5/§6 3.5-3, 유출 확장은 §4.6 3.6-4).
 GET /api/markets/value-rank — 거래대금 상위 종목("돈이 모이는 곳") 스냅샷 (PLAN.md §4.6 3.6-1).
 GET /api/markets/sentiment — 시장 종합 매수세/매도세 게이지(-100~+100) (PLAN.md §4.6 3.6-4).
+GET /api/markets/etf-weight-changes — ETF 비중 변화 감별 스크리너 (PLAN.md §5.25, 알테오젠 사례).
+이 라우터가 이미 "ETF 관련 시장 스크리너"의 홈이라(flow-path·sentiment의 etf 요소 등)
+별도 라우터 파일을 새로 만들지 않고 여기에 추가했다(작업 지시가 남긴 판단 재량).
 
 DB 전용 조회다(§5.4 "DB 캐싱 우선") — collectors/flow_rank.py·collectors/flow_path.py가
 미리 적재해 둔 테이블을 그대로 읽어 반환할 뿐, 이 라우터에서 네이버를 직접 호출하지
@@ -106,6 +109,7 @@ from ..clients import naver_rank, naver_value_rank
 from ..db import get_session
 from ..market_hours import KST, is_nxt_closed
 from ..models import EtfStat, FlowPath, FlowRank, MarketBreadth, Stock, ValueRank
+from ..quant import etf_weight_changes
 from ..sentiment import breadth_score, compute_sentiment, etf_score, flow_score
 from .markets import _warm_breadth_live
 
@@ -117,6 +121,12 @@ INVESTORS = {"foreign", "institution"}
 SIDES = {"buy", "sell"}
 MARKET_FILTERS = {"all", "kospi", "kosdaq"}
 FLOW_PATH_DIRECTIONS = {"in", "out"}
+ETF_WEIGHT_CHANGE_EVENTS = {
+    etf_weight_changes.EVENT_NEW,
+    etf_weight_changes.EVENT_EXPAND,
+    etf_weight_changes.EVENT_SHRINK,
+    etf_weight_changes.EVENT_REMOVED,
+}
 # sentiment 요소별 원재료를 찾을 때 "가장 최근 가용 날짜"를 얼마나 과거까지 훑을지.
 SENTIMENT_LOOKBACK_DAYS = 30
 
@@ -271,6 +281,57 @@ async def flow_path_top(
             for r in rows
         ],
     }
+
+
+@router.get("/api/markets/etf-weight-changes")
+async def etf_weight_changes_top(
+    code: str | None = Query(
+        None, description="특정 종목 코드로 필터(예: 196170) — 없으면 시장 전체 스크리닝"
+    ),
+    active_only: bool = Query(False, description="액티브 펀드(이름에 '액티브' 포함)의 변화만"),
+    event: str | None = Query(
+        None, description="신규편입/비중확대/비중축소/편출 중 하나로 필터 — 생략 시 4종 전부"
+    ),
+    limit: int = Query(50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """ETF 비중 변화 감별 스크리너 (PLAN.md §5.25) — `etf_holdings`(ETF별 일별
+    top10 구성 스냅샷)에서 실제로 존재하는 날짜 중 가장 최근 2개를 비교해
+    (ETF, 종목) 쌍별 비중 변화를 신규편입/비중확대/비중축소/편출 4종으로
+    분류한다(계산 자체는 `app.quant.etf_weight_changes.compute_etf_weight_changes`,
+    순수 DB 조회 — 이 라우터에서 새로 수집하지 않는다).
+
+    **핵심 한계(반드시 함께 읽을 것)**: `etf_holdings`는 각 ETF의 **top10
+    구성종목만** 매일 스냅샷한다(전체 포트폴리오가 아니다 —
+    collectors/etf_master.py 모듈독스트링 참고). 그래서 "신규편입"은 "방금
+    처음 산 것"이 아니라 "이미 보유하던 종목이 비중이 커져 top10 안으로
+    올라온 것"일 수 있고, "편출"도 "판 것"이 아니라 "다른 보유 종목이 커져
+    순위가 밀려난 것"일 수 있다 — 이 데이터만으로는 두 경우를 구분할 수
+    없다. 응답의 event 필드는 항상 이 중립적인 이름(신규편입/편출)만 쓰고
+    "매수"/"매도"라고 단정하지 않는다.
+
+    `code`를 지정하면 그 종목을 담은 ETF들의 변화만(§5.25 알테오젠 196170
+    사례가 검증에 쓰인 예), 생략하면 시장 전체 스크리닝(사용자의 "감별" 요청
+    그대로 — 어떤 종목이 최근 ETF 비중 변화를 겪었는지 찾는 용도)이다.
+    `active_only=true`면 이름에 "액티브"가 포함된 펀드(한국 ETF 네이밍
+    규정상 액티브 펀드는 반드시 이 문자열을 포함 — §5.25 실측: 추적 358개
+    중 65개)의 변화만 남긴다. 액티브 펀드는 지수 추종 패시브 ETF의 기계적
+    리밸런싱과 달리 펀드매니저 재량을 반영할 가능성이 커서 별도로 구분해
+    보여줄 가치가 있다.
+
+    Returns ``{"prev_date": iso|null, "curr_date": iso|null, "changes": [
+    {"code", "name", "etf_code", "etf_name", "is_active", "event",
+    "prev_weight", "curr_weight", "delta"}, ...]}``. prev_weight/curr_weight/
+    delta는 신규편입/편출이면 한쪽이 null(비교 대상이 없다는 뜻, 0이 아니다).
+    `etf_holdings` 스냅샷이 아직 2개 미만이면(수집 이력 부족) 에러가 아니라
+    ``prev_date/curr_date: null, changes: []``로 응답한다.
+    """
+    if event is not None and event not in ETF_WEIGHT_CHANGE_EVENTS:
+        raise HTTPException(400, f"event must be one of {sorted(ETF_WEIGHT_CHANGE_EVENTS)}")
+
+    return await etf_weight_changes.compute_etf_weight_changes(
+        session, code=code, active_only=active_only, event=event, limit=limit
+    )
 
 
 @router.get("/api/markets/value-rank")
