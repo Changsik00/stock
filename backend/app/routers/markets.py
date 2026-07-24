@@ -98,7 +98,7 @@ from ..collectors.market_flow import fetch_live_flow
 from ..db import get_session
 from ..market_hours import KST, is_market_closed as _market_closed_kst, is_nxt_closed
 from ..models import IndexOhlcv, MacroSeries, MarketBreadth, MarketFlow, Stock
-from ..quant import flow_acceleration, regime_backtest
+from ..quant import flow_acceleration, regime_backtest, volume_surge
 from ..services import DB_MARKET, get_market_series_from_db
 from . import basis as basis_router
 
@@ -1375,7 +1375,12 @@ async def _index_tile_prev_close(session: AsyncSession, market: str) -> float | 
 async def _index_tile_from_intraday(session: AsyncSession, market: str) -> dict | None:
     """kospi/kosdaq 지수 타일 라이브 값 — ka20005 1분봉(캐시 공유) 마지막 봉 종가
     (parse_minute_chart_rows가 이미 100배 스케일을 보정해 반환함, 위 주석 참고) +
-    index_ohlcv 전일 확정 종가 대비 등락률. 실패하면 None(호출자가 DB 확정치로 폴백)."""
+    index_ohlcv 전일 확정 종가 대비 등락률. 실패하면 None(호출자가 DB 확정치로 폴백).
+
+    §5.24(시장 전체 거래량 급증 감지): 이미 받아 온 `bars`(각 봉의 `volume`,
+    지금까지는 버려지던 필드)로 `volume_surge.compute_volume_surge`를 호출해
+    "방금 5분 평균 거래량이 직전 30분 평균 대비 몇 배인지"를 `volume_surge`
+    필드로 함께 반환한다 — 데이터가 부족하면(장 시작 직후 등) None."""
     try:
         payload = await _warm_market_intraday(market, 1)
     except Exception as e:  # noqa: BLE001 - 라이브 실패가 다른 시장/폴백을 막지 않도록
@@ -1396,6 +1401,7 @@ async def _index_tile_from_intraday(session: AsyncSession, market: str) -> dict 
         "time": bars[-1].get("time"),
         "prev_close": prev_close,
         "source": "kiwoom_ka20005_1m",
+        "volume_surge": volume_surge.compute_volume_surge(bars),
     }
 
 

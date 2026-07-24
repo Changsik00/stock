@@ -64,6 +64,30 @@ def _sector_response(cur_prc: str) -> dict:
     }
 
 
+def _sector_response_many_bars(volumes: list[int], cur_prc: str = "+305000") -> dict:
+    """§5.24 volume_surge 검증용 — `len(volumes)`개의 연속 1분봉을 만들어
+    반환한다(09:00부터 1분 간격, 최신이 마지막). `compute_volume_surge`가
+    35개(recent 5 + baseline 30) 이상을 요구하므로 이 헬퍼로 필요한 만큼
+    채운다. 원본 응답 순서는 최신이 먼저(내림차순)라 여기서도 그렇게
+    만든다 — `parse_minute_chart_rows`가 오름차순으로 뒤집는다."""
+    rows = []
+    for i, vol in enumerate(volumes):
+        minute = 9 * 60 + i  # 09:00부터 i분 후
+        hh, mm = divmod(minute, 60)
+        rows.append(
+            {
+                "cur_prc": cur_prc,
+                "trde_qty": str(vol),
+                "cntr_tm": f"20260721{hh:02d}{mm:02d}00",
+                "open_pric": "+300000",
+                "high_pric": "+301000",
+                "low_pric": "+299000",
+            }
+        )
+    rows.reverse()  # 최신 먼저(내림차순) — 원본 응답 관례
+    return {"return_code": 0, "inds_min_pole_qry": rows}
+
+
 async def _unused_session():
     yield object()
 
@@ -174,6 +198,39 @@ async def test_index_tiles_live_returns_three_markets(monkeypatch):
     assert body["futures"]["change_rate"] == round((408.0 - 400.0) / 400.0 * 100, 4)
     assert body["futures"]["source"] == "naver_fchart_today_bar"
     assert "cached_at" in body
+    # §5.24: 봉이 1개뿐(35개 미만)이라 volume_surge는 계산 불가 -> None.
+    assert body["kospi"]["volume_surge"] is None
+    assert body["kosdaq"]["volume_surge"] is None
+
+
+async def test_index_tiles_live_includes_volume_surge_when_bars_sufficient(monkeypatch):
+    """§5.24: bars가 35개(recent 5 + baseline 30) 이상이면 volume_surge가
+    compute_volume_surge 결과 그대로 채워져야 한다."""
+    # baseline(앞 30분) volume=100, recent(뒤 5분) volume=400 -> multiple=4.0.
+    volumes = [100] * 30 + [400] * 5
+    markets.KiwoomClient = _make_fake_kiwoom_client(_sector_response_many_bars(volumes))
+
+    def fake_futures_fetch(start, end):
+        return [{"date": dt.date(2026, 7, 21), "open": 402.0, "high": 410.0, "low": 400.0, "close": 408.0, "volume": 12}]
+
+    monkeypatch.setattr(markets, "_fetch_futures_today_blocking", fake_futures_fetch)
+    app.dependency_overrides[get_session] = _prev_close_session(3000.0, 800.0, 400.0)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/index-tiles/live")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["kospi"]["volume_surge"] == {
+        "recent_minutes": 5,
+        "baseline_minutes": 30,
+        "recent_avg_volume": 400.0,
+        "baseline_avg_volume": 100.0,
+        "multiple": 4.0,
+    }
+    assert body["kosdaq"]["volume_surge"] == body["kospi"]["volume_surge"]
+    # futures는 이 기능과 무관한 별도 경로(_index_tile_futures_live) -> 필드 자체가 없어야 함.
+    assert "volume_surge" not in body["futures"]
 
 
 async def test_index_tiles_live_caches_within_ttl(monkeypatch):

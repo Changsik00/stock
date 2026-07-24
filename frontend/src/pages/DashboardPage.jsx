@@ -268,6 +268,16 @@ function scalpScoreLabel(score) {
   return `${sign}${score.toFixed(2)}`
 }
 
+// 시장 전체 거래량 급증 감지(PLAN.md §5.24) — index-tiles/live의 `volume_surge`
+// (compute_volume_surge, app/quant/volume_surge.py)를 그대로 문구로 옮긴다.
+// null/부재면 null을 반환해 호출부가 아예 줄을 렌더하지 않게 한다(turnover/
+// flow_net_value 등 부재 시 생략하는 이 파일의 기존 관례와 동일 — 0/placeholder로
+// 채우지 않는다). §5 원칙대로 "많다/적다" 관찰 서술만, 매매 판단 문구는 넣지 않는다.
+function volumeSurgeLabel(volumeSurge) {
+  if (!volumeSurge || typeof volumeSurge.multiple !== 'number') return null
+  return `거래량 평소(직전 ${volumeSurge.baseline_minutes}분) 대비 ${volumeSurge.multiple.toFixed(1)}배`
+}
+
 function scalpScoreBadgeLabel(score) {
   if (score === null || score === undefined) return null
   return `스코어 ${scalpScoreLabel(score)}`
@@ -2250,7 +2260,17 @@ export default function DashboardPage() {
   const indexTileOf = (key) => {
     const row = indexTilesLiveOpen ? indexTilesLive?.[key] : null
     if (row) {
-      return { close: row.close, changeRate: row.change_rate, date: row.date, time: row.time, isLive: true }
+      return {
+        close: row.close,
+        changeRate: row.change_rate,
+        date: row.date,
+        time: row.time,
+        isLive: true,
+        // §5.24: kospi/kosdaq만 갖는 필드(futures는 이 라우터가 아예 채우지
+        // 않음, _index_tile_futures_live는 별도 경로) — 없으면 undefined로
+        // 남아 volumeSurgeLabel이 null을 반환하고 아래 렌더가 줄을 생략한다.
+        volumeSurge: row.volume_surge,
+      }
     }
     const fallback = latestPriceOf(key)
     return fallback ? { ...fallback, isLive: false } : null
@@ -2632,6 +2652,7 @@ export default function DashboardPage() {
             latest?.isLive && latest.time && latest.time.length === 4
               ? `${latest.time.slice(0, 2)}:${latest.time.slice(2)}`
               : null
+          const volumeSurgeText = volumeSurgeLabel(latest?.volumeSurge)
           return (
             <KpiTile
               key={m.key}
@@ -2640,17 +2661,24 @@ export default function DashboardPage() {
               valueClass={latest ? rateClass(latest.changeRate) : ''}
               sub={
                 latest && (
-                  <span className={`kpi-tile-sub ${rateClass(latest.changeRate)}`}>
-                    {rateLabel(latest.changeRate)}
-                    {latest.isLive ? (
-                      <>
-                        {' · '}
-                        <Badge kind="live">장중</Badge>
-                      </>
-                    ) : (
-                      <StaleDate date={latest.date} baseDate={baseDate} prefix=" · " />
-                    )}
-                  </span>
+                  <>
+                    <span className={`kpi-tile-sub ${rateClass(latest.changeRate)}`}>
+                      {rateLabel(latest.changeRate)}
+                      {latest.isLive ? (
+                        <>
+                          {' · '}
+                          <Badge kind="live">장중</Badge>
+                        </>
+                      ) : (
+                        <StaleDate date={latest.date} baseDate={baseDate} prefix=" · " />
+                      )}
+                    </span>
+                    {/* §5.24 시장 전체 거래량 급증 감지 — 데이터 부족(장 시작 직후
+                        등)이면 volumeSurgeText가 null이라 아무것도 렌더하지 않는다
+                        (placeholder/0 금지, 이 파일 기존 관례). "사라/팔아라" 같은
+                        판단 문구 없이 관찰 서술만 표시(§5 원칙). */}
+                    {volumeSurgeText && <span className="toggle-hint">{volumeSurgeText}</span>}
+                  </>
                 )
               }
               title={

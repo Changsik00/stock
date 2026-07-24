@@ -1783,6 +1783,39 @@ volume)는 버리고 있었다 — 이걸 그대로 노출하면 새 소스 없�
 윈도우)으로 재검증하고 싶을 때 재사용 가능한 인프라로 §5.15의
 `regime_backtest.py`와 같은 위치에 둔다.
 
+### Phase 5.24 — 시장 전체 거래량 급증 감지 (2026-07-24 사용자 요청)
+
+사용자: "대체로 보면 수치로만 평가하니.. 방향성을 알지 못하는거 같아..
+지금 추세가 바닥을 치고 오르는건지 이런걸 못느끼겠어.. 아니면 반등
+하려고 거래대금(량)이 방금 많이 이 수치를 치고 올라왔다 라는거 같은것도
+못느껴.. 즉 거래량과 수급, 방향성, 시간 이런거 말야." 두 갈래(거래량 급증
+감지 / 바닥·반등 추세 감지)로 나눠 제안했고, 사용자가 "거래대금 급증
+감지"를 "시장 전체(코스피/코스닥)" 단위로 먼저 만들자고 확인. 추세 전환
+감지는 §5.15/§5.23처럼 반드시 백테스트를 먼저 거쳐야 하는 더 큰 작업이라
+이번 범위에서 제외.
+
+**설계**: 새 외부 호출/DB 테이블 불필요 — `routers/markets.py::
+_index_tile_from_intraday`가 이미 60초 잡(`_warm_index_tiles_live`,
+collectors/live_refresh.py)에서 ka20005 1분봉(`_warm_market_intraday`)을
+매번 가져와 `bars[-1].close`만 쓰고 나머지(각 봉의 `volume`, §5.21/§5.19와
+같은 "이미 fetch한 값 중 버려지던 필드 재사용" 패턴)는 버리고 있었다.
+`app/quant/volume_surge.py`(신규, flow_acceleration.py와 같은 위치·스타일)에
+순수 함수 `compute_volume_surge(bars, recent_minutes=5, baseline_minutes=30)`
+추가 — 최근 5분 평균 분당 거래량이 그 직전 30분 평균 분당 거래량 대비 몇
+배인지 계산(§5.17 flow_acceleration이 이미 쓰는 "최근 30분 vs 그 이전"
+윈도우 관례와 통일 — 새 윈도우 개념 발명 안 함). bars가 35개(5+30)보다
+적으면(장 시작 직후 등) None(§5.17과 동일한 "데이터 부족 시 None" 관례).
+`_index_tile_from_intraday`가 이 값을 계산해 index-tiles/live 응답에
+`volume_surge` 필드로 얹는다. 프런트는 코스피/코스닥 지수 타일에 "거래량
+평소(직전 30분) 대비 N배" 문구를 추가한다 — §5 원칙 그대로 "많다/적다"
+관찰 서술만, "그래서 사라/팔아라" 언어 없음.
+
+| # | 작업 | 내용 | 완료 기준 |
+|---|---|---|---|
+| 5.24-1 ✅ | 거래량 급증 계산 함수 | `app/quant/volume_surge.py` 신규 — `compute_volume_surge(bars, recent_minutes=5, baseline_minutes=30)` 순수 함수(DB 무관, 단위테스트 대상) | **완료(2026-07-24)** — 단위테스트 7개(정상 계산/데이터부족 None/경계값/베이스라인 0 방어/volume 누락 방어), 480 passed |
+| 5.24-2 ✅ | index-tiles/live 반영 | `_index_tile_from_intraday`가 이미 갖고 있는 `bars`로 `compute_volume_surge` 호출, 응답에 `volume_surge: {recent_minutes, baseline_minutes, recent_avg_volume, baseline_avg_volume, multiple}` \| null 추가 | **완료(2026-07-24)** — curl로 장중 실데이터 확인: 코스피 0.75배(평소보다 감소), 코스닥 0.71배, futures는 이 필드 자체가 없음(별도 경로, 영향 없음) |
+| 5.24-3 ✅ | 프런트 반영 | 코스피/코스닥 지수 타일에 "거래량 평소(직전 30분) 대비 N배" 표시(관찰 서술만) | **완료(2026-07-24)** — 코드 리뷰 + `vite build` 클린 확인(브라우저 자동화 미가용) |
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 - **계획·리뷰는 메인 세션, 코딩은 Sonnet 서브에이전트**: 위 표의 작업(1-1, 1-2, …)
