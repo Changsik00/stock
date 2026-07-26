@@ -26,7 +26,7 @@ from app.clients import naver_index
 from app.clients.kiwoom import KiwoomAPIError
 from app.db import async_session_factory, engine
 from app.main import app
-from app.models import Stock, StockFlow, StockOhlcv, ValueRank
+from app.models import ProgramTrade, Stock, StockFlow, StockOhlcv, ValueRank
 from app.routers import stocks
 
 TEST_CODE = "999999"
@@ -53,6 +53,7 @@ async def _clear_test_rows() -> None:
     async with async_session_factory() as session:
         await session.execute(delete(StockFlow).where(StockFlow.code == TEST_CODE))
         await session.execute(delete(StockOhlcv).where(StockOhlcv.code == TEST_CODE))
+        await session.execute(delete(ProgramTrade).where(ProgramTrade.code == TEST_CODE))
         await session.execute(delete(ValueRank).where(ValueRank.code == TEST_CODE))
         await session.execute(delete(Stock).where(Stock.code == TEST_CODE))
         await session.commit()
@@ -102,7 +103,17 @@ def _fake_ka10059_response(d0: dt.date, d1: dt.date) -> dict:
     }
 
 
-def _make_fake_kiwoom_client(calls: dict, response_or_exc):
+# 종목별 프로그램매매(ka90013, PLAN.md §5.29-3) 기본 fake 응답 — 위 ka10059 fake와
+# 독립적으로 성공 처리해, program_trade를 검증하지 않는 기존 flow 테스트들이
+# 굳이 program_trade_response_or_exc를 매번 넘기지 않아도 meta에 엉뚱한
+# program_trade_error가 섞이지 않게 한다.
+_EMPTY_PROGRAM_TRADE_RESPONSE = {"return_code": 0, "stk_daly_prm_trde_trnsn": []}
+
+
+def _make_fake_kiwoom_client(calls: dict, response_or_exc, program_trade_response_or_exc=None):
+    if program_trade_response_or_exc is None:
+        program_trade_response_or_exc = _EMPTY_PROGRAM_TRADE_RESPONSE
+
     class _FakeKiwoomClient:
         def __init__(self, *args, **kwargs) -> None:
             pass
@@ -119,6 +130,17 @@ def _make_fake_kiwoom_client(calls: dict, response_or_exc):
             if isinstance(response_or_exc, Exception):
                 raise response_or_exc
             return response_or_exc, {"cont-yn": "N", "next-key": "", "api-id": "ka10059"}
+
+        async def stock_program_trading(self, code: str, **kwargs):
+            calls["program_trade_n"] = calls.get("program_trade_n", 0) + 1
+            calls["program_trade_code"] = code
+            if isinstance(program_trade_response_or_exc, Exception):
+                raise program_trade_response_or_exc
+            return program_trade_response_or_exc, {
+                "cont-yn": "N",
+                "next-key": "",
+                "api-id": "ka90013",
+            }
 
     return _FakeKiwoomClient
 
@@ -302,6 +324,121 @@ async def test_series_first_request_fetches_and_caches_then_second_hits_cache(
     assert flow_calls["n"] == 1  # unchanged -> cache hit
     assert resp2.json()["prices"] == body1["prices"]
     assert resp2.json()["flows"] == body1["flows"]
+
+
+# -- 종목별 프로그램매매 (ka90013, PLAN.md §5.29-3) -------------------------------
+
+
+def _fake_ka90013_response(d0: dt.date, d1: dt.date) -> dict:
+    """실측(2026-07-26, 005930) 응답 모양 그대로 — 차익/비차익 분리 없이
+    prm_netprps_amt 하나만, 음수는 이중부호("--...")로 인코딩된다."""
+    return {
+        "return_code": 0,
+        "stk_daly_prm_trde_trnsn": [
+            {"dt": d0.strftime("%Y%m%d"), "prm_netprps_amt": "--676861"},
+            {"dt": d1.strftime("%Y%m%d"), "prm_netprps_amt": "+182002"},
+        ],
+    }
+
+
+async def test_series_includes_program_trade_and_second_request_hits_cache(
+    monkeypatch, seeded_stock
+):
+    """§5.29-3 완료 기준: /{code}/series 응답에 program_trade가 포함되고, DB에
+    이미 최신 거래일 캐시가 있으면(장 마감) 두 번째 요청은 ka90013을 다시
+    부르지 않는다 — _ensure_flows_cached와 동일한 캐시 계약(위 캐시 테스트와
+    같은 구조)."""
+    monkeypatch.setattr(stocks, "is_nxt_closed", lambda now_kst: True)
+
+    target_end = stocks._latest_trading_day()
+    prev_day = target_end - dt.timedelta(days=1)
+
+    def fake_fetch_stock_series(code, start, end):
+        return [
+            {
+                "date": target_end,
+                "open": 100.0,
+                "high": 110.0,
+                "low": 90.0,
+                "close": 105.0,
+                "volume": 1000,
+            }
+        ]
+
+    monkeypatch.setattr(stocks.naver_index, "fetch_stock_series", fake_fetch_stock_series)
+
+    calls: dict = {}
+    fake_flow_response = _fake_ka10059_response(target_end, prev_day)
+    fake_program_trade_response = _fake_ka90013_response(target_end, prev_day)
+    monkeypatch.setattr(
+        stocks,
+        "KiwoomClient",
+        _make_fake_kiwoom_client(calls, fake_flow_response, fake_program_trade_response),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp1 = await client.get(f"/api/stocks/{TEST_CODE}/series", params={"days": 30})
+
+    assert resp1.status_code == 200
+    body1 = resp1.json()
+    assert calls["program_trade_n"] == 1
+    assert calls["program_trade_code"] == TEST_CODE
+    assert "program_trade_error" not in body1["meta"]
+
+    by_date = {r["date"]: r for r in body1["program_trade"]}
+    assert by_date[target_end.strftime("%Y%m%d")]["total_net"] == -676861
+    assert by_date[prev_day.strftime("%Y%m%d")]["total_net"] == 182002
+    # ka90013엔 차익/비차익 분리가 없다 — 항상 None으로 내려가야 한다.
+    assert by_date[target_end.strftime("%Y%m%d")]["arb_net"] is None
+    assert by_date[target_end.strftime("%Y%m%d")]["non_arb_net"] is None
+
+    # -- 두 번째 요청: DB 캐시가 최신(장 마감)이므로 ka90013을 다시 부르지 않는다 --
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp2 = await client.get(f"/api/stocks/{TEST_CODE}/series", params={"days": 30})
+
+    assert resp2.status_code == 200
+    assert calls["program_trade_n"] == 1  # unchanged -> cache hit
+    assert resp2.json()["program_trade"] == body1["program_trade"]
+
+
+async def test_series_program_trade_fetch_failure_is_partial_success_200(
+    monkeypatch, seeded_stock
+):
+    """수급(flows_error)과 동일한 부분 성공 정책 — 프로그램매매 조회만 실패해도
+    캔들/수급은 그대로 200, program_trade는 빈 리스트 + meta.program_trade_error."""
+    target_end = stocks._latest_trading_day()
+
+    def fake_fetch_stock_series(code, start, end):
+        return [
+            {
+                "date": target_end,
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "volume": 1,
+            }
+        ]
+
+    monkeypatch.setattr(stocks.naver_index, "fetch_stock_series", fake_fetch_stock_series)
+    monkeypatch.setattr(
+        stocks,
+        "KiwoomClient",
+        _make_fake_kiwoom_client(
+            {},
+            _fake_ka10059_response(target_end, target_end),
+            KiwoomAPIError(3, "존재하지 않는 종목코드입니다"),
+        ),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/stocks/{TEST_CODE}/series")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["prices"]) == 1  # 캔들은 정상
+    assert body["program_trade"] == []
+    assert "program_trade_error" in body["meta"]
 
 
 async def test_series_market_open_still_refetches_even_with_todays_row_cached(

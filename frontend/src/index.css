@@ -1352,6 +1352,54 @@ header h1 {
   font-size: 12px;
 }
 
+/* 종목별 프로그램매매 섹션(PLAN.md §5.29-4) — 위 ETF 비중 변화 섹션과 동일한
+   레이아웃(행 리스트)을 재사용한다. 값 색은 등락 관례(상승=빨강 --up/하락=파랑
+   --down)를 순매수(+)=up, 순매도(-)=down에 그대로 적용한다. */
+.stock-detail-program-trade {
+  margin-top: 16px;
+}
+
+.stock-detail-program-trade-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.stock-detail-program-trade-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.stock-detail-program-trade-date {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.stock-detail-program-trade-value {
+  flex: none;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.stock-detail-program-trade-value.up {
+  color: var(--up);
+}
+
+.stock-detail-program-trade-value.down {
+  color: var(--down);
+}
+
 .etf-weight-event.up {
   color: var(--up);
 }

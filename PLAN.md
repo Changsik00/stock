@@ -2014,6 +2014,39 @@ EOD 배치가 `_upsert_stock_master`의 `on_conflict_do_update`로 정확한
 | 5.28-1 ✅ | 종목상세 stub 마스터 upsert | `routers/stocks.py::stock_series`에 `name`/`market`/`is_etf` 옵션 쿼리파라미터 추가, `stock is None`이면 `_ensure_candles_cached` 호출 전 `stocks`에 stub 행 upsert(ON CONFLICT DO NOTHING — 기존 배치 데이터를 덮어쓰지 않는다) | **완료(2026-07-24)** — 0156T0 재현 curl 결과 502→200(캔들/수급 정상), `stocks` 테이블에 `에이치엘지노믹스`/`KOSDAQ` 정확히 기록 확인, 520 passed(신규 4개: 힌트 있음/없음/기존 행 보존/DO NOTHING 단위테스트) |
 | 5.28-2 ✅ | 프런트 힌트 전달 | `fetchStockSeries`가 옵션 인자로 name/market/is_etf를 받아 쿼리파라미터로 전달, `StockDetailModal`이 `initial` prop 값을 그대로 넘긴다 | **완료(2026-07-24)** — 코드 리뷰 + `vite build` 클린 확인 |
 
+### Phase 5.29 — 프로그램매매 비차익 노출 + 종목별 프로그램매매 (2026-07-26, 외부 강의 검토)
+
+사용자가 yt-dlp로 파생상품 전문가 강의(미래에셋 최창규 이사, 외국인
+선물수급으로 시황 예측)를 확인해보라고 요청 → 검토 결과 3가지 아이디어
+중 "순서대로 모두 적용"하기로 확인. 첫 번째: 프로그램매매(차익/비차익
+거래) 데이터 활용.
+
+**실측 확인(코드 조사)**: 시장 단위 프로그램매매(`macro_series`의
+`prog_arb_kospi`/`prog_arb_kosdaq`/`prog_nonarb_kospi`/`prog_nonarb_kosdaq`,
+`collectors/program_flow.py`, ka90010, PLAN.md §4.5-4)는 **이미 전부
+수집되고 있다.** 그런데 프런트(`DashboardPage.jsx`)는 `PROGRAM_ARB_IDS`로
+**차익거래(prog_arb_*)만** 타일로 보여주고 있고, **비차익거래
+(prog_nonarb_*)는 DB에 매일 쌓이기만 할 뿐 화면 어디에도 없다.** 강의의
+핵심 조언이 정확히 "비차익거래(대량 바스켓 매매)가 펀드 리밸런싱·ETF
+설정/환매 등 큰손 움직임을 가장 잘 보여주는 지표"라는 것 — 이미 수집
+중인 데이터를 그대로 노출만 하면 되는 손쉬운 개선.
+
+**종목별 프로그램매매**는 완전히 새로 만들어야 한다 — `models.py`의
+`ProgramTrade`(code, date, arb_net, non_arb_net, total_net, 키움 ka90013
+용도로 스키마만 미리 만들어 둠)는 수집기도 라우터도 프런트도 전혀 없어
+**만들어놓고 방치된 상태**였다(실측 확인: `grep -rln "ProgramTrade"
+backend/app`이 models.py 하나만 나옴). `ka90013`은 아직 실호출로 확정된
+적이 없는 TR이라(ka90010과 달리 `clients/kiwoom.py`에 편의 메서드 없음)
+먼저 실호출로 URL·파라미터·응답 스키마를 확정해야 한다(이 프로젝트의
+기존 관례 — `ka10051`/`ka20005` 등도 전부 이렇게 확정한 뒤 구현).
+
+| # | 작업 | 내용 | 완료 기준 |
+|---|---|---|---|
+| 5.29-1 ✅ | 비차익거래 프런트 노출 | `DashboardPage.jsx`에 `PROGRAM_NONARB_IDS = ['prog_nonarb_kospi', 'prog_nonarb_kosdaq']` 추가, 기존 차익 타일과 나란히 "프로그램 비차익 순매수" 타일(같은 macro/series 패턴 재사용, 새 API 호출 없음 — 이미 fetch 중인 macro series에서 뽑아 쓴다) | **완료(2026-07-26)** — `fetchMacroSeries` 호출을 `PROGRAM_ARB_IDS`+`PROGRAM_NONARB_IDS` 통합 1콜로 확장(새 네트워크 호출 추가 없음), `programNonarbKospi`/`Kosdaq`/`Date`를 `programArb*`와 동일한 패턴으로 파생. curl로 `/api/macro/series?ids=prog_arb_kospi,prog_arb_kosdaq,prog_nonarb_kospi,prog_nonarb_kosdaq&days=5` 교차 확인 — 2026-07-24 KOSPI 비차익 -3,593,288/KOSDAQ -215,314(백만원) 등 실데이터 확인. `vite build` 클린 |
+| 5.29-2 ✅ | ka90013 실호출 확정 | `clients/kiwoom.py`에 ka90013(종목별프로그램매매 추정, 정확한 TR명/URL/파라미터는 실호출로 확정) 편의 메서드 추가 — Github `younghwan91/kiwoom-rest-api` 참고 + 실전 키로 실호출해 URL/파라미터/응답 스키마 확정(이 프로젝트 기존 관례) | **완료(2026-07-26)** — GitHub 소스에서 TR 정체 확인(`program_trading_by_stock_day`, 종목일별프로그램매매추이요청, `/api/dostk/mrkcond`). 실호출(총 약 12건)로 URL/파라미터/응답 스키마 전부 확정, `stock_program_trading` 편의 메서드 추가, `clients/kiwoom.py` 모듈 docstring에 "ka90013 실측 확정" 절 기록. **핵심 발견(중요한 스코프 축소)**: 이 TR은 ka90010(시장 단위)과 달리 **차익/비차익 분리 필드가 없다** — `prm_netprps_amt`(순매수 총계) 하나만 준다. `mrkt_tp`/`stex_tp` 파라미터는 실측상 결과에 영향이 전혀 없었고(4종/3종 조합 전부 바이트 단위 동일 응답), 음수는 `"--676861"`처럼 부호가 두 번 겹치는 인코딩 버그가 있다(전담 파서로 처리) |
+| 5.29-3 ✅ | 종목별 프로그램매매 수집기 + 라우터 | `collectors/program_stock.py` 신규(REGISTRY 등록) — ka90013을 후보군(예: value-rank 상위) 또는 종목상세 온디맨드로 조회해 `program_trade`에 upsert. `routers/stocks.py`의 종목상세 응답에 프로그램매매 필드 추가 | **완료(2026-07-26) — 설계를 온디맨드로 변경(REGISTRY 미등록, 근거는 아래)**. `collectors/program_stock.py`는 순수 파싱 함수(`parse_program_trade_rows`, `_parse_signed_amount`)만 제공 — DB/스케줄러 무관. `routers/stocks.py`에 `_ensure_program_trade_cached`/`_read_program_trade`를 `_ensure_flows_cached`/`_read_flows`(ka10059)와 완전히 동일한 온디맨드+DB캐시 패턴으로 추가해 `stock_series`에 배선(`program_trade` 필드, 실패 시 `meta.program_trade_error`로 부분 성공). **온디맨드 vs 스윕 잡 판단**: `ProgramTrade`가 이미 `stock_flow`와 동일한 (code, date) PK 모양이라 `_ensure_flows_cached`가 이미 푼 문제를 그대로 재사용하는 게 새 `live_refresh.py` 스윕 잡을 또 만드는 것보다 단순했고, 아직 시장 전체 스크리닝(랭킹) 소비처가 없어(§5.29-4는 종목상세 섹션 하나뿐) 스윕으로 승격할 이유가 아직 없다 — 나중에 "프로그램매매 상위 종목" 같은 스크리닝이 필요해지면 그때 승격 검토. ka90013이 차익/비차익 분리를 안 줘서 `ProgramTrade.arb_net`/`non_arb_net`는 항상 `None`, `total_net`만 채운다(스키마 변경 안 함). 실 DB로 검증: 삼성전자(005930) curl 결과 `program_trade` 20행 적재/응답 확인(2026-07-24 total_net=-676861백만원 등, DB `select`로 교차 확인), 신규 단위/라우터 테스트 10개 추가 |
+| 5.29-4 ✅ | 프런트 반영 | 종목상세 모달에 "프로그램매매(차익/비차익)" 섹션 추가 | **완료(2026-07-26)** — `StockDetailModal.jsx`에 `ProgramTradeSection` 추가(최근 10거래일 `total_net` 리스트, 등락 색 규칙 적용). ka90013엔 차익/비차익 분리가 없어(§5.29-2) 섹션 제목은 "프로그램매매"로 두고 toggle-hint로 "차익/비차익 세부 구분 없이 합계만 제공, 대시보드 타일과는 별개 소스"를 명시(정직한 표시 원칙 — 있지도 않은 차익/비차익 분리를 있는 것처럼 보이지 않게). 데이터 없으면 섹션 자체 생략(EtfWeightChangeSection과 동일 관례). 코드 리뷰 + `vite build` 클린 확인 |
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 - **계획·리뷰는 메인 세션, 코딩은 Sonnet 서브에이전트**: 위 표의 작업(1-1, 1-2, …)

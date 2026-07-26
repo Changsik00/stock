@@ -146,6 +146,12 @@ const INTRADAY_DAYS_OPTIONS = [
 // 합산해서 "프로그램 차익 순매수" 타일 하나로 보여준다(신용융자 타일의 creditLoanSum과
 // 동일한 관례).
 const PROGRAM_ARB_IDS = ['prog_arb_kospi', 'prog_arb_kosdaq']
+// 프로그램매매 비차익 순매수(macro_series prog_nonarb_*, PLAN.md §5.29-1) — 이미
+// program_flow.py(ka90010)가 매일 수집해 DB에 쌓아두고 있었는데 프런트에만 노출이
+// 안 돼 있던 것을 뒤늦게 붙인다. 외부 강의(파생상품 전문가, 최창규 이사) 검토 결과
+// "비차익거래(대량 바스켓 매매)가 차익거래보다 펀드 리밸런싱·ETF 설정/환매 등 큰손
+// 움직임을 더 잘 보여주는 지표"라는 조언에 따라 차익 타일과 나란히 노출한다.
+const PROGRAM_NONARB_IDS = ['prog_nonarb_kospi', 'prog_nonarb_kosdaq']
 // 만기 임박 시그널 배지 기준(D-n 이내, PLAN.md §4.5-5 "만기 D-3 이내").
 const EXPIRY_SOON_D_DAY = 3
 const GROUP_TYPE_OPTIONS = [
@@ -2226,11 +2232,13 @@ export default function DashboardPage() {
     }
   }, [])
 
-  // 프로그램매매 차익 순매수(PLAN.md §4.5-4) — 코스피+코스닥 두 시리즈를 신용융자
-  // 타일(creditLoanSum)과 동일하게 합산해서 보여준다.
+  // 프로그램매매 차익/비차익 순매수(PLAN.md §4.5-4, §5.29-1) — 코스피+코스닥 두
+  // 시리즈씩(차익 2개 + 비차익 2개) 신용융자 타일(creditLoanSum)과 동일하게 합산해서
+  // 보여준다. 비차익은 이미 DB에 매일 수집되던 데이터라 새 네트워크 호출을 늘리지
+  // 않고 같은 fetchMacroSeries 호출의 ids 목록에 얹어 한 번에 받아온다.
   useEffect(() => {
     let cancelled = false
-    fetchMacroSeries(PROGRAM_ARB_IDS, FOREIGN_POSITION_TILE_DAYS)
+    fetchMacroSeries([...PROGRAM_ARB_IDS, ...PROGRAM_NONARB_IDS], FOREIGN_POSITION_TILE_DAYS)
       .then((body) => {
         if (!cancelled) setProgramFlow(body.series || {})
       })
@@ -2553,6 +2561,16 @@ export default function DashboardPage() {
     programArbKospi === null && programArbKosdaq === null ? null : (programArbKospi ?? 0) + (programArbKosdaq ?? 0)
   const programArbDate = latestOf(programDate('prog_arb_kospi'), programDate('prog_arb_kosdaq'))
 
+  // 프로그램 비차익 순매수(PLAN.md §5.29-1) — 차익 타일과 동일한 관례(코스피+코스닥
+  // 합산). programFlow 상태는 위 fetch에서 차익/비차익 4개 series를 이미 함께 받아온다.
+  const programNonarbKospi = programLatest('prog_nonarb_kospi')
+  const programNonarbKosdaq = programLatest('prog_nonarb_kosdaq')
+  const programNonarbLatest =
+    programNonarbKospi === null && programNonarbKosdaq === null
+      ? null
+      : (programNonarbKospi ?? 0) + (programNonarbKosdaq ?? 0)
+  const programNonarbDate = latestOf(programDate('prog_nonarb_kospi'), programDate('prog_nonarb_kosdaq'))
+
   // 시그널 배지(PLAN.md §4.5-5, 중립 표현 — "함정" 단정 금지) — ① 외인 현물·선물 방향
   // 대치, ② 만기 D-3 이내. 값이 없거나(0 포함) 한쪽이 없으면 판단하지 않는다(오검
   // 방지 — Math.sign(0)===0이라 자연히 걸러진다).
@@ -2610,7 +2628,8 @@ export default function DashboardPage() {
     foreignFuturesRow?.date,
     basisLatest?.date,
     derivativeLatest?.date,
-    programArbDate
+    programArbDate,
+    programNonarbDate
   )
 
   // 업종/테마 트리맵 — groupItems(EOD, value/market_sum 포함)에 groupLive(1분 라이브,
@@ -3004,6 +3023,19 @@ export default function DashboardPage() {
             <span className="kpi-tile-sub">
               코스피+코스닥
               <StaleDate date={programArbDate} baseDate={baseDate} prefix=" · " />
+            </span>
+          }
+          title="코스피+코스닥 합계"
+          onClick={() => setModal({ type: 'foreignPosition', title: '외인 현물 vs 선물 · 베이시스' })}
+        />
+        <KpiTile
+          label="프로그램 비차익 순매수"
+          value={programNonarbLatest !== null ? eokLabel(programNonarbLatest) : '…'}
+          valueClass={programNonarbLatest === null ? '' : programNonarbLatest >= 0 ? 'up' : 'down'}
+          sub={
+            <span className="kpi-tile-sub">
+              코스피+코스닥
+              <StaleDate date={programNonarbDate} baseDate={baseDate} prefix=" · " />
             </span>
           }
           title="코스피+코스닥 합계"

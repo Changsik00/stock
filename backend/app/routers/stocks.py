@@ -3,10 +3,13 @@
 - ``GET /api/stocks/search``: stocks 마스터(DB) LIKE 검색 — 외부 호출 없음, DB만
   읽는다(§5.4 "DB 캐싱 우선" — 마스터는 collectors/value_rank.py가 매일 갱신).
 - ``GET /api/stocks/{code}/series``: 캔들(네이버 fchart 종목 일봉) + 투자자별 수급
-  (키움 ka10059) — 둘 다 온디맨드 + DB 캐시(§5.4 "온디맨드 보강": 미리 수집 못 하는
-  것만 실시간 호출). 캔들은 stock_ohlcv, 수급은 stock_flow에 캐시하고, 이미 최신
-  거래일 데이터가 있으면 외부 호출을 생략한다 — 같은 code를 반복 요청해도 두
-  번째부터는 DB만 읽는다.
+  (키움 ka10059) + 종목별 프로그램매매(키움 ka90013, PLAN.md §5.29) — 셋 다
+  온디맨드 + DB 캐시(§5.4 "온디맨드 보강": 미리 수집 못 하는 것만 실시간 호출).
+  캔들은 stock_ohlcv, 수급은 stock_flow, 프로그램매매는 program_trade에 캐시하고,
+  이미 최신 거래일 데이터가 있으면 외부 호출을 생략한다 — 같은 code를 반복
+  요청해도 두 번째부터는 DB만 읽는다. ka90013은 차익/비차익 분리를 주지 않아
+  (collectors/program_stock.py 모듈 docstring 참고) 응답의 `program_trade`
+  행은 `total_net`만 채워지고 `arb_net`/`non_arb_net`는 항상 null이다.
 - ``GET /api/stocks/{code}/whale``: Phase 4+ 예정, 아직 501 스텁.
 
 캔들/수급 실패 처리(§5.3 에러 규약 "외부 API 실패는 502 + {source, detail}"을
@@ -16,6 +19,8 @@
 - 수급(키움) 실패 → 부분 성공 허용: flows는 빈 dict로 두고 200 반환, 실패 사유는
   응답의 ``meta.flows_error``에 남긴다(키움 앱키 미설정/일시 장애가 캔들 조회까지
   막지 않도록).
+- 프로그램매매(키움) 실패 → 수급과 동일한 부분 성공 정책: program_trade는 빈
+  리스트로 두고 200 반환, 실패 사유는 ``meta.program_trade_error``에 남긴다.
 
 캐시 신선도 판정은 "가장 최근 평일(월~금)" 휴리스틱을 쓴다(``_latest_trading_day``)
 — 공휴일은 반영하지 않는다. 이 휴리스틱만 쓰면 공휴일(평일인데 휴장)에는 그
@@ -48,9 +53,10 @@ from ..clients.kiwoom import (
     KiwoomClient,
     parse_minute_chart_rows,
 )
+from ..collectors.program_stock import parse_program_trade_rows
 from ..db import get_session
 from ..market_hours import KST, is_nxt_closed
-from ..models import Stock, StockFlow, StockOhlcv, ValueRank
+from ..models import ProgramTrade, Stock, StockFlow, StockOhlcv, ValueRank
 from ..quant.signals import (
     compute_vwap,
     detect_breakout,
@@ -74,6 +80,13 @@ MAX_SEARCH_LIMIT = 100
 # (cont-yn/next-key)가 필요 없다 — 받은 뒤 이 한도로 잘라서 upsert한다.
 FLOW_BACKFILL_DAYS = 90
 
+# 종목별 프로그램매매(ka90013) 백필 한도 — PLAN.md §5.29-3. ka90013은 ka10059와
+# 달리 한 콜에 정확히 20거래일(약 1개월)만 온다(collectors/program_stock.py
+# 모듈 docstring, clients/kiwoom.py "ka90013 실측 확정" 절 참고) — 90일 컷오프를
+# 둬도 실제로는 항상 20거래일 전부가 그대로 들어온다(자르는 효과 없음, 다른
+# 종목별 데이터와 동일한 관례를 유지하기 위해 형식상 둔다).
+PROGRAM_TRADE_BACKFILL_DAYS = 90
+
 # 캔들 최초 백필 시 거래일 수 -> 달력일 버퍼(주말 비율 5/7에 공휴일 여유를 더함).
 _CANDLE_CALENDAR_BUFFER_RATIO = 1.6
 _CANDLE_CALENDAR_BUFFER_MIN_DAYS = 10
@@ -85,6 +98,7 @@ _CANDLE_CALENDAR_BUFFER_MIN_DAYS = 10
 _EXTERNAL_FETCH_COOLDOWN_SECONDS = 60.0
 _candle_fetch_attempted_at: dict[str, float] = {}
 _flow_fetch_attempted_at: dict[str, float] = {}
+_program_trade_fetch_attempted_at: dict[str, float] = {}
 
 
 def _today_kst() -> dt.date:
@@ -414,6 +428,95 @@ async def _read_flows(session: AsyncSession, code: str, days: int) -> dict[str, 
     return flows
 
 
+async def _upsert_program_trade_rows(session: AsyncSession, rows: list[dict]) -> int:
+    count = 0
+    for row in rows:
+        stmt = pg_insert(ProgramTrade).values(
+            code=row["code"],
+            date=row["date"],
+            arb_net=row["arb_net"],
+            non_arb_net=row["non_arb_net"],
+            total_net=row["total_net"],
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[ProgramTrade.code, ProgramTrade.date],
+            set_={
+                "arb_net": stmt.excluded.arb_net,
+                "non_arb_net": stmt.excluded.non_arb_net,
+                "total_net": stmt.excluded.total_net,
+            },
+        )
+        await session.execute(stmt)
+        count += 1
+    return count
+
+
+async def _ensure_program_trade_cached(session: AsyncSession, code: str) -> None:
+    """program_trade에 code의 최신 거래일 프로그램매매가 이미 있고 **장 마감**이면
+    외부 호출을 생략한다 — `_ensure_flows_cached`(종목별 수급, ka10059)와 완전히
+    동일한 온디맨드+DB캐시 철학(collectors/program_stock.py 모듈 docstring
+    "REGISTRY에 등록하지 않는다" 절 참고 — 새 스윕 잡 대신 이 패턴을 재사용하기로
+    한 판단 근거).
+
+    ka90013은 한 콜에 정확히 20거래일(약 1개월)만 오므로(clients/kiwoom.py
+    "ka90013 실측 확정" 절) `PROGRAM_TRADE_BACKFILL_DAYS`로 자를 필요가 실질적으로
+    없지만, `_ensure_flows_cached`와 동일한 형태를 유지하기 위해 그대로 둔다.
+
+    Raises: KiwoomAuthError/KiwoomAPIError/httpx 예외를 그대로 전파한다 — 호출측이
+    "프로그램매매만 실패면 200 + program_trade 빈 채로"로 흡수한다(flows_error와
+    동일한 정책, meta.program_trade_error).
+    """
+    target_end = _latest_trading_day()
+    existing_max = (
+        await session.execute(
+            select(func.max(ProgramTrade.date)).where(ProgramTrade.code == code)
+        )
+    ).scalar_one_or_none()
+
+    market_open = not is_nxt_closed(dt.datetime.now(KST))
+
+    if existing_max is not None and existing_max >= target_end and not market_open:
+        return  # 장 마감 확정치 — 캐시 히트
+
+    if existing_max is not None:
+        now = time.monotonic()
+        last_attempt = _program_trade_fetch_attempted_at.get(code)
+        if last_attempt is not None and (now - last_attempt) < _EXTERNAL_FETCH_COOLDOWN_SECONDS:
+            return  # 최근에 이미 재시도했음 — 있는 캐시로 서빙
+
+    _program_trade_fetch_attempted_at[code] = time.monotonic()
+    async with KiwoomClient() as client:
+        data, _headers = await client.stock_program_trading(code)
+
+    rows = parse_program_trade_rows(data, code)
+    cutoff = target_end - dt.timedelta(days=PROGRAM_TRADE_BACKFILL_DAYS)
+    rows = [r for r in rows if r["date"] >= cutoff]
+    await _upsert_program_trade_rows(session, rows)
+
+
+async def _read_program_trade(session: AsyncSession, code: str, days: int) -> list[dict]:
+    """[{date, arb_net, non_arb_net, total_net}, ...] (날짜 오름차순) — ka90013이
+    차익/비차익 분리를 주지 않아(모듈 docstring 참고) arb_net/non_arb_net는 항상
+    None이고 total_net만 실값이다. 데이터가 전혀 없으면 빈 리스트(프런트가 섹션
+    자체를 생략하는 근거로 쓴다)."""
+    since = _latest_trading_day() - dt.timedelta(days=days)
+    stmt = (
+        select(ProgramTrade)
+        .where(ProgramTrade.code == code, ProgramTrade.date >= since)
+        .order_by(ProgramTrade.date)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return [
+        {
+            "date": r.date.strftime("%Y%m%d"),
+            "arb_net": r.arb_net,
+            "non_arb_net": r.non_arb_net,
+            "total_net": r.total_net,
+        }
+        for r in rows
+    ]
+
+
 async def _ensure_stock_master_stub(
     session: AsyncSession,
     code: str,
@@ -559,6 +662,20 @@ async def stock_series(
     flows = await _read_flows(session, code, days)
     turnover = await _read_turnover(session, code)
 
+    try:
+        await _ensure_program_trade_cached(session, code)
+        await session.commit()
+    except (KiwoomAuthError, KiwoomAPIError) as e:
+        await session.rollback()
+        logger.warning("stocks: %s 프로그램매매 조회 실패(키움), program_trade 빈 채로 반환: %s", code, e)
+        meta["program_trade_error"] = str(e)[:300]
+    except Exception as e:  # noqa: BLE001 - httpx 등 네트워크 계열 예외 포함
+        await session.rollback()
+        logger.warning("stocks: %s 프로그램매매 조회 실패, program_trade 빈 채로 반환: %s", code, e)
+        meta["program_trade_error"] = str(e)[:300]
+
+    program_trade = await _read_program_trade(session, code, days)
+
     return {
         "code": code,
         "name": stock_name,
@@ -569,6 +686,7 @@ async def stock_series(
         "flows": flows,
         "meta": meta,
         "turnover": turnover,
+        "program_trade": program_trade,
     }
 
 

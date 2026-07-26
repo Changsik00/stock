@@ -292,6 +292,65 @@ inds_cd 001/101 기준, `.env` 실전 키, 총 호출 수 약 30건).
 `routers/markets.py`의 `GET /api/markets/index-tiles/live`)는 반드시 100으로
 나눠야 한다 — 해당 라우터의 `_KA20005_PRICE_SCALE` 상수 참고. 코스피/코스닥 둘 다
 동일하게 적용된다(개별 종목은 원화 정수값이라 이 배율이 없다).
+
+## ka90013(종목일별프로그램매매추이요청) 실측 확정 (2026-07-26, PLAN.md §5.29)
+
+`models.py`의 `ProgramTrade`(code, date, arb_net, non_arb_net, total_net)는
+ka90013용으로 스키마만 미리 만들어 둔 채 수집기/라우터/프런트가 전혀 없이
+방치돼 있었다(PLAN.md §5.29 발견). 실전 키로 `/api/dostk/mrkcond`에 직접
+실호출해 URL·파라미터·응답 스키마를 아래처럼 확정했다(probe 총 호출 수
+약 12건 — 절제된 수준).
+
+- **TR id 발견 경로**: GitHub `younghwan91/kiwoom-rest-api`의
+  `src/kiwoom_rest_api/domestic/market.py` — `program_trading_by_stock_day()`
+  메서드가 `RESOURCE_URL="/api/dostk/mrkcond"`(ka90010/ka10063/ka10066와 같은
+  카테고리) 아래 `ka90013`을 등록해 둠. `tests/integration_api_smoke.py`의
+  `PARAMS["ka90013"] = {"stk_cd": STK, "date": TODAY, "amt_qty_tp": "1",
+  "mrkt_tp": "P00101"}`를 그대로 실호출해 확인.
+- **URL/파라미터**: `POST /api/dostk/mrkcond`, body `{"stk_cd": "005930",
+  "date": "20260726", "amt_qty_tp": "1", "mrkt_tp": "P00101"}` → 200 +
+  `return_code=0`. `mrkt_tp`를 `"P00101"`/`"P001_AL01"`/`"P10102"`/
+  `"P101_AL02"` 4종으로 바꿔가며 호출해도, `stex_tp`를 "1"/"2"/"3"으로
+  추가해도(요청 스키마엔 없지만 거부되지 않음) **전부 바이트 단위로 완전히
+  동일한 응답**이 돌아왔다 — `stk_cd` 하나로 서버가 종목의 시장을 알아서
+  판별하는 것으로 보이며, 두 파라미터는 사실상 무시된다(그래도 필수
+  파라미터라 `program_trading_by_date`와 동일한 관례로 기본값만 채워
+  보낸다). 코스닥 종목(247540 에코프로비엠)·다른 코스피 종목(000660
+  SK하이닉스)에서도 동일하게 200 확인.
+- **응답 스키마(핵심 발견 — 차익/비차익 분리 없음)**: `stk_daly_prm_trde_trnsn`
+  배열, **한 페이지 정확히 20행 고정**(ka00198의 "항상 20행" 관찰과 동일한
+  패턴), 날짜 내림차순(최신 먼저). `cont-yn`/`next-key`로 과거 페이지네이션
+  가능(실측: 응답 헤더의 `next-key`를 그대로 다음 호출에 넘기면 그 다음 20
+  거래일이 끊김 없이 이어서 나옴 — ka90010과 동일한 관례). 행 필드: `dt`
+  (YYYYMMDD), `cur_prc`/`pred_pre`/`flu_rt`(등락 관련, 미사용), `trde_qty`
+  (거래량), `prm_sell_amt`/`prm_buy_amt`(프로그램 매도/매수 금액),
+  **`prm_netprps_amt`(프로그램 순매수 금액 — 이 TR이 주는 유일한 순매수
+  필드)**, `prm_netprps_amt_irds`(전일대비 증감, 미사용), 수량 버전
+  (`prm_sell_qty`/`prm_buy_qty`/`prm_netprps_qty`/`prm_netprps_qty_irds`,
+  `amt_qty_tp="2"` 요청 시 유효할 것으로 추정 — 미검증), `base_pric_tm`/
+  `dbrt_trde_rpy_sum`/`remn_rcvord_sum`(실측에서 항상 빈 문자열), `stex_tp`
+  (실측에서 항상 `"KRX"`).
+  **`ka90010`(시장 단위)과 달리 이 TR에는 차익(`dfrt_trde_netprps`류)/비차익
+  (`ndiffpro_trde_netprps`류) 분리 필드가 없다 — `prm_netprps_amt` 하나가
+  "차익+비차익 합계"인 종목 단위 프로그램 순매수 총계다.** `models.py`의
+  `ProgramTrade.arb_net`/`non_arb_net`는 이 TR로는 채울 수 없으므로 수집기가
+  `None`으로 남기고 `total_net`만 채운다(PLAN.md §5.29 판단: 스키마 변경
+  대신 기존 컬럼에 맞춘다 — arb/non_arb 분리가 정말 필요해지면 별도 TR을
+  다시 조사해야 한다).
+- **단위**: `amt_qty_tp="1"`(금액) 실측값으로 검산한 결과 `ka90010`과 동일한
+  **백만원** 단위다 — 예: 005930 2026-07-24 `prm_sell_amt=2445048`(=2.445조원),
+  그날 종가 249,500원 × 거래량 26,175,580주 ≈ 6.5조원(총거래대금)보다 작아
+  프로그램 매도 금액이 하루 거래대금의 일부라는 상식적 범위 안에 있다
+  (천원 단위였다면 24.5억원으로 사실상 무의미한 규모가 돼 모순).
+- **부호 인코딩 버그(ka10080의 "가격 필드 부호 접두"와는 다른 종류의 버그)**:
+  `prm_netprps_amt`(및 `pred_pre`/`prm_netprps_amt_irds`/`prm_netprps_qty`류)의
+  음수는 부호가 **두 번 겹쳐** 온다 — 예: `"--676861"`(=-676861),
+  `"--20500"`(=-20500). 양수는 정상적으로 홑부호(`"+182002"`). 표준 `int()`는
+  `"--676861"`을 그대로 넘기면 `ValueError`를 던진다 — `collectors/
+  program_stock.py`의 `_parse_signed_amount`가 선행 부호 문자를 전부 읽어
+  "하나라도 '-'가 있으면 음수"로 판정한 뒤 나머지 숫자에 부호를 적용하는
+  방식으로 전담 처리한다(`_parse_minute_price`가 절대값만 반환하는 것과
+  달리, 여기는 부호 자체가 의미 있는 값이라 보존해야 한다).
 """
 
 from __future__ import annotations
@@ -331,6 +390,7 @@ TR_RESOURCE_URL: dict[str, str] = {
     "ka20005": "/api/dostk/chart",  # 업종분봉차트요청 (PLAN.md §5.1, 2026-07-21 실호출 확정)
     "ka10065": "/api/dostk/rkinfo",  # 장중투자자별매매상위요청 (수급 상위 카드 라이브화 probe, 2026-07-21)
     "ka90009": "/api/dostk/rkinfo",  # 외국인기관매매상위요청 (수급 상위 카드 라이브화 probe, 2026-07-21)
+    "ka90013": "/api/dostk/mrkcond",  # 종목일별프로그램매매추이요청 (PLAN.md §5.29, 2026-07-26 실호출 확정)
 }
 
 # ka10080/ka20005 tic_scope 허용값 — 2026-07-21 실호출로 8개 전부 확인(모듈
@@ -944,6 +1004,54 @@ class KiwoomClient:
             "stex_tp": stex_tp,
         }
         return await self.call_tr("ka90010", body, cont_yn=cont_yn, next_key=next_key)
+
+    async def stock_program_trading(
+        self,
+        code: str,
+        date: dt.date | str | None = None,
+        amt_qty_tp: str = "1",
+        mrkt_tp: str = "P00101",
+        cont_yn: str | None = None,
+        next_key: str | None = None,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        """종목일별프로그램매매추이요청 (ka90013) — PLAN.md §5.29 종목별 프로그램매매.
+
+        실호출 검증 결과는 이 모듈 docstring의 "ka90013(종목일별프로그램매매추이요청)
+        실측 확정" 절 참고. 핵심 요약:
+
+        - 응답은 `stk_daly_prm_trde_trnsn`(날짜별 배열, 한 페이지 정확히 20행,
+          최신순) — `cont-yn`/`next-key`로 과거까지 연속조회 가능(ka90010과
+          동일한 관례).
+        - `dfrt_trde_netprps`(차익)/`ndiffpro_trde_netprps`(비차익) 같은 분리
+          필드가 **없다** — `prm_netprps_amt`(부호 포함 문자열, 단, 음수는
+          `"--123"`처럼 부호가 두 번 겹치는 버그가 있다 — 아래 Args 참고) 하나가
+          "차익+비차익 합계"인 종목 단위 프로그램 순매수 총계다.
+        - `mrkt_tp`/`stex_tp`는 실측상 결과에 아무 영향이 없었다(4종/3종 조합
+          전부 바이트 단위로 동일한 응답) — 필수 파라미터라 값만 채워 보낸다.
+
+        Args:
+            code: 종목코드(예: "005930").
+            date: 조회 기준일. 기본값은 오늘(KST) — 이 값 이전(포함) 과거
+                시계열이 반환된다.
+            amt_qty_tp: 금액수량구분 — "1"=금액(백만원, 기본값 — 실측으로 ka90010과
+                동일 단위 확인). "2"=수량은 이 프로젝트에서 검증하지 않았다.
+            mrkt_tp: 시장구분. 실측상 결과에 영향 없음(위 요약 참고) — 기본값
+                "P00101"(GitHub 통합테스트 예시 그대로).
+
+        Returns:
+            `(응답 body, 응답 헤더)` — 응답 body의 `stk_daly_prm_trde_trnsn`이
+            날짜별 배열. 파싱은 `collectors/program_stock.py`의
+            `parse_program_trade_rows`가 전담한다(부호 이중 인코딩 처리 포함).
+        """
+        if date is None:
+            date_str = dt.datetime.now(dt.timezone(dt.timedelta(hours=9))).strftime("%Y%m%d")
+        elif isinstance(date, dt.date):
+            date_str = date.strftime("%Y%m%d")
+        else:
+            date_str = date
+
+        body = {"stk_cd": code, "date": date_str, "amt_qty_tp": amt_qty_tp, "mrkt_tp": mrkt_tp}
+        return await self.call_tr("ka90013", body, cont_yn=cont_yn, next_key=next_key)
 
     async def stock_minute_chart(
         self,

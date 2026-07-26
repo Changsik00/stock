@@ -297,6 +297,41 @@ function EtfWeightChangeSection({ data }) {
   )
 }
 
+// 종목별 프로그램매매(PLAN.md §5.29-4) — series 응답에 이미 포함돼 있어(§5.29-3,
+// /{code}/series의 program_trade) EtfWeightChangeSection과 달리 별도 fetch가
+// 필요 없다. ka90013은 차익/비차익 분리를 주지 않고 총계(total_net)만 준다
+// (clients/kiwoom.py "ka90013 실측 확정" 절, collectors/program_stock.py 모듈
+// docstring 참고) — 대시보드의 "프로그램 차익/비차익 순매수" 타일(시장 전체
+// 집계, ka90010)과 소스/집계 단위가 다르다는 걸 오해하지 않도록 toggle-hint로
+// 명시한다. EtfWeightChangeSection과 동일한 관례로, 데이터가 없으면(신규 종목이라
+// 아직 백필 전이거나 조회 실패) 섹션 자체를 렌더하지 않는다.
+function ProgramTradeSection({ rows }) {
+  const withData = (rows || []).filter((r) => r.total_net !== null && r.total_net !== undefined)
+  if (withData.length === 0) return null
+
+  const recent = withData.slice(-10).reverse() // 최신이 위로 오게
+
+  return (
+    <div className="stock-detail-program-trade">
+      <div className="toggle-hint">
+        프로그램매매 순매수(최근 {recent.length}거래일) · 이 종목별 데이터(ka90013)는 차익/비차익 세부 구분 없이
+        합계만 제공됩니다 — 위 대시보드의 "프로그램 차익/비차익 순매수" 타일은 시장 전체 집계(ka90010)로 별개
+        소스입니다.
+      </div>
+      <ul className="stock-detail-program-trade-list">
+        {recent.map((r) => (
+          <li className="stock-detail-program-trade-row" key={r.date}>
+            <span className="stock-detail-program-trade-date">{mmdd(r.date)}</span>
+            <span className={`stock-detail-program-trade-value ${eokClass(r.total_net)}`}>
+              {eok(r.total_net)}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 // 종목 상세 모달 (PLAN.md §6 3.7-2) — StockSearch에서 종목을 고르면 뜬다. initial은
 // 검색 결과 행({code, name, market, is_etf})을 그대로 넘겨받아, 헤더(이름/코드/배지)를
 // 시리즈 응답을 기다리지 않고 즉시 그릴 수 있게 한다 — 첫 조회는 외부 API를 거쳐
@@ -524,6 +559,8 @@ export default function StockDetailModal({ code, initial }) {
           <FlowLineChart flows={series.flows} />
         </div>
       )}
+
+      <ProgramTradeSection rows={series?.program_trade} />
 
       {!isEtf && <EtfWeightChangeSection data={etfWeightChanges} />}
     </div>
