@@ -45,6 +45,73 @@ open/high/low/close/volume 전부를 ``futures_today``로 payload에 노출한�
 필드를 읽어 `/api/markets/futures/series` 응답 끝에 "오늘 잠정치" 합성 캔들을
 붙인다. 장 마감/캐시 재사용 분기에서도 ``{**cached, ...}``로 그대로 이어받아
 빠지지 않게 한다.
+
+## K200 선물 미결제약정(open interest) 조사 — 소스 없음, dead end (2026-07-26, PLAN.md §5.30)
+
+외부 강의 검토 아이디어("외국인 선물 순매도와 미결제약정 증감을 같이 봐야
+신규 진입인지 청산인지 구분할 수 있다")를 위해 키움·네이버 양쪽에서
+미결제약정 데이터 소스를 찾아봤으나 **양쪽 다 찾지 못했다**. §5.1이 확인한
+"키움 REST에는 애초에 선물 도메인이 없다"는 결론이 분봉뿐 아니라 미결제약정을
+포함한 파생상품 전 영역에 적용된다는 것을 이번 조사로 재확인했다 — 아래는
+시도한 것과 실제 응답 근거다(억지 구현 없이 PLAN.md §5.30-1 조사만으로 종료,
+§5.30-2 수집기 구현은 진행하지 않음).
+
+**1) 네이버 — 이미 fetch 중인 응답의 미사용 필드 확인(1순위, 실호출)**:
+- `clients/naver_index.py`가 쓰는 fchart(``siseJson.naver?symbol=FUT``)
+  원본 응답 헤더를 그대로 확인: ``['날짜', '시가', '고가', '저가', '종가',
+  '거래량', '외국인소진율']`` — 7개 필드가 전부이고 미결제약정 유사 필드가
+  없다(마지막 컬럼은 외국인소진율, 실측에서 항상 ``0.0``).
+- `clients/naver_futures_flow.py`가 쓰는
+  ``m.stock.naver.com/api/index/FUT/trend`` 원본 응답도 재확인:
+  ``{"bizdate":..., "personalValue":..., "foreignValue":...,
+  "institutionalValue":...}`` — 이 모듈이 이미 파싱하는 3개 필드가 응답의
+  전부다(숨은 필드 없음).
+
+**2) 네이버 — 추가 엔드포인트 탐색**(2026-07-26 실호출):
+- 신규 발견 ``m.stock.naver.com/api/index/FUT/integration``(모바일 상세
+  화면 "종합" 탭이 호출하는 것으로 추정) 응답에 ``totalInfos``(전일/시가/
+  고가/저가/거래량/대금/52주 최고·최저), ``dealTrendInfo``(=trend와 동일한
+  개인/외국인/기관 3분류), ``programTrendInfo: null``, ``upDownStockInfo:
+  null``, ``enrollStocks: null``이 있지만 미결제약정 필드는 없다.
+- ``.../api/index/FUT/basic``, ``.../price``도 실호출 확인 — 가격/등락률/
+  거래량 계열 필드만 있고 미결제약정 없음.
+- ``openInterest``/``open-interest``/``unsettled``/``balance``/
+  ``positionInfo``/``derivativeInfo``/``futuresInfo``/``investorTrend``/
+  ``priceInfo`` 등 그럴듯한 이름으로 ``m.stock.naver.com/api/index/FUT/<name>``
+  패턴을 직접 시도 — 전부 404(SPA 폴백 HTML).
+- 모바일 상세 페이지(``m.stock.naver.com/domestic/index/FUT/total``)와
+  데스크톱 페이지(``finance.naver.com/sise/sise_index.naver?code=FUT``,
+  ``clients/naver_futures_flow.py`` 모듈 docstring이 이미 "투자자별 수급
+  섹션 없음"으로 조사한 바로 그 페이지) 원문 HTML을 그대로 grep — 양쪽 다
+  "미결제" 문자열 0건. ``finance.naver.com/derivatives/``,
+  ``finance.naver.com/sise/futures.naver`` 같은 그럴듯한 경로도 전부 404.
+
+**3) 키움 — GitHub `younghwan91/kiwoom-rest-api` 전수 조사**(2026-07-26,
+저장소 전체 클론 후 grep):
+- ``domestic/`` 아래 14개 파일(``market.py``/``sector.py``/``ranking.py``/
+  ``chart.py``/``stock_info.py``/``foreign_institution.py``/``elw.py``/
+  ``etf.py``/``slb.py``/``short_selling.py``/``theme.py``/
+  ``credit_order.py``/``account.py``/``condition_search.py``) 전부 국내
+  **주식** 관련(계좌/공매도/대차거래/순위/시세/신용주문/업종/조건검색/
+  종목정보/주문/차트/테마/ELW/ETF)이고, ``futures.py``/``derivatives.py``/
+  ``options.py`` 같은 파생상품 전용 파일 자체가 없다.
+- 저장소 전체(소스+테스트+README)에서 "미결제"/"선물"/"옵션"/"파생"/
+  "open interest"/"openInterest" 문자열 검색 — **0건**.
+- 등록된 모든 api-id(ka00001~ka90013, 총 130여 개)와 모든 메서드 이름을
+  전부 뽑아 확인 — ``gold_spot_*``(금현물, 완전히 다른 상품군)는 있지만
+  주가지수 선물/옵션 관련 메서드는 하나도 없다.
+- 공식 문서(``openapi.kiwoom.com/guide/apiguide``)도 WebFetch로 재확인 —
+  카테고리가 "국내주식"(계좌/공매도/관심종목/기관외국인/대차거래/순위정보/
+  시세/신용주문/실시간시세/업종/조건검색/종목정보/주문/차트/테마/ELW/ETF)과
+  "미국주식" 두 그룹뿐, 선물/옵션 카테고리 자체가 없다.
+
+**결론(2026-07-26)**: 키움·네이버 양쪽 모두 K200 선물 미결제약정 데이터
+소스를 찾지 못했다 — PLAN.md §5.30-1 조사는 여기서 종료하고, §5.30-2(수집기
++ 노출)는 조건 미충족으로 진행하지 않는다. 이 데이터 축을 계속 원한다면
+KRX 파생상품 통계(``data.krx.co.kr``, ``clients/naver_index.py`` 모듈
+docstring이 이미 언급한 것과 같은 Open API 호스트 — 지수 일봉조차 403(서비스
+승인 미비)으로 막혀 있어 파생 통계도 추가 인증 없이는 접근 불가할 것으로
+추정) 같은 제3의 소스를 새로 조사해야 하며, 이는 이번 작업 범위 밖이다.
 """
 
 from __future__ import annotations
