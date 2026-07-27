@@ -332,6 +332,43 @@ function ProgramTradeSection({ rows }) {
   )
 }
 
+// 종목별 공매도(PLAN.md §5.32) — series 응답에 이미 포함돼 있어(§5.32-3,
+// /{code}/series의 short_selling) EtfWeightChangeSection과 달리 별도 fetch가
+// 필요 없다. ProgramTradeSection과 동일한 "row-list, 최근 10거래일, 데이터
+// 없으면 섹션 자체를 렌더하지 않음" 관례를 그대로 따르되, 값이 순매수(부호 있음)가
+// 아니라 거래대금(항상 양수)이라 up/down 색상을 붙이지 않는다. 순보유잔고는
+// 보고의무 발생 종목만 T+2 지연으로 채워지므로(clients/krx_short_selling.py 모듈
+// docstring) 있는 행만 부가로 보여준다 — 대시보드의 "대차잔고"/"공매도 비중"
+// 타일(시장 전체 집계)과 소스·범위가 다르다는 걸 오해하지 않도록 toggle-hint로
+// 명시한다.
+function ShortSellingSection({ rows }) {
+  const withData = (rows || []).filter((r) => r.value !== null && r.value !== undefined)
+  if (withData.length === 0) return null
+
+  const recent = withData.slice(-10).reverse() // 최신이 위로 오게
+
+  return (
+    <div className="stock-detail-short-selling">
+      <div className="toggle-hint">
+        공매도 거래대금(최근 {recent.length}거래일) · KRX 정보데이터시스템 실측 — 위 대시보드의 "대차잔고"/"공매도
+        비중" 타일(시장 전체 집계)과는 별개로 이 종목의 실제 공매도 거래입니다. 순보유잔고는 보고의무가 발생한
+        경우만 2거래일 지연으로 표시됩니다.
+      </div>
+      <ul className="stock-detail-short-selling-list">
+        {recent.map((r) => (
+          <li className="stock-detail-short-selling-row" key={r.date}>
+            <span className="stock-detail-short-selling-date">{mmdd(r.date)}</span>
+            <span className="stock-detail-short-selling-value">{eok(r.value)}</span>
+            <span className="stock-detail-short-selling-balance">
+              {r.balance_value !== null && r.balance_value !== undefined ? `잔고 ${eok(r.balance_value)}` : ''}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 // 종목 상세 모달 (PLAN.md §6 3.7-2) — StockSearch에서 종목을 고르면 뜬다. initial은
 // 검색 결과 행({code, name, market, is_etf})을 그대로 넘겨받아, 헤더(이름/코드/배지)를
 // 시리즈 응답을 기다리지 않고 즉시 그릴 수 있게 한다 — 첫 조회는 외부 API를 거쳐
@@ -561,6 +598,8 @@ export default function StockDetailModal({ code, initial }) {
       )}
 
       <ProgramTradeSection rows={series?.program_trade} />
+
+      <ShortSellingSection rows={series?.short_selling} />
 
       {!isEtf && <EtfWeightChangeSection data={etfWeightChanges} />}
     </div>

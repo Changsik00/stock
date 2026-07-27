@@ -325,6 +325,51 @@ class ScalpPick(Base):
     change_rate_eod: Mapped[float | None] = mapped_column(Numeric(8, 4))
 
 
+class ShortSellingMarket(Base):
+    """시장 전체(코스피/코스닥) 공매도 거래 현황 (PLAN.md §5.32) — KRX 정보데이터
+    시스템 공매도 통계 포털(``clients/krx_short_selling.py`` 모듈 docstring
+    "시장 전체" 절 참고, MDCSTAT30201_OUT). 대차잔고(macro_series.lending_balance,
+    KOFIA, 시장 전체 합계 단일 시계열)와는 별개 지표다 — 대차잔고는 공매도의
+    전조 지표(빌린 주식 잔고)일 뿐 실제 공매도 거래량/거래대금과는 다르다.
+
+    short_volume/short_value = 공매도 거래량(주)/거래대금(백만원),
+    total_volume/total_value = 시장 전체 거래량(주)/거래대금(백만원, 공매도가
+    아닌 전체), volume_ratio/value_ratio = 공매도 비중(%, 소스가 직접 제공하는
+    값을 그대로 저장 — 재계산하지 않음)."""
+
+    __tablename__ = "short_selling_market"
+
+    market: Mapped[str] = mapped_column(String(10), primary_key=True)  # kospi/kosdaq
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    short_volume: Mapped[int | None] = mapped_column(BigInteger)
+    short_value: Mapped[int | None] = mapped_column(BigInteger)
+    total_volume: Mapped[int | None] = mapped_column(BigInteger)
+    total_value: Mapped[int | None] = mapped_column(BigInteger)
+    volume_ratio: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    value_ratio: Mapped[float | None] = mapped_column(Numeric(8, 4))
+
+
+class ShortSellingStock(Base):
+    """종목별 공매도 거래·순보유잔고 현황 (PLAN.md §5.32) — KRX 정보데이터시스템
+    공매도 통계 포털(``clients/krx_short_selling.py`` 모듈 docstring "종목별" 절
+    참고, MDCSTAT30001_OUT). ``ProgramTrade``와 동일한 (code, date) PK 모양.
+
+    volume/value = 공매도 거래량(주)/거래대금(백만원), balance_qty/balance_value =
+    순보유잔고수량(주)/금액(백만원) — 순보유잔고는 보고의무 발생 종목만 T+2
+    지연으로 채워지고, 그 외엔 NULL(억지로 채우지 않음, §5 "정직한 표시" 원칙)."""
+
+    __tablename__ = "short_selling_stock"
+
+    code: Mapped[str] = mapped_column(
+        String(20), ForeignKey("stocks.code"), primary_key=True
+    )
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    volume: Mapped[int | None] = mapped_column(BigInteger)
+    value: Mapped[int | None] = mapped_column(BigInteger)
+    balance_qty: Mapped[int | None] = mapped_column(BigInteger)
+    balance_value: Mapped[int | None] = mapped_column(BigInteger)
+
+
 class CollectLog(Base):
     """배치 수집 로그 (모니터링·중복 방지)."""
 

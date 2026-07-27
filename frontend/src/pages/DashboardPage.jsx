@@ -27,6 +27,7 @@ import {
   fetchRegime,
   fetchScalpCandidates,
   fetchSentiment,
+  fetchShortSellingMarket,
   fetchValueRank,
   fetchValueRankLive,
 } from '../api'
@@ -91,6 +92,9 @@ const DEFAULT_FUND_DAYS = 180
 // 매크로(환율/유가) 모달 차트 기본 기간 — 옛 MacroPage.jsx와 동일하게 1Y로 시작한다
 // (환율/유가는 자금 지표보다 변동 주기가 길어 1년 창이 자연스럽다는 기존 판단 유지).
 const DEFAULT_MACRO_DAYS = 365
+// 공매도(PLAN.md §5.32) 모달 차트 기본 기간 — 자금 지표(180일)와 동일하게 추세를
+// 보기에 넉넉한 창으로 시작한다.
+const DEFAULT_SHORT_SELLING_DAYS = 180
 // 환율/WTI 타일의 최신값·전일비 계산용 — 최근 2거래일만 있으면 되므로 짧게 잡는다
 // (fundSeries가 fundLatest/fundPrev용으로 10일을 쓰는 관례와 동일).
 const MACRO_TILE_DAYS = 10
@@ -976,6 +980,61 @@ function ConcentrationModal({ regime }) {
           {intradayLoading && !intraday && <div className="state">불러오는 중…</div>}
           {intradayError && <div className="state error">{intradayError}</div>}
           {!intradayError && intraday && <BreadthRatioChart series={intraday.series} valueLabel="코스피 쏠림" />}
+        </>
+      )}
+    </div>
+  )
+}
+
+// 공매도 비중(코스피/코스닥, PLAN.md §5.32) — KRX 정보데이터시스템 실측(거래대금
+// 비중, value_ratio). FundModal과 동일한 구조(PeriodPicker + fetch)이되 소스가
+// 전용 테이블(/api/markets/{market}/short-selling)이라 macro_series 기반
+// fetchMacroSeries 대신 fetchShortSellingMarket을 시장별로 부른다. MacroChart를
+// 그대로 재사용해 새 차트 컴포넌트를 만들지 않는다(points: [{date, value}] 모양에
+// 맞춰 value_ratio를 value로 매핑).
+function ShortSellingModal() {
+  const [days, setDays] = useState(DEFAULT_SHORT_SELLING_DAYS)
+  const [kospiPoints, setKospiPoints] = useState([])
+  const [kosdaqPoints, setKosdaqPoints] = useState([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    Promise.all([fetchShortSellingMarket('kospi', days), fetchShortSellingMarket('kosdaq', days)])
+      .then(([kospiBody, kosdaqBody]) => {
+        if (cancelled) return
+        setKospiPoints((kospiBody.series || []).map((r) => ({ date: r.date, value: r.value_ratio })))
+        setKosdaqPoints((kosdaqBody.series || []).map((r) => ({ date: r.date, value: r.value_ratio })))
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [days])
+
+  return (
+    <div>
+      <PeriodPicker value={days} onChange={setDays} />
+      {loading && <div className="state">불러오는 중…</div>}
+      {error && <div className="state error">{error}</div>}
+      {!loading && !error && (
+        <>
+          <div className="toggle-hint">
+            공매도 거래대금 비중(%, KRX 정보데이터시스템 실측) · 위 대시보드의 "대차잔고" 타일(KOFIA, 빌린 주식
+            잔고 시장 전체 합계)과는 별개 소스·별개 지표입니다.
+          </div>
+          <div className="chart-stack">
+            <MacroChart label="코스피 공매도 비중" unit="%" points={kospiPoints} />
+            <MacroChart label="코스닥 공매도 비중" unit="%" points={kosdaqPoints} />
+          </div>
         </>
       )}
     </div>
@@ -1882,6 +1941,10 @@ export default function DashboardPage() {
   const [flowLive, setFlowLive] = useState(null)
 
   const [fundSeries, setFundSeries] = useState({})
+  // 시장 전체 공매도(코스피/코스닥, PLAN.md §5.32) — KOFIA 대차잔고(fundSeries의
+  // lending_balance)와 별개 소스(KRX 정보데이터시스템)라 별도 state로 둔다. 타일에는
+  // 최신 거래대금 비중(%)만 쓰지만, 전일비 화살표를 위해 며칠치를 함께 받는다.
+  const [shortSellingSeries, setShortSellingSeries] = useState({})
   // 환율(USD/KRW)·WTI 타일의 최신값/전일비/기준일 계산용 — 모달(MacroModal)은 별도로
   // 자기 기간(기본 1Y)만큼 다시 불러오므로 이 state와 무관하다.
   const [macroSeries, setMacroSeries] = useState({})
@@ -2190,6 +2253,20 @@ export default function DashboardPage() {
 
   useEffect(() => {
     let cancelled = false
+    Promise.all([fetchShortSellingMarket('kospi', 10), fetchShortSellingMarket('kosdaq', 10)])
+      .then(([kospiBody, kosdaqBody]) => {
+        if (!cancelled) {
+          setShortSellingSeries({ kospi: kospiBody.series || [], kosdaq: kosdaqBody.series || [] })
+        }
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
     fetchMacroSeries(
       [...MACRO_SERIES.map((s) => s.id), ...US_INDEX_SERIES.map((s) => s.id)],
       MACRO_TILE_DAYS
@@ -2432,6 +2509,20 @@ export default function DashboardPage() {
     kosdaq: regime?.kosdaq?.activity_baseline?.avg_daily_activity ?? null,
   }
   const concentrationLive = computeConcentration(flowLive, concentrationBaseline)
+
+  // 시장 전체 공매도(코스피/코스닥, PLAN.md §5.32) 타일용 — 거래대금 비중(value_ratio, %)
+  // 최신값/기준일. fundLatest/fundDate와 동일한 관례이되, 소스가
+  // /api/markets/{market}/short-selling(전용 테이블)이라 값 필드명이 다르다. 두 시장을
+  // 한 타일에 나란히 보여주는 형태라(등락종목수/코스피코스닥쏠림 타일과 동일한 관례)
+  // 전일비 화살표는 붙이지 않는다(두 시장 diff를 한 타일에 억지로 합치지 않음).
+  const shortSellingLatest = (market) => {
+    const points = shortSellingSeries[market] || []
+    return points.length > 0 ? points[points.length - 1].value_ratio : null
+  }
+  const shortSellingDate = (market) => {
+    const points = shortSellingSeries[market] || []
+    return points.length > 0 ? points[points.length - 1].date : null
+  }
 
   const fundLatest = (id) => {
     const points = fundSeries[id] || []
@@ -3119,6 +3210,34 @@ export default function DashboardPage() {
           title={fundDate('lending_balance') ? formatDate(fundDate('lending_balance')) : undefined}
           onClick={() => setModal({ type: 'fund', title: '시장 자금 · 대차' })}
         />
+        {/* 공매도(KRX 정보데이터시스템, PLAN.md §5.32) — 위 "대차잔고"(KOFIA, 빌린
+            주식 잔고, 시장 전체 합계)와는 소스와 의미가 다른 별개 지표라 같은 타일에
+            합치지 않고 분리된 타일로 둔다("정직한 표시" 원칙, ETF 비중 변화 섹션과
+            동일한 취지). 값은 공매도 거래대금 비중(%, 소스 원값 그대로 — 재계산하지
+            않음)이며, 비중이 높다/낮다에 대한 해석은 붙이지 않는다. */}
+        <KpiTile
+          label="공매도 비중"
+          value={
+            shortSellingLatest('kospi') !== null || shortSellingLatest('kosdaq') !== null ? (
+              <>
+                코스피{' '}
+                {shortSellingLatest('kospi') !== null ? `${scoreFmt.format(shortSellingLatest('kospi'))}%` : '-'} ·
+                코스닥{' '}
+                {shortSellingLatest('kosdaq') !== null ? `${scoreFmt.format(shortSellingLatest('kosdaq'))}%` : '-'}
+              </>
+            ) : (
+              '…'
+            )
+          }
+          sub={
+            <span className="kpi-tile-sub">
+              거래대금 비중 · 대차잔고와 별개 지표
+              <StaleDate date={shortSellingDate('kospi')} baseDate={baseDate} prefix=" · " />
+            </span>
+          }
+          title={shortSellingDate('kospi') ? formatDate(shortSellingDate('kospi')) : undefined}
+          onClick={() => setModal({ type: 'shortSelling', title: '공매도 비중 · 코스피/코스닥' })}
+        />
         <KpiTile
           label="신용융자"
           value={creditLoanLatest !== null ? `${joFmt.format(creditLoanLatest)}조` : '-'}
@@ -3472,6 +3591,7 @@ export default function DashboardPage() {
         {modal?.type === 'breadth' && <BreadthModal />}
         {modal?.type === 'concentration' && <ConcentrationModal regime={regime} />}
         {modal?.type === 'fund' && <FundModal />}
+        {modal?.type === 'shortSelling' && <ShortSellingModal />}
         {modal?.type === 'macro' && <MacroModal />}
         {modal?.type === 'flowSummary' && <FlowSummaryModal />}
         {modal?.type === 'foreignPosition' && <ForeignPositionModal />}

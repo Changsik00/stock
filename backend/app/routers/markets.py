@@ -97,7 +97,7 @@ from ..collectors import intraday_snapshot
 from ..collectors.market_flow import fetch_live_flow
 from ..db import get_session
 from ..market_hours import KST, is_market_closed as _market_closed_kst, is_nxt_closed
-from ..models import IndexOhlcv, MacroSeries, MarketBreadth, MarketFlow, Stock
+from ..models import IndexOhlcv, MacroSeries, MarketBreadth, MarketFlow, ShortSellingMarket, Stock
 from ..quant import flow_acceleration, regime_backtest, volume_surge
 from ..services import DB_MARKET, get_market_series_from_db
 from . import basis as basis_router
@@ -116,6 +116,9 @@ FLOW_MARKETS = {"kospi", "kosdaq", "futures"}
 
 # market_breadth도 코스피/코스닥만 있다 (선물은 개별 종목 등락 개념이 없음).
 BREADTH_MARKETS = {"kospi", "kosdaq"}
+
+# short_selling_market도 코스피/코스닥만 있다 (선물은 공매도 개념이 다름, PLAN.md §5.32).
+SHORT_SELLING_MARKETS = {"kospi", "kosdaq"}
 
 # GET /api/markets/breadth/live 60초 메모리 캐시 — 프로세스 재기동 시 초기화되는
 # 단순 캐시로 충분하다(다중 워커 배포는 아직 없음, PLAN.md §5.1). 동시 요청이
@@ -284,6 +287,47 @@ async def market_breadth_series(
         "market": market,
         "days": days,
         "series": [_serialize_breadth_row(r) for r in rows],
+    }
+
+
+def _serialize_short_selling_row(r: ShortSellingMarket) -> dict:
+    return {
+        "date": r.date.isoformat(),
+        "short_volume": r.short_volume,
+        "short_value": r.short_value,
+        "total_volume": r.total_volume,
+        "total_value": r.total_value,
+        "volume_ratio": float(r.volume_ratio) if r.volume_ratio is not None else None,
+        "value_ratio": float(r.value_ratio) if r.value_ratio is not None else None,
+    }
+
+
+@router.get("/api/markets/{market}/short-selling")
+async def market_short_selling_series(
+    market: str,
+    days: int = Query(90, ge=1, le=400),
+    session: AsyncSession = Depends(get_session),
+):
+    """short_selling_market 일별 시계열(collectors/short_selling_market.py가 적재한
+    확정치, DB 전용 읽기 — §5.4 "DB 캐싱 우선", PLAN.md §5.32). KOFIA 대차잔고
+    (macro_series.lending_balance, /api/macro/series)와는 별개 지표다 — 이 엔드포인트는
+    KRX 정보데이터시스템 실측 공매도 거래량/거래대금/비중이다(clients/krx_short_selling.py
+    모듈 docstring 참고)."""
+    if market not in SHORT_SELLING_MARKETS:
+        raise HTTPException(400, f"market must be one of {sorted(SHORT_SELLING_MARKETS)}")
+
+    since = dt.date.today() - dt.timedelta(days=days)
+    stmt = (
+        select(ShortSellingMarket)
+        .where(ShortSellingMarket.market == market, ShortSellingMarket.date >= since)
+        .order_by(ShortSellingMarket.date)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+
+    return {
+        "market": market,
+        "days": days,
+        "series": [_serialize_short_selling_row(r) for r in rows],
     }
 
 

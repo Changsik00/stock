@@ -174,6 +174,17 @@ export async function fetchBreadth(market, days = 30) {
   return getJson(`/api/markets/${market}/breadth?days=${days}`)
 }
 
+// GET /api/markets/{market}/short-selling?days=N -> { market, days, series: [{date,
+// short_volume, short_value, total_volume, total_value, volume_ratio, value_ratio}] }
+// (PLAN.md §5.32) — 일별 확정치 시계열, KOFIA 대차잔고(macro_series.lending_balance,
+// fetchMacroSeries)와는 별개 지표(KRX 정보데이터시스템 실측 공매도 거래량/거래대금/비중).
+// 정적 스냅샷 파이프라인엔 아직 없는 신규 데이터라 fetchEtfWeightChanges와 동일한 관례로
+// STATIC_DATA 대상에서 제외한다 — 정적 배포에서는 이 호출이 실패하면 호출부가 조용히
+// 빈 상태로 처리한다.
+export async function fetchShortSellingMarket(market, days = 90) {
+  return getJson(`/api/markets/${market}/short-selling?days=${days}`)
+}
+
 // GET /api/markets/breadth/live -> { kospi: {...}|null, kosdaq: {...}|null, cached_at }
 // — 장중 온디맨드(60초 서버 캐시). 정적 모드에서는 라이브 소스를 호출할 수 없으므로
 // 일별 스냅샷(breadth-{market}.json)의 최신 행으로 대체한다 — 호출부(MarketPage)는

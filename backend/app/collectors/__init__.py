@@ -24,4 +24,5 @@ def register_all() -> None:
     from . import market_flow as _market_flow_collector  # noqa: F401
     from . import ohlcv as _ohlcv_collector  # noqa: F401
     from . import program_flow as _program_flow_collector  # noqa: F401
+    from . import short_selling_market as _short_selling_market_collector  # noqa: F401
     from . import value_rank as _value_rank_collector  # noqa: F401

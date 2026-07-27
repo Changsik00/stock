@@ -26,7 +26,7 @@ from app.clients import naver_index
 from app.clients.kiwoom import KiwoomAPIError
 from app.db import async_session_factory, engine
 from app.main import app
-from app.models import ProgramTrade, Stock, StockFlow, StockOhlcv, ValueRank
+from app.models import ProgramTrade, ShortSellingStock, Stock, StockFlow, StockOhlcv, ValueRank
 from app.routers import stocks
 
 TEST_CODE = "999999"
@@ -54,9 +54,23 @@ async def _clear_test_rows() -> None:
         await session.execute(delete(StockFlow).where(StockFlow.code == TEST_CODE))
         await session.execute(delete(StockOhlcv).where(StockOhlcv.code == TEST_CODE))
         await session.execute(delete(ProgramTrade).where(ProgramTrade.code == TEST_CODE))
+        await session.execute(delete(ShortSellingStock).where(ShortSellingStock.code == TEST_CODE))
         await session.execute(delete(ValueRank).where(ValueRank.code == TEST_CODE))
         await session.execute(delete(Stock).where(Stock.code == TEST_CODE))
         await session.commit()
+
+
+@pytest.fixture(autouse=True)
+def _patch_short_selling_default(monkeypatch):
+    """모든 series 테스트가 기본으로 공매도(KRX) 외부 호출 없이 빈 리스트를 받게
+    한다 — 그렇지 않으면 공매도와 무관한 이 파일의 기존 program_trade/flow 전용
+    테스트들도 매번 실제 KRX 네트워크를 타게 된다(§5.32-3). 공매도 자체를
+    검증하는 테스트는 개별적으로 이 monkeypatch를 다시 덮어쓴다."""
+    monkeypatch.setattr(
+        stocks.krx_short_selling,
+        "fetch_stock_short_selling",
+        lambda code, start, end, timeout=15: [],
+    )
 
 
 @pytest.fixture
@@ -439,6 +453,114 @@ async def test_series_program_trade_fetch_failure_is_partial_success_200(
     assert len(body["prices"]) == 1  # 캔들은 정상
     assert body["program_trade"] == []
     assert "program_trade_error" in body["meta"]
+
+
+# -- 종목별 공매도 (KRX 정보데이터시스템, PLAN.md §5.32-3) ------------------------
+
+
+def _fake_krx_short_selling_rows(d0: dt.date, d1: dt.date) -> list[dict]:
+    """실측(2026-07-27, 005930) 응답 모양 그대로 — 최근 거래일은 T+2 지연으로
+    순보유잔고가 아직 None, 그 이전은 채워짐(clients/krx_short_selling.py 모듈
+    docstring 참고)."""
+    return [
+        {"date": d1, "volume": 726133, "value": 196541, "balance_qty": 1464868, "balance_value": 381598},
+        {"date": d0, "volume": 793057, "value": 203400, "balance_qty": None, "balance_value": None},
+    ]
+
+
+async def test_series_includes_short_selling_and_second_request_hits_cache(
+    monkeypatch, seeded_stock
+):
+    """§5.32-3 완료 기준: /{code}/series 응답에 short_selling이 포함되고, DB에
+    이미 최신 거래일 캐시가 있으면(장 마감) 두 번째 요청은 KRX를 다시 부르지
+    않는다 — _ensure_program_trade_cached와 동일한 캐시 계약."""
+    monkeypatch.setattr(stocks, "is_nxt_closed", lambda now_kst: True)
+
+    target_end = stocks._latest_trading_day()
+    prev_day = target_end - dt.timedelta(days=1)
+
+    def fake_fetch_stock_series(code, start, end):
+        return [
+            {
+                "date": target_end,
+                "open": 100.0,
+                "high": 110.0,
+                "low": 90.0,
+                "close": 105.0,
+                "volume": 1000,
+            }
+        ]
+
+    monkeypatch.setattr(stocks.naver_index, "fetch_stock_series", fake_fetch_stock_series)
+
+    calls: dict = {}
+
+    def fake_fetch_short_selling(code, start, end, timeout=15):
+        calls["n"] = calls.get("n", 0) + 1
+        calls["code"] = code
+        return _fake_krx_short_selling_rows(target_end, prev_day)
+
+    monkeypatch.setattr(stocks.krx_short_selling, "fetch_stock_short_selling", fake_fetch_short_selling)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp1 = await client.get(f"/api/stocks/{TEST_CODE}/series", params={"days": 30})
+
+    assert resp1.status_code == 200
+    body1 = resp1.json()
+    assert calls["n"] == 1
+    assert calls["code"] == TEST_CODE
+    assert "short_selling_error" not in body1["meta"]
+
+    by_date = {r["date"]: r for r in body1["short_selling"]}
+    assert by_date[target_end.strftime("%Y%m%d")]["value"] == 203400
+    assert by_date[target_end.strftime("%Y%m%d")]["balance_value"] is None  # T+2 지연
+    assert by_date[prev_day.strftime("%Y%m%d")]["balance_value"] == 381598
+
+    # -- 두 번째 요청: DB 캐시가 최신(장 마감)이므로 KRX를 다시 부르지 않는다 --
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp2 = await client.get(f"/api/stocks/{TEST_CODE}/series", params={"days": 30})
+
+    assert resp2.status_code == 200
+    assert calls["n"] == 1  # unchanged -> cache hit
+    assert resp2.json()["short_selling"] == body1["short_selling"]
+
+
+async def test_series_short_selling_fetch_failure_is_partial_success_200(
+    monkeypatch, seeded_stock
+):
+    """program_trade_error와 동일한 부분 성공 정책 — 공매도 조회만 실패해도
+    캔들/수급은 그대로 200, short_selling은 빈 리스트 + meta.short_selling_error."""
+    target_end = stocks._latest_trading_day()
+
+    def fake_fetch_stock_series(code, start, end):
+        return [
+            {
+                "date": target_end,
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "volume": 1,
+            }
+        ]
+
+    monkeypatch.setattr(stocks.naver_index, "fetch_stock_series", fake_fetch_stock_series)
+
+    def fake_fetch_short_selling_raises(code, start, end, timeout=15):
+        raise stocks.krx_short_selling.KrxShortSellingError("ISIN을 찾을 수 없음")
+
+    monkeypatch.setattr(
+        stocks.krx_short_selling, "fetch_stock_short_selling", fake_fetch_short_selling_raises
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/stocks/{TEST_CODE}/series")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["prices"]) == 1  # 캔들은 정상
+    assert body["short_selling"] == []
+    assert "short_selling_error" in body["meta"]
 
 
 async def test_series_market_open_still_refetches_even_with_todays_row_cached(

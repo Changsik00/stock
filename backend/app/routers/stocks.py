@@ -3,13 +3,17 @@
 - ``GET /api/stocks/search``: stocks 마스터(DB) LIKE 검색 — 외부 호출 없음, DB만
   읽는다(§5.4 "DB 캐싱 우선" — 마스터는 collectors/value_rank.py가 매일 갱신).
 - ``GET /api/stocks/{code}/series``: 캔들(네이버 fchart 종목 일봉) + 투자자별 수급
-  (키움 ka10059) + 종목별 프로그램매매(키움 ka90013, PLAN.md §5.29) — 셋 다
-  온디맨드 + DB 캐시(§5.4 "온디맨드 보강": 미리 수집 못 하는 것만 실시간 호출).
-  캔들은 stock_ohlcv, 수급은 stock_flow, 프로그램매매는 program_trade에 캐시하고,
-  이미 최신 거래일 데이터가 있으면 외부 호출을 생략한다 — 같은 code를 반복
-  요청해도 두 번째부터는 DB만 읽는다. ka90013은 차익/비차익 분리를 주지 않아
+  (키움 ka10059) + 종목별 프로그램매매(키움 ka90013, PLAN.md §5.29) + 종목별
+  공매도(KRX 정보데이터시스템, PLAN.md §5.32) — 넷 다 온디맨드 + DB 캐시(§5.4
+  "온디맨드 보강": 미리 수집 못 하는 것만 실시간 호출). 캔들은 stock_ohlcv, 수급은
+  stock_flow, 프로그램매매는 program_trade, 공매도는 short_selling_stock에
+  캐시하고, 이미 최신 거래일 데이터가 있으면 외부 호출을 생략한다 — 같은 code를
+  반복 요청해도 두 번째부터는 DB만 읽는다. ka90013은 차익/비차익 분리를 주지 않아
   (collectors/program_stock.py 모듈 docstring 참고) 응답의 `program_trade`
-  행은 `total_net`만 채워지고 `arb_net`/`non_arb_net`는 항상 null이다.
+  행은 `total_net`만 채워지고 `arb_net`/`non_arb_net`는 항상 null이다. 공매도
+  (`short_selling`)는 `clients/krx_short_selling.py` 모듈 docstring 참고 —
+  대차잔고(대시보드 "대차잔고" 타일, macro_series.lending_balance)와는 별개
+  지표다.
 - ``GET /api/stocks/{code}/whale``: Phase 4+ 예정, 아직 501 스텁.
 
 캔들/수급 실패 처리(§5.3 에러 규약 "외부 API 실패는 502 + {source, detail}"을
@@ -21,6 +25,8 @@
   막지 않도록).
 - 프로그램매매(키움) 실패 → 수급과 동일한 부분 성공 정책: program_trade는 빈
   리스트로 두고 200 반환, 실패 사유는 ``meta.program_trade_error``에 남긴다.
+- 공매도(KRX) 실패 → 위와 동일한 부분 성공 정책: short_selling은 빈 리스트로
+  두고 200 반환, 실패 사유는 ``meta.short_selling_error``에 남긴다.
 
 캐시 신선도 판정은 "가장 최근 평일(월~금)" 휴리스틱을 쓴다(``_latest_trading_day``)
 — 공휴일은 반영하지 않는다. 이 휴리스틱만 쓰면 공휴일(평일인데 휴장)에는 그
@@ -45,7 +51,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..clients import naver_index
+from ..clients import krx_short_selling, naver_index
 from ..clients.kiwoom import (
     MINUTE_CHART_INTERVALS,
     KiwoomAPIError,
@@ -56,7 +62,7 @@ from ..clients.kiwoom import (
 from ..collectors.program_stock import parse_program_trade_rows
 from ..db import get_session
 from ..market_hours import KST, is_nxt_closed
-from ..models import ProgramTrade, Stock, StockFlow, StockOhlcv, ValueRank
+from ..models import ProgramTrade, ShortSellingStock, Stock, StockFlow, StockOhlcv, ValueRank
 from ..quant.signals import (
     compute_vwap,
     detect_breakout,
@@ -87,6 +93,13 @@ FLOW_BACKFILL_DAYS = 90
 # 종목별 데이터와 동일한 관례를 유지하기 위해 형식상 둔다).
 PROGRAM_TRADE_BACKFILL_DAYS = 90
 
+# 종목별 공매도(KRX 정보데이터시스템) 백필 한도 — PLAN.md §5.32-3. 이 소스는
+# ka10059/ka90013과 달리 요청 자체가 날짜 범위(strtDd/endDd)라 "한 콜에 며칠 오는지"
+# 제약이 없다(clients/krx_short_selling.py 모듈 docstring "날짜 범위 제약" 절 —
+# 2년 범위도 한 번에 됨을 실측 확인) — collectors/short_selling_market.py의
+# LOOKBACK_DAYS(120)와 동일한 값을 써서 시장 전체 수집기와 조회 창을 맞춘다.
+SHORT_SELLING_BACKFILL_DAYS = 120
+
 # 캔들 최초 백필 시 거래일 수 -> 달력일 버퍼(주말 비율 5/7에 공휴일 여유를 더함).
 _CANDLE_CALENDAR_BUFFER_RATIO = 1.6
 _CANDLE_CALENDAR_BUFFER_MIN_DAYS = 10
@@ -99,6 +112,7 @@ _EXTERNAL_FETCH_COOLDOWN_SECONDS = 60.0
 _candle_fetch_attempted_at: dict[str, float] = {}
 _flow_fetch_attempted_at: dict[str, float] = {}
 _program_trade_fetch_attempted_at: dict[str, float] = {}
+_short_selling_fetch_attempted_at: dict[str, float] = {}
 
 
 def _today_kst() -> dt.date:
@@ -517,6 +531,92 @@ async def _read_program_trade(session: AsyncSession, code: str, days: int) -> li
     ]
 
 
+async def _upsert_short_selling_rows(session: AsyncSession, code: str, rows: list[dict]) -> int:
+    count = 0
+    for row in rows:
+        stmt = pg_insert(ShortSellingStock).values(
+            code=code,
+            date=row["date"],
+            volume=row["volume"],
+            value=row["value"],
+            balance_qty=row["balance_qty"],
+            balance_value=row["balance_value"],
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[ShortSellingStock.code, ShortSellingStock.date],
+            set_={
+                "volume": stmt.excluded.volume,
+                "value": stmt.excluded.value,
+                "balance_qty": stmt.excluded.balance_qty,
+                "balance_value": stmt.excluded.balance_value,
+            },
+        )
+        await session.execute(stmt)
+        count += 1
+    return count
+
+
+async def _ensure_short_selling_cached(session: AsyncSession, code: str) -> None:
+    """short_selling_stock에 code의 최신 거래일 공매도 데이터가 이미 있고 **장 마감**
+    이면 외부 호출을 생략한다 — `_ensure_program_trade_cached`(종목별 프로그램매매,
+    ka90013)와 완전히 동일한 온디맨드+DB캐시 철학(PLAN.md §5.32-3, 소스만 키움이
+    아니라 KRX 정보데이터시스템 — clients/krx_short_selling.py 모듈 docstring 참고).
+
+    krx_short_selling 클라이언트는 requests(블로킹)라 collectors/macro.py와 동일하게
+    ``asyncio.to_thread``로 감싼다.
+
+    Raises: KrxShortSellingError/requests 예외를 그대로 전파한다 — 호출측이
+    "공매도만 실패면 200 + short_selling 빈 채로"로 흡수한다(flows_error/
+    program_trade_error와 동일한 정책).
+    """
+    target_end = _latest_trading_day()
+    existing_max = (
+        await session.execute(
+            select(func.max(ShortSellingStock.date)).where(ShortSellingStock.code == code)
+        )
+    ).scalar_one_or_none()
+
+    market_open = not is_nxt_closed(dt.datetime.now(KST))
+
+    if existing_max is not None and existing_max >= target_end and not market_open:
+        return  # 장 마감 확정치 — 캐시 히트
+
+    if existing_max is not None:
+        now = time.monotonic()
+        last_attempt = _short_selling_fetch_attempted_at.get(code)
+        if last_attempt is not None and (now - last_attempt) < _EXTERNAL_FETCH_COOLDOWN_SECONDS:
+            return  # 최근에 이미 재시도했음 — 있는 캐시로 서빙
+
+    _short_selling_fetch_attempted_at[code] = time.monotonic()
+    start = target_end - dt.timedelta(days=SHORT_SELLING_BACKFILL_DAYS)
+    rows = await asyncio.to_thread(
+        krx_short_selling.fetch_stock_short_selling, code, start, target_end
+    )
+    await _upsert_short_selling_rows(session, code, rows)
+
+
+async def _read_short_selling(session: AsyncSession, code: str, days: int) -> list[dict]:
+    """[{date, volume, value, balance_qty, balance_value}, ...] (날짜 오름차순).
+    데이터가 전혀 없으면 빈 리스트(프런트가 섹션 자체를 생략하는 근거로 쓴다)."""
+    since = _latest_trading_day() - dt.timedelta(days=days)
+    stmt = (
+        select(ShortSellingStock)
+        .where(ShortSellingStock.code == code, ShortSellingStock.date >= since)
+        .order_by(ShortSellingStock.date)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return [
+        {
+            "date": r.date.strftime("%Y%m%d"),
+            "volume": r.volume,
+            "value": r.value,
+            "balance_qty": r.balance_qty,
+            "balance_value": r.balance_value,
+        }
+        for r in rows
+    ]
+
+
 async def _ensure_stock_master_stub(
     session: AsyncSession,
     code: str,
@@ -676,6 +776,16 @@ async def stock_series(
 
     program_trade = await _read_program_trade(session, code, days)
 
+    try:
+        await _ensure_short_selling_cached(session, code)
+        await session.commit()
+    except Exception as e:  # noqa: BLE001 - krx_short_selling.KrxShortSellingError/requests 등
+        await session.rollback()
+        logger.warning("stocks: %s 공매도 조회 실패, short_selling 빈 채로 반환: %s", code, e)
+        meta["short_selling_error"] = str(e)[:300]
+
+    short_selling = await _read_short_selling(session, code, days)
+
     return {
         "code": code,
         "name": stock_name,
@@ -687,6 +797,7 @@ async def stock_series(
         "meta": meta,
         "turnover": turnover,
         "program_trade": program_trade,
+        "short_selling": short_selling,
     }
 
 
