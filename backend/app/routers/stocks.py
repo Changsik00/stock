@@ -70,6 +70,7 @@ from ..quant.signals import (
     moving_average_cross,
     volume_spike,
 )
+from ..quant.volume_profile import compute_volume_profile, detect_levels
 
 logger = logging.getLogger(__name__)
 
@@ -696,6 +697,15 @@ async def stock_series(
     is_etf: bool | None = Query(
         None, description="stocks 마스터에 없을 때 stub 생성에 쓸 ETF 여부 힌트(§5.28)"
     ),
+    include_volume_profile: bool = Query(
+        False,
+        description=(
+            "true면 응답에 volume_profile(거래량 프로파일 근사 + 지지/저항 후보, "
+            "PLAN.md §5.34)을 추가한다. 기본 false — 일반 시세 조회마다 계산 "
+            "비용을 붙이지 않기 위해 옵트인으로 둔다(quant/volume_profile.py "
+            "모듈 docstring 참고, 예측/매매 신호 아님)."
+        ),
+    ),
     session: AsyncSession = Depends(get_session),
 ):
     """종목 캔들+수급 조회. PLAN.md §5.28: `stock is None`(아직 `stocks` 마스터
@@ -745,6 +755,15 @@ async def stock_series(
         ) from e
 
     prices = await _read_candles(session, code, days)
+
+    # 거래량 프로파일(PLAN.md §5.34) — 옵트인일 때만 계산한다. 이미 위에서 읽어
+    # 둔 prices(캔들 응답의 소스와 동일)를 그대로 재사용하므로 새 DB 조회/외부
+    # API 호출이 전혀 없다(quant/volume_profile.py 모듈 docstring "입력 형태"
+    # 참고 — _read_candles 출력 그대로 넘길 수 있게 필드가 맞춰져 있음).
+    volume_profile_result: dict | None = None
+    if include_volume_profile:
+        profile = compute_volume_profile(prices)
+        volume_profile_result = {**profile, "levels": detect_levels(profile)}
 
     meta: dict[str, str] = {}
     try:
@@ -798,6 +817,7 @@ async def stock_series(
         "turnover": turnover,
         "program_trade": program_trade,
         "short_selling": short_selling,
+        **({"volume_profile": volume_profile_result} if include_volume_profile else {}),
     }
 
 

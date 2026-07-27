@@ -1,4 +1,4 @@
-import { CandlestickSeries, HistogramSeries, LineSeries, createChart } from 'lightweight-charts'
+import { CandlestickSeries, HistogramSeries, LineSeries, LineStyle, createChart } from 'lightweight-charts'
 import { useEffect, useMemo, useRef } from 'react'
 import { formatDate } from '../format'
 
@@ -66,6 +66,17 @@ const VAR_NAMES = [
 // ...] 형태. intraday 모드 전용(시간축이 toLwcMinuteTime 기준) — 일봉 모드에서는
 // 호출부가 애초에 넘기지 않는다(§5.4 "일봉 모드엔 시그널 섹션 숨김"). 데이터가 없거나
 // value가 null인 포인트는 건너뛴다.
+//
+// levels: 지지/저항 후보 수평 참조선(거래량 프로파일 근사, PLAN.md §5.34) —
+// [{ price, label, isPoc }, ...]. overlay(시계열 라인, VWAP용)와 달리 시간축과
+// 무관한 "가로 상수선"이라 lightweight-charts의 series.createPriceLine()으로
+// 그린다 — 아예 다른 API(LineSeries가 아님). "과거에 이 가격대에서 거래량이
+// 몰렸다"는 관찰 사실만 표시하는 참고선이지 "지지선/저항선이 될 것이다"라는
+// 예측이나 "여기서 매수/매도하라"는 신호가 아니다(quant/volume_profile.py
+// 모듈 docstring 참고) — 그래서 색은 상승/하락(--up/--down)과 무관한 중립색
+// (--text-muted) 하나만 쓰고, 방향성 있는 스타일(빨강/파랑, 화살표 등)을
+// 절대 쓰지 않는다. label이 없으면 기본 문구("거래량 집중 구간(근사)" 또는
+// POC는 "거래량 최다 구간(POC, 근사)")를 쓴다.
 export default function CandleChart({
   data,
   height = 360,
@@ -74,6 +85,7 @@ export default function CandleChart({
   title = '캔들 · 거래량',
   overlay = null,
   overlayLabel = 'VWAP',
+  levels = null,
 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
@@ -294,6 +306,37 @@ export default function CandleChart({
     overlaySeriesRef.current?.setData(overlayPoints)
   }, [overlayPoints])
 
+  // 지지/저항 후보 수평선(PLAN.md §5.34) — candleSeries.createPriceLine()은 시계열이
+  // 아닌 "상수 가격선"이라 overlay(LineSeries)와 별도 effect/API로 그린다. 색은
+  // 항상 중립(--text-muted) 하나만 쓴다 — 상승/하락(--up/--down)과 겹치면 매매
+  // 신호처럼 보일 위험이 있어 의도적으로 피한다(모듈 상단 주석 참고). levels가
+  // 바뀌면 이전 선을 전부 지우고 다시 그린다(캔들 fitContent는 건드리지 않음 —
+  // 오버레이 effect와 동일한 이유).
+  useEffect(() => {
+    const candleSeries = candleSeriesRef.current
+    if (!candleSeries) return undefined
+
+    const vars = readCssVars(['--text-muted'])
+    const color = vars['--text-muted'] || '#898781'
+
+    const priceLines = (levels || [])
+      .filter((lv) => lv?.price != null)
+      .map((lv) =>
+        candleSeries.createPriceLine({
+          price: lv.price,
+          color,
+          lineWidth: lv.isPoc ? 2 : 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: lv.label || (lv.isPoc ? '거래량 최다 구간(POC, 근사)' : '거래량 집중 구간(근사)'),
+        })
+      )
+
+    return () => {
+      for (const line of priceLines) candleSeries.removePriceLine(line)
+    }
+  }, [levels])
+
   return (
     <div className="chart-card candle-chart-card">
       <div className="chart-title">
@@ -301,6 +344,11 @@ export default function CandleChart({
         {overlayPoints.length > 0 && (
           <span className="candle-chart-overlay-legend">
             <span className="dot" style={{ background: 'var(--series-value)' }} /> {overlayLabel}
+          </span>
+        )}
+        {levels && levels.length > 0 && (
+          <span className="candle-chart-overlay-legend" title="일봉 저가~고가 구간에 거래량을 균등분배한 근사치 — 실제 지지/저항을 보장하지 않음">
+            <span className="dot" style={{ background: 'var(--text-muted)' }} /> 거래량 집중 구간(근사)
           </span>
         )}
       </div>

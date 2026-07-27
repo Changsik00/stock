@@ -405,7 +405,12 @@ export default function StockDetailModal({ code, initial }) {
     // initial(검색/랭킹 카드가 이미 갖고 있던 {name, market, is_etf})을 힌트로
     // 넘긴다 — stocks 마스터에 아직 없는 종목(§5.28, 예: 0156T0)이면 백엔드가
     // 이 힌트로 stub 마스터 행을 채운다(없으면 name=code/market=KOSPI 기본값).
-    fetchStockSeries(code, days, { name: initial?.name, market: initial?.market, is_etf: initial?.is_etf })
+    fetchStockSeries(
+      code,
+      days,
+      { name: initial?.name, market: initial?.market, is_etf: initial?.is_etf },
+      true // includeVolumeProfile — 일봉 캔들에 지지/저항 후보 참조선(PLAN.md §5.34)을 그리기 위함
+    )
       .then((body) => {
         if (!cancelled) setSeries(body)
       })
@@ -502,6 +507,15 @@ export default function StockDetailModal({ code, initial }) {
   const isEtf = isEtfNow
   const prices = series?.prices || []
   const latestPrice = prices.length > 0 ? prices[prices.length - 1] : null
+  // 지지/저항 후보 참조선(PLAN.md §5.34) — CandleChart의 `levels` prop 형태
+  // ({price, label, isPoc})로 변환. price_mid(구간 중앙값)를 대표값으로 쓴다.
+  // 백엔드가 표본 부족/데이터 없음이면 levels를 빈 배열로 주므로(quant/
+  // volume_profile.py 참고) 이 매핑은 항상 배열만 반환(undefined 방지).
+  const volumeProfileLevels = (series?.volume_profile?.levels || []).map((lv) => ({
+    price: lv.price_mid,
+    isPoc: lv.is_poc,
+    label: lv.is_poc ? '거래량 최다 구간(POC, 근사)' : '거래량 집중 구간(근사)',
+  }))
   const flowsError = series?.meta?.flows_error
   const hasFlows = !flowsError && series?.flows && Object.keys(series.flows).length > 0
   const vwapCurve = useMemo(() => computeVwapCurve(intradayBars), [intradayBars])
@@ -558,7 +572,9 @@ export default function StockDetailModal({ code, initial }) {
         <>
           {loading && <div className="state">불러오는 중…</div>}
           {error && <div className="state error">{error}</div>}
-          {!loading && !error && prices.length > 0 && <CandleChart data={prices} height={280} />}
+          {!loading && !error && prices.length > 0 && (
+            <CandleChart data={prices} height={280} levels={volumeProfileLevels} />
+          )}
           {!loading && !error && prices.length === 0 && (
             <div className="state">해당 기간에 표시할 데이터가 없습니다.</div>
           )}

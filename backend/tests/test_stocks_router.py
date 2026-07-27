@@ -340,6 +340,83 @@ async def test_series_first_request_fetches_and_caches_then_second_hits_cache(
     assert resp2.json()["flows"] == body1["flows"]
 
 
+# -- 거래량 프로파일 (PLAN.md §5.34, quant/volume_profile.py) --------------------
+
+
+async def test_series_include_volume_profile_query_param(monkeypatch, seeded_stock):
+    """기본값(false)이면 volume_profile 키가 아예 없고, `include_volume_profile=true`
+    일 때만 quant/volume_profile.py 계산 결과가 붙는지 확인한다 — 옵트인 정책
+    (라우터 docstring 참고). 새 외부 호출/DB 조회 없이 이미 읽은 prices를 그대로
+    재사용한다는 계약을 함께 확인하기 위해 20거래일 중 마지막 5일만 다른(훨씬
+    거래량이 큰) 가격대에 몰아 POC가 그 가격대에서 잡히는지도 검증한다."""
+    monkeypatch.setattr(stocks, "is_nxt_closed", lambda now_kst: True)
+
+    target_end = stocks._latest_trading_day()
+    days_list = [target_end - dt.timedelta(days=i) for i in range(24, -1, -1)]
+
+    def fake_fetch_stock_series(code, start, end):
+        rows = []
+        for i, d in enumerate(days_list):
+            if i >= 20:
+                # 마지막 5일 — 저가=고가=200(단일 가격, 딱 한 bin에만 담김)에서
+                # 압도적으로 큰 거래량(스파이크). 저가=고가로 두는 이유: 폭이 있는
+                # 구간이면 여러 bin에 걸쳐 균등분배되어 평평한 고원이 되고, 고원
+                # 내부는 이웃 bin과 값이 같아(엄격히 크지 않음) 국소 최댓값
+                # 판정에서 제외되기 때문 — 명확한 단일 bin 피크를 만들기 위함.
+                rows.append(
+                    {
+                        "date": d,
+                        "open": 200.0,
+                        "high": 200.0,
+                        "low": 200.0,
+                        "close": 200.0,
+                        "volume": 100_000,
+                    }
+                )
+            else:
+                # 나머지 20일 — 저가=고가=100(단일 가격)에서 평범한(작은) 거래량.
+                rows.append(
+                    {
+                        "date": d,
+                        "open": 100.0,
+                        "high": 100.0,
+                        "low": 100.0,
+                        "close": 100.0,
+                        "volume": 100,
+                    }
+                )
+        return rows
+
+    monkeypatch.setattr(stocks.naver_index, "fetch_stock_series", fake_fetch_stock_series)
+
+    flow_calls: dict = {}
+    fake_response = _fake_ka10059_response(target_end, days_list[-2])
+    monkeypatch.setattr(
+        stocks, "KiwoomClient", _make_fake_kiwoom_client(flow_calls, fake_response)
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp_default = await client.get(f"/api/stocks/{TEST_CODE}/series", params={"days": 30})
+        resp_with_profile = await client.get(
+            f"/api/stocks/{TEST_CODE}/series",
+            params={"days": 30, "include_volume_profile": "true"},
+        )
+
+    assert resp_default.status_code == 200
+    assert "volume_profile" not in resp_default.json()
+
+    assert resp_with_profile.status_code == 200
+    body = resp_with_profile.json()
+    vp = body["volume_profile"]
+    assert vp["bar_count"] == 25
+    assert vp["poc"] is not None
+    # 가격 범위는 100(저가 최솟값)~200(고가 최댓값) — POC는 스파이크가 심어진
+    # 200 근처(마지막 bin)에 있어야 한다.
+    assert vp["poc"]["price_mid"] >= 190.0
+    assert len(vp["levels"]) >= 1
+    assert vp["levels"][0]["is_poc"] is True
+
+
 # -- 종목별 프로그램매매 (ka90013, PLAN.md §5.29-3) -------------------------------
 
 

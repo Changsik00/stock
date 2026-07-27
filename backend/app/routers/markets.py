@@ -99,6 +99,7 @@ from ..db import get_session
 from ..market_hours import KST, is_market_closed as _market_closed_kst, is_nxt_closed
 from ..models import IndexOhlcv, MacroSeries, MarketBreadth, MarketFlow, ShortSellingMarket, Stock
 from ..quant import flow_acceleration, regime_backtest, sector_rotation, volume_surge
+from ..quant.volume_profile import compute_volume_profile, detect_levels
 from ..services import DB_MARKET, get_market_series_from_db
 from . import basis as basis_router
 
@@ -183,20 +184,32 @@ async def _append_futures_provisional_row(data: list[dict]) -> None:
     )
 
 
-async def _build_prices(market: str, days: int, session: AsyncSession) -> dict:
+async def _build_prices(
+    market: str, days: int, session: AsyncSession, include_volume_profile: bool = False
+) -> dict:
     """`/api/markets/{market}/series`·legacy `/api/series`가 공유하는 가격 시리즈
     빌더. DB 전용 조회(`get_market_series_from_db`)가 기본이지만, ``market ==
     "futures"``면 §5.21(위 `_append_futures_provisional_row` 참고) 원칙에 따라
     오늘 잠정치 합성 행을 조건부로 덧붙인다 — 코스피/코스닥은 절대 건드리지
     않는다(그쪽은 분봉 탭으로 이미 해결돼 있어 이 워크어라운드가 필요 없다,
-    §5.21 원칙)."""
+    §5.21 원칙).
+
+    `include_volume_profile=True`면 방금 읽은 `data`(가격 시리즈)를 그대로
+    재사용해 거래량 프로파일(PLAN.md §5.34, 근사치 — 예측/매매 신호 아님,
+    quant/volume_profile.py 모듈 docstring 참고)을 계산해 함께 반환한다 — 새
+    DB 조회/외부 호출 없음. 기본 false로 두어(routers/stocks.py::stock_series와
+    동일한 옵트인 정책) 일반 시세 조회에는 계산 비용을 붙이지 않는다."""
     if market not in MARKETS:
         raise HTTPException(400, f"market must be one of {sorted(MARKETS)}")
 
     data = await get_market_series_from_db(session, market, days)
     if market == "futures":
         await _append_futures_provisional_row(data)
-    return {"market": market, "days": days, "series": data}
+    result = {"market": market, "days": days, "series": data}
+    if include_volume_profile:
+        profile = compute_volume_profile(data)
+        result["volume_profile"] = {**profile, "levels": detect_levels(profile)}
+    return result
 
 
 async def _build_flows(market: str, days: int, session: AsyncSession) -> dict[str, list[dict]]:
@@ -232,9 +245,17 @@ async def _build_flows(market: str, days: int, session: AsyncSession) -> dict[st
 async def market_series(
     market: str,
     days: int = Query(90, ge=1, le=400),
+    include_volume_profile: bool = Query(
+        False,
+        description=(
+            "true면 응답에 volume_profile(거래량 프로파일 근사 + 지지/저항 후보, "
+            "PLAN.md §5.34)을 추가한다. 기본 false — quant/volume_profile.py "
+            "모듈 docstring 참고, 예측/매매 신호 아님."
+        ),
+    ),
     session: AsyncSession = Depends(get_session),
 ):
-    result = await _build_prices(market, days, session)
+    result = await _build_prices(market, days, session, include_volume_profile)
     result["prices"] = result.pop("series")
     result["flows"] = await _build_flows(market, days, session)
     return result

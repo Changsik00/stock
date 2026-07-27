@@ -537,6 +537,7 @@ function CandleModal({ market }) {
   const [intradayMode, setIntradayMode] = useState(STATIC_DATA || market === 'futures' ? 'daily' : 1)
   const [days, setDays] = useState(DEFAULT_CANDLE_DAYS)
   const [prices, setPrices] = useState(null)
+  const [volumeProfile, setVolumeProfile] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
@@ -579,9 +580,15 @@ function CandleModal({ market }) {
     let cancelled = false
     setLoading(true)
     setError(null)
-    fetchMarketSeries(market, days)
+    // includeVolumeProfile=true — 일봉 캔들에 지지/저항 후보 참조선(PLAN.md §5.34)을
+    // 그리기 위함. STATIC_DATA 경로는 이 필드를 애초에 안 주므로 body.volume_profile은
+    // undefined로 안전하게 떨어진다(api.js fetchMarketSeries 주석 참고).
+    fetchMarketSeries(market, days, true)
       .then((body) => {
-        if (!cancelled) setPrices(body.prices || [])
+        if (!cancelled) {
+          setPrices(body.prices || [])
+          setVolumeProfile(body.volume_profile || null)
+        }
       })
       .catch((e) => {
         if (!cancelled) setError(e.message)
@@ -593,6 +600,15 @@ function CandleModal({ market }) {
       cancelled = true
     }
   }, [market, days, intradayMode])
+
+  // CandleChart의 `levels` prop 형태({price, label, isPoc})로 변환(StockDetailModal.jsx와
+  // 동일한 매핑). 표본 부족/데이터 없음이면 volumeProfile.levels가 빈 배열(quant/
+  // volume_profile.py 참고) — 항상 배열만 만든다(undefined 방지).
+  const volumeProfileLevels = (volumeProfile?.levels || []).map((lv) => ({
+    price: lv.price_mid,
+    isPoc: lv.is_poc,
+    label: lv.is_poc ? '거래량 최다 구간(POC, 근사)' : '거래량 집중 구간(근사)',
+  }))
 
   return (
     <div>
@@ -628,7 +644,9 @@ function CandleModal({ market }) {
           <PeriodPicker value={days} onChange={setDays} />
           {loading && <div className="state">불러오는 중…</div>}
           {error && <div className="state error">{error}</div>}
-          {!loading && !error && prices && prices.length > 0 && <CandleChart data={prices} height={320} />}
+          {!loading && !error && prices && prices.length > 0 && (
+            <CandleChart data={prices} height={320} levels={volumeProfileLevels} />
+          )}
           {/* PLAN.md §5.21-3 — 선물은 분봉이 없어 일봉이 유일한 뷰라, 마지막 봉이
               basis/live의 오늘 잠정치(provisional)로 채워졌을 때 확정치가 아님을
               명시한다(§5 "관찰 사실만" 원칙 — 확정치처럼 보이면 안 됨). */}
