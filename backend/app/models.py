@@ -92,6 +92,43 @@ class MarketFlow(Base):
     source: Mapped[str | None] = mapped_column(String(20))
 
 
+class SectorFlow(Base):
+    """업종별 투자자 순매수 (PLAN.md §5.33-1) — `collectors/market_flow.py`가
+    이미 매일 호출하는 ka10051(업종별투자자순매수) 응답의 `inds_netprps` 배열 중
+    "종합"(시장 전체) 행 1개만 쓰고 버려지던 개별 업종 행들을 새 외부 호출 없이
+    추가로 적재한다(자세한 배경은 `collectors/market_flow.py` 모듈 docstring
+    "업종별 행 추가 적재" 절 참고).
+
+    PK는 `(market, sector_code, date)` — 같은 업종 코드라도 코스피/코스닥은
+    서로 다른 코드 체계를 쓰므로(예: 코스피 "화학"=008_AL, 코스닥 "화학"=119_AL)
+    market이 없으면 PK 충돌 위험이 있어 반드시 포함한다. `sector_code`는 ka10051의
+    `inds_cd`(예: "013_AL")를 그대로 쓴다 — `group_snapshot.py`(네이버 소스,
+    업종 79개/테마 266개, GICS 계열 세분류)와는 **완전히 다른 코드 체계·분류
+    granularity**라 1:1로 매핑하지 않는다(실측 근거: 코스피 "전기/전자"
+    013_AL 하나에 네이버의 "반도체와반도체장비"/"전자장비와기기"/"전자제품"/
+    "디스플레이패널" 등 여러 세부 업종이 뭉쳐 있음 — 2026-07-28 실측, PLAN.md
+    §5.33-1). 이 테이블은 group_snapshot의 업종·테마 트리맵과 독립적인, 키움 자체
+    분류 체계로 취급한다.
+
+    투자자 분류는 13종 전부가 아니라 로테이션 분석(quant/sector_rotation.py)에
+    필요한 최소 3종(외국인/기관계/개인)만 저장한다 — 나머지 10종(금융투자/보험/
+    투신/은행/연기금 등)은 이번 범위에서 쓰임새가 없어 스키마를 불필요하게
+    부풀리지 않는다(필요해지면 나중에 컬럼을 추가하면 된다, 이미 저장된 행은
+    그대로 두고 마이그레이션으로 컬럼만 늘리면 되므로 되돌릴 수 없는 결정이
+    아니다)."""
+
+    __tablename__ = "sector_flow"
+
+    market: Mapped[str] = mapped_column(String(20), primary_key=True)
+    sector_code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    sector_name: Mapped[str | None] = mapped_column(String(50))
+    frgnr_net_value: Mapped[int | None] = mapped_column(BigInteger)
+    orgn_net_value: Mapped[int | None] = mapped_column(BigInteger)
+    ind_net_value: Mapped[int | None] = mapped_column(BigInteger)
+    source: Mapped[str | None] = mapped_column(String(20))
+
+
 class StockFlow(Base):
     """종목별 투자자 수급 (키움 ka10059)."""
 

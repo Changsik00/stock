@@ -28,7 +28,34 @@ collect_fn 계약(collectors/base.py): 이 함수는 session에 upsert만 수행
 collect_log 기록 + 트랜잭션을 전담한다. 이 모듈 단독으로 검증/백필할 때는
 호출자가 직접 session.commit()을 하거나 collectors.base.run_job을 통해 호출해야
 한다 (backend/scripts/backfill_market_flow.py 참고).
-"""
+
+**업종별 행 추가 적재 (PLAN.md §5.33-1, 2026-07-28)**: `ka10051` 응답의
+`inds_netprps` 배열은 "종합"(시장 전체) 행 1개 + 업종별 행 여러 개로 이뤄져
+있는데, 지금까지는 종합 행만 골라 쓰고 나머지는 버렸다(2026-07-28 실측:
+`inds_netprps` 길이가 코스피 28행, 코스닥 32행 — 첫 행이 종합, 나머지가 업종별
+`inds_cd`/`inds_nm`, 예: "013_AL"/"전기/전자"). 이 모듈은 이제 **같은 응답**에서
+업종별 행도 함께 파싱해 `SectorFlow`에 upsert한다 — `_fetch_ka10051_rows`가
+시장당 정확히 1콜만 하고, 그 결과(raw `inds_netprps` 리스트)를 종합 행 추출
+(`_summary_flows_from_rows`, 기존 `_fetch_kiwoom_flow`의 본문을 그대로 분리한
+것)과 업종별 행 추출(`_parse_sector_rows`) 양쪽이 공유한다 — 새 외부 호출을
+추가하지 않는다는 §5.33-1의 제약을 이렇게 지킨다.
+
+업종별 행에는 13개 투자자 분류가 종합 행과 동일한 필드명으로 전부 들어있지만
+(실측 확인: 종합 행과 업종별 행의 키 집합이 완전히 동일), `SectorFlow`에는
+로테이션 분석(quant/sector_rotation.py)에 필요한 최소 3종(외국인/기관계/개인)만
+저장한다 — models.py `SectorFlow` docstring 참고. "이게 진짜 산업 업종인지
+(대형주/중형주/소형주 같은 시가총액 규모별 분류나 KOSDAQ 100 같은 지수구성별
+분류가 아닌지)"는 이 수집 단계가 판단하지 않고 원본 그대로 전부 적재한다 —
+그 판단은 quant/sector_rotation.py가 분석 시점에 한다(모듈 docstring 참고).
+
+REGISTRY는 새로 등록하지 않는다 — 이미 `market_flow` 잡이 매일 이 응답을
+받아오므로, 같은 세션·같은 트랜잭션 안에서 업종별 upsert도 같이 수행하는 쪽이
+(a) 정확히 같은 응답을 재사용하고 (b) 별도 REGISTRY 항목/로그 줄을 만들지
+않아 admin 화면이 붐비지 않는다. 업종별 upsert가 실패하면(예: 파싱 버그)
+`market_flow` 잡 전체가 실패로 기록되고 재시도된다 — 이 정도로 강하게 묶는 게
+과한 결합처럼 보일 수 있지만, 애초에 같은 HTTP 응답 하나에서 나온 데이터라
+"종합 행은 성공, 업종별 행은 실패"로 갈라지는 상황 자체가 이례적이라 별도
+실패 흡수 로직을 추가하지 않았다."""
 
 from __future__ import annotations
 
@@ -39,7 +66,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..clients.kiwoom import KiwoomClient
-from ..models import MarketFlow
+from ..models import MarketFlow, SectorFlow
 from .base import REGISTRY
 
 logger = logging.getLogger(__name__)
@@ -75,6 +102,16 @@ KA10051_FIELD_TO_INVESTOR = {
     "orgn_netprps": "기관계",
 }
 
+# SectorFlow에 저장할 업종별 투자자 필드 -> 컬럼명 매핑(3종만, models.py
+# SectorFlow docstring 참고). ka10051_FIELD_TO_INVESTOR와 값 소스는 같은 필드명
+# (frgnr_netprps/orgn_netprps/ind_netprps)이지만 목적지가 investor 값이 아니라
+# SectorFlow 컬럼명이라 별도 딕셔너리로 둔다.
+SECTOR_FIELD_TO_COLUMN = {
+    "frgnr_netprps": "frgnr_net_value",
+    "orgn_netprps": "orgn_net_value",
+    "ind_netprps": "ind_net_value",
+}
+
 
 def _parse_int(raw: object) -> int | None:
     """ka10051 숫자 필드는 int로도, (쉼표/부호 포함) 문자열로도 올 수 있어 방어적으로
@@ -95,20 +132,29 @@ def _parse_int(raw: object) -> int | None:
         return None
 
 
-async def _fetch_kiwoom_flow(
+async def _fetch_ka10051_rows(
     client: KiwoomClient, market: str, target_date: dt.date
 ) -> list[dict]:
-    """ka10051을 호출해 market의 target_date 시장 전체 종합 행을 13개 투자자별
-    {"investor", "net_value", "net_volume"} 딕셔너리 리스트로 변환한다.
+    """ka10051 실호출 1회 — `inds_netprps`(업종별 배열, 종합 행 포함) 원본을
+    그대로 반환한다. 종합 행 추출(`_summary_flows_from_rows`)과 업종별 행 추출
+    (`_parse_sector_rows`) 양쪽이 이 함수의 결과 하나를 공유해서 써야
+    `collect()`가 시장당 정확히 1콜만 하게 된다(모듈 docstring "업종별 행 추가
+    적재" 절 — PLAN.md §5.33-1 "새 외부 호출 없음" 제약)."""
+    data, _headers = await client.sector_investor_net_buy(
+        mrkt_tp=MARKET_TO_MRKT_TP[market], base_dt=target_date
+    )
+    return data.get("inds_netprps") or []
+
+
+def _summary_flows_from_rows(rows: list[dict], market: str, target_date: dt.date) -> list[dict]:
+    """`_fetch_ka10051_rows`가 받아온 업종별 배열에서 시장 전체 종합 행을 찾아
+    13개 투자자별 {"investor", "net_value", "net_volume"} 딕셔너리 리스트로
+    변환한다(기존 `_fetch_kiwoom_flow` 본문을 그대로 옮긴 것 — 동작 변경 없음).
 
     종합 행(`inds_cd` 일치)을 찾지 못하면(예상 밖 응답 형태) 경고만 남기고 빈
     리스트를 반환한다 — 이 저장소 수집기들의 일반적인 "부분 실패는 계속 진행"
     관례(clients/pykrx_client.py 참고)를 따른다.
     """
-    data, _headers = await client.sector_investor_net_buy(
-        mrkt_tp=MARKET_TO_MRKT_TP[market], base_dt=target_date
-    )
-    rows = data.get("inds_netprps") or []
     target_inds_cd = MARKET_TO_SUMMARY_INDS_CD[market]
     summary_row = next((row for row in rows if row.get("inds_cd") == target_inds_cd), None)
     if summary_row is None:
@@ -134,6 +180,45 @@ async def _fetch_kiwoom_flow(
     return out
 
 
+async def _fetch_kiwoom_flow(
+    client: KiwoomClient, market: str, target_date: dt.date
+) -> list[dict]:
+    """`fetch_live_flow`가 쓰는 공개 진입점 — ka10051을 호출해(1콜) market의
+    target_date 시장 전체 종합 행만 반환한다. `collect()`는 이 함수를 쓰지 않고
+    `_fetch_ka10051_rows` + `_summary_flows_from_rows`를 직접 호출한다(raw rows를
+    업종별 파싱과 공유하기 위해서 — 모듈 docstring 참고)."""
+    rows = await _fetch_ka10051_rows(client, market, target_date)
+    return _summary_flows_from_rows(rows, market, target_date)
+
+
+def _parse_sector_rows(rows: list[dict], market: str) -> list[dict]:
+    """`_fetch_ka10051_rows`가 받아온 업종별 배열에서 종합 행을 제외한 나머지
+    전부를 `SectorFlow` upsert용 딕셔너리로 변환한다(모듈 docstring "업종별 행
+    추가 적재" 참고).
+
+    "이게 진짜 산업 업종인지(대형주/중형주/소형주 같은 시가총액 규모별 분류나
+    KOSDAQ 100 같은 지수구성별 분류가 아닌지)"는 여기서 가리지 않는다 — 종합
+    행 하나만 제외하고 나머지는 성격을 따지지 않고 전부 반환한다. 그 판단은
+    분석 단계(quant/sector_rotation.py)의 책임으로 미룬다 — 원본을 손실 없이
+    적재해 두면 "진짜 업종"의 기준이 나중에 바뀌어도 재수집 없이 다시 계산할 수
+    있다.
+    """
+    summary_code = MARKET_TO_SUMMARY_INDS_CD[market]
+    out: list[dict] = []
+    for row in rows:
+        inds_cd = row.get("inds_cd")
+        if not inds_cd or inds_cd == summary_code:
+            continue
+        parsed = {
+            "sector_code": inds_cd,
+            "sector_name": row.get("inds_nm"),
+        }
+        for field, column in SECTOR_FIELD_TO_COLUMN.items():
+            parsed[column] = _parse_int(row.get(field))
+        out.append(parsed)
+    return out
+
+
 async def fetch_live_flow(client: KiwoomClient, market: str, target_date: dt.date) -> list[dict]:
     """`GET /api/markets/flow/live`(routers/markets.py, PLAN.md §6 3.7-3)가 "장중 잠정"
     소스로 재사용하는 얇은 공개 래퍼 — `_fetch_kiwoom_flow`와 로직이 완전히 같다
@@ -149,39 +234,77 @@ async def fetch_live_flow(client: KiwoomClient, market: str, target_date: dt.dat
 
 
 async def collect(session: AsyncSession, target_date: dt.date) -> int:
-    """kospi/kosdaq의 target_date 투자자별 순매수를 market_flow에 upsert.
+    """kospi/kosdaq의 target_date 투자자별 순매수를 market_flow에 upsert하고,
+    같은 ka10051 응답의 업종별 행을 sector_flow에도 함께 upsert한다(모듈
+    docstring "업종별 행 추가 적재" 절, PLAN.md §5.33-1 — 새 REGISTRY 항목을
+    만들지 않고 이 잡에 얹은 이유도 그 절에 있다).
 
     Returns:
-        적재(upsert)한 행 수 (시장 2개 x 투자자 13개 = 최대 26행/일; 휴장일이거나
-        ka10051이 종합 행을 못 찾으면 해당 시장은 0행으로 건너뛴다).
+        market_flow에 적재(upsert)한 행 수 (시장 2개 x 투자자 13개 = 최대
+        26행/일; 휴장일이거나 ka10051이 종합 행을 못 찾으면 해당 시장은 0행으로
+        건너뛴다). **sector_flow 적재 행 수는 이 반환값에 포함하지 않는다** —
+        기존 collect_log/테스트가 기대하는 "26행/일" 계약을 그대로 유지하기
+        위함(업종별 적재 건수는 로그로만 남긴다).
     """
     rows_written = 0
     async with KiwoomClient() as client:
         for market in MARKETS:
-            flows = await _fetch_kiwoom_flow(client, market, target_date)
+            raw_rows = await _fetch_ka10051_rows(client, market, target_date)
+
+            flows = _summary_flows_from_rows(raw_rows, market, target_date)
             if not flows:
                 logger.info("market_flow: no data for %s %s, skipping", market, target_date)
-                continue
+            else:
+                for flow in flows:
+                    stmt = pg_insert(MarketFlow).values(
+                        market=market,
+                        date=target_date,
+                        investor=flow["investor"],
+                        net_value=flow["net_value"],
+                        net_volume=flow["net_volume"],
+                        source=SOURCE,
+                    )
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=[MarketFlow.market, MarketFlow.date, MarketFlow.investor],
+                        set_={
+                            "net_value": stmt.excluded.net_value,
+                            "net_volume": stmt.excluded.net_volume,
+                            "source": stmt.excluded.source,
+                        },
+                    )
+                    await session.execute(stmt)
+                    rows_written += 1
 
-            for flow in flows:
-                stmt = pg_insert(MarketFlow).values(
+            sector_flows = _parse_sector_rows(raw_rows, market)
+            for sector_flow in sector_flows:
+                stmt = pg_insert(SectorFlow).values(
                     market=market,
+                    sector_code=sector_flow["sector_code"],
                     date=target_date,
-                    investor=flow["investor"],
-                    net_value=flow["net_value"],
-                    net_volume=flow["net_volume"],
+                    sector_name=sector_flow["sector_name"],
+                    frgnr_net_value=sector_flow["frgnr_net_value"],
+                    orgn_net_value=sector_flow["orgn_net_value"],
+                    ind_net_value=sector_flow["ind_net_value"],
                     source=SOURCE,
                 )
                 stmt = stmt.on_conflict_do_update(
-                    index_elements=[MarketFlow.market, MarketFlow.date, MarketFlow.investor],
+                    index_elements=[SectorFlow.market, SectorFlow.sector_code, SectorFlow.date],
                     set_={
-                        "net_value": stmt.excluded.net_value,
-                        "net_volume": stmt.excluded.net_volume,
+                        "sector_name": stmt.excluded.sector_name,
+                        "frgnr_net_value": stmt.excluded.frgnr_net_value,
+                        "orgn_net_value": stmt.excluded.orgn_net_value,
+                        "ind_net_value": stmt.excluded.ind_net_value,
                         "source": stmt.excluded.source,
                     },
                 )
                 await session.execute(stmt)
-                rows_written += 1
+            if sector_flows:
+                logger.info(
+                    "market_flow: sector_flow %d건 적재 (%s, %s)",
+                    len(sector_flows),
+                    market,
+                    target_date,
+                )
 
     return rows_written
 

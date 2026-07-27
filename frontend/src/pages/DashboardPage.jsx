@@ -26,6 +26,7 @@ import {
   fetchMarketSeries,
   fetchRegime,
   fetchScalpCandidates,
+  fetchSectorRotation,
   fetchSentiment,
   fetchShortSellingMarket,
   fetchValueRank,
@@ -164,6 +165,12 @@ const GROUP_TYPE_OPTIONS = [
 ]
 const VALUE_RANK_MARKET_OPTIONS = [
   { key: 'all', label: '전체' },
+  { key: 'kospi', label: '코스피' },
+  { key: 'kosdaq', label: '코스닥' },
+]
+// 업종 자금 흐름(§5.33) 카드는 코스피/코스닥이 서로 다른 ka10051 코드 체계라
+// "전체" 합산 옵션이 없다(VALUE_RANK_MARKET_OPTIONS와 달리 2개 토글만).
+const SECTOR_ROTATION_MARKET_OPTIONS = [
   { key: 'kospi', label: '코스피' },
   { key: 'kosdaq', label: '코스닥' },
 ]
@@ -1901,6 +1908,65 @@ function Top5RowTile({ clickable, onClick, children }) {
   )
 }
 
+// 업종 자금 흐름 관찰 카드(PLAN.md §5.33-3) — GET /api/markets/{market}/
+// sector-rotation 응답을 유입 상위/유출 상위 2열 + 보조 통계 한 줄로 보여준다.
+// quant/sector_rotation.py가 "로테이션 있다/없다"를 판정하지 않는 것과 동일하게
+// 이 컴포넌트도 "배율"/"유입·유출 합계" 숫자만 그대로 노출할 뿐 매매 판단이나
+// 판정 문구를 붙이지 않는다(예: "매수"/"매도"/"로테이션 있음" 금지, house rule).
+function SectorRotationCard({ data }) {
+  if (!data) {
+    return <div className="state">불러오는 중…</div>
+  }
+  if (!data.date) {
+    // 표본 부족(sector_flow 이력이 짧음) — 에러가 아니라 정직한 "아직 안 됨" 상태.
+    return <div className="state">{data.reason || '데이터가 없습니다.'}</div>
+  }
+
+  const { gainers = [], losers = [], aggregate, date, baseline_days_used: baselineDaysUsed } = data
+
+  return (
+    <div>
+      <div className="top5-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+        <div className="top5-card">
+          <div className="top5-card-header">
+            <span className="top5-card-title">유입 상위</span>
+          </div>
+          {gainers.length === 0 && (
+            <div className="state" style={{ padding: '16px 0' }}>평소보다 뚜렷하게 유입된 업종 없음</div>
+          )}
+          {gainers.map((r) => (
+            <Top5RowTile key={r.sector_code}>
+              <span className="top5-row-name">{r.sector_name}</span>
+              <span className="top5-row-value up">평소 대비 {scoreFmt.format(r.multiple)}배</span>
+            </Top5RowTile>
+          ))}
+        </div>
+        <div className="top5-card">
+          <div className="top5-card-header">
+            <span className="top5-card-title">유출 상위</span>
+          </div>
+          {losers.length === 0 && (
+            <div className="state" style={{ padding: '16px 0' }}>평소보다 뚜렷하게 유출된 업종 없음</div>
+          )}
+          {losers.map((r) => (
+            <Top5RowTile key={r.sector_code}>
+              <span className="top5-row-name">{r.sector_name}</span>
+              <span className="top5-row-value down">평소 대비 {scoreFmt.format(r.multiple)}배</span>
+            </Top5RowTile>
+          ))}
+        </div>
+      </div>
+      {aggregate && (
+        <div className="toggle-hint" style={{ marginTop: 8 }}>
+          {formatDate(date)} 확정 · 베이스라인 {baselineDaysUsed}거래일 · 유입 합계{' '}
+          {eokLabel(aggregate.gaining_sum)} · 유출 합계 {eokLabel(aggregate.losing_sum)} · 업종 전체 합계{' '}
+          {eokLabel(aggregate.today_net_value)}(평소 {eokLabel(aggregate.baseline_signed_avg)})
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // TOP5 요약 행 — 표(FlowRankTable 등)를 그대로 축소하지 않고, "종목명·핵심 숫자·배지"
 // 만 남긴 가벼운 목록을 별도로 그린다(사용자 요구: "100개짜리 리스트도 뒤로").
@@ -1980,6 +2046,15 @@ export default function DashboardPage() {
   // 포함)와 이름 기준으로 병합해 트리맵 박스 크기는 유지하면서 색(등락률)만
   // 갱신한다(아래 groupTreemapItems).
   const [groupLive, setGroupLive] = useState(null)
+
+  // 업종 자금 흐름 관찰(PLAN.md §5.33) — GET /api/markets/{market}/sector-rotation
+  // 응답을 시장별로 담는다({kospi: {...}, kosdaq: {...}}). group_snapshot(위 트리맵)과
+  // 완전히 다른 소스(ka10051)·다른 업종 코드 체계라 groupItems와 병합하지 않고
+  // 독립 카드로 둔다(quant/sector_rotation.py 모듈 docstring "group_snapshot과는
+  // 별개 분류 체계" 참고). fetchShortSellingMarket과 동일하게 하루 1회 배치
+  // 산출물이라 마운트 시 1회만 불러온다(라이브 폴링 없음).
+  const [sectorRotation, setSectorRotation] = useState({})
+  const [sectorRotationMarket, setSectorRotationMarket] = useState('kospi')
 
   const [flowRankTop, setFlowRankTop] = useState(null)
   const [valueRankTop, setValueRankTop] = useState(null)
@@ -2258,6 +2333,18 @@ export default function DashboardPage() {
         if (!cancelled) {
           setShortSellingSeries({ kospi: kospiBody.series || [], kosdaq: kosdaqBody.series || [] })
         }
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    Promise.all([fetchSectorRotation('kospi'), fetchSectorRotation('kosdaq')])
+      .then(([kospiBody, kosdaqBody]) => {
+        if (!cancelled) setSectorRotation({ kospi: kospiBody, kosdaq: kosdaqBody })
       })
       .catch(() => {})
     return () => {
@@ -3357,6 +3444,29 @@ export default function DashboardPage() {
           }
         />
       )}
+
+      {/* 업종 자금 흐름 관찰(PLAN.md §5.33, 2026-07-28 JTBC 뉴스 클립 검토) — 업종·테마
+          트리맵 바로 아래 배치(같은 "업종 단위" 관찰이라 인접 배치가 자연스럽다는 작업
+          지시). "로테이션 있다/없다"를 판정하지 않는다 — 유입/유출 상위 업종의 평소
+          대비 배율과 순환·이탈 보조 통계만 그대로 보여준다(quant/sector_rotation.py,
+          SectorRotationCard 모듈 docstring 참고). group_snapshot(위 트리맵, 네이버
+          업종 79개/테마 266개)과는 완전히 다른 분류 체계(ka10051, 코스피/코스닥별로도
+          다른 코드 공간)라 트리맵과 데이터를 병합하지 않고 독립 카드로 둔다. */}
+      <div className="section-title" style={{ marginTop: 16 }}>업종 자금 흐름 (관찰)</div>
+      <div className="toggle-row">
+        {SECTOR_ROTATION_MARKET_OPTIONS.map((opt) => (
+          <button
+            key={opt.key}
+            type="button"
+            className={`toggle-chip ${sectorRotationMarket === opt.key ? 'active' : ''}`}
+            onClick={() => setSectorRotationMarket(opt.key)}
+          >
+            {opt.label}
+          </button>
+        ))}
+        <span className="toggle-hint">일 1회 배치 · 외국인+기관계 합산 · 업종 자신의 평소(최대 20거래일) 대비 배율</span>
+      </div>
+      <SectorRotationCard data={sectorRotation[sectorRotationMarket]} />
 
       {/* 5. TOP5 요약 3열 — "…기준" 라벨은 대표 기준일(baseDate)과 같으면 생략, 다르면
           MM-DD만 붙인다(staleHintLabel, 대시보드 상단 표시와 동일 규칙). 정확한 날짜는

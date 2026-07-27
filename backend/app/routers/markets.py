@@ -98,7 +98,7 @@ from ..collectors.market_flow import fetch_live_flow
 from ..db import get_session
 from ..market_hours import KST, is_market_closed as _market_closed_kst, is_nxt_closed
 from ..models import IndexOhlcv, MacroSeries, MarketBreadth, MarketFlow, ShortSellingMarket, Stock
-from ..quant import flow_acceleration, regime_backtest, volume_surge
+from ..quant import flow_acceleration, regime_backtest, sector_rotation, volume_surge
 from ..services import DB_MARKET, get_market_series_from_db
 from . import basis as basis_router
 
@@ -329,6 +329,29 @@ async def market_short_selling_series(
         "days": days,
         "series": [_serialize_short_selling_row(r) for r in rows],
     }
+
+
+@router.get("/api/markets/{market}/sector-rotation")
+async def market_sector_rotation(
+    market: str,
+    baseline_days: int = Query(sector_rotation.BASELINE_WINDOW_DAYS, ge=1, le=120),
+    top_n: int = Query(sector_rotation.DEFAULT_TOP_N, ge=1, le=30),
+    session: AsyncSession = Depends(get_session),
+):
+    """업종별 자금 유입/유출 랭킹 + "순환 vs 이탈" 보조 통계(PLAN.md §5.33-3).
+
+    `quant/sector_rotation.py::compute_sector_rotation`을 그대로 노출한다 —
+    이 엔드포인트는 그 함수가 반환하는 랭킹/숫자를 그대로 전달할 뿐 "로테이션
+    있다/없다"를 판정하지 않는다(모듈 docstring 참고, PLAN.md §5.33 명시적
+    house rule). `sector_flow`(collectors/market_flow.py가 ka10051 응답에서
+    함께 적재)가 DB에 없으면 `reason`이 채워진 "표본 부족" 응답을 그대로
+    돌려준다(에러 아님 — 이 프로젝트의 다른 백테스트/관찰 지표와 동일한 관례)."""
+    if market not in ("kospi", "kosdaq"):
+        raise HTTPException(400, "market must be one of ['kospi', 'kosdaq']")
+
+    return await sector_rotation.compute_sector_rotation(
+        session, market, baseline_days=baseline_days, top_n=top_n
+    )
 
 
 def _fetch_breadth_blocking(market: str) -> dict:

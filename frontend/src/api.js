@@ -185,6 +185,17 @@ export async function fetchShortSellingMarket(market, days = 90) {
   return getJson(`/api/markets/${market}/short-selling?days=${days}`)
 }
 
+// GET /api/markets/{market}/sector-rotation -> { market, date, baseline_days_requested,
+// baseline_days_used, sector_count, gainers: [...], losers: [...], aggregate: {...} }
+// | { market, date: null, reason, gainers: [], losers: [], aggregate: null } (표본 부족).
+// (PLAN.md §5.33-3) — 업종별 자금 유입/유출 관찰 랭킹, "로테이션 있다/없다" 판정 없음
+// (app/quant/sector_rotation.py 모듈 docstring 참고). fetchShortSellingMarket과 동일한
+// 관례로 정적 스냅샷 파이프라인 대상에서 제외한다(신규 데이터, STATIC_DATA에서는 호출부가
+// 실패를 조용히 빈 상태로 처리).
+export async function fetchSectorRotation(market) {
+  return getJson(`/api/markets/${market}/sector-rotation`)
+}
+
 // GET /api/markets/breadth/live -> { kospi: {...}|null, kosdaq: {...}|null, cached_at }
 // — 장중 온디맨드(60초 서버 캐시). 정적 모드에서는 라이브 소스를 호출할 수 없으므로
 // 일별 스냅샷(breadth-{market}.json)의 최신 행으로 대체한다 — 호출부(MarketPage)는

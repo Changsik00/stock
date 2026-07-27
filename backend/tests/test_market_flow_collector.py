@@ -116,6 +116,87 @@ async def test_collect_upserts_13_rows_per_market_with_kiwoom_source(monkeypatch
     assert by_investor["보험"] == -500  # "-500"
 
 
+def _sector_row(inds_cd: str, inds_nm: str, frgnr: str, orgn: str, ind: str) -> dict:
+    """실측(2026-07-28, PLAN.md §5.33-1)에서 확인한 대로, 업종별 행도 종합 행과
+    동일한 13개 필드를 전부 갖는다 — 여기서는 SectorFlow가 실제로 쓰는 3개
+    (frgnr_netprps/orgn_netprps/ind_netprps)만 채우고 나머지는 생략해도
+    `_parse_sector_rows`가 그 3개만 읽으므로 테스트에 지장 없다."""
+    return {
+        "inds_cd": inds_cd,
+        "inds_nm": inds_nm,
+        "frgnr_netprps": frgnr,
+        "orgn_netprps": orgn,
+        "ind_netprps": ind,
+    }
+
+
+async def test_collect_upserts_sector_rows_alongside_summary(monkeypatch):
+    """PLAN.md §5.33-1 핵심 동작: 종합 행 옆의 업종별 행들이 sector_flow에
+    upsert되고, market_flow(26행)과 별개로 카운트되지 않는다(반환값은 여전히
+    26)."""
+    responses = {
+        "0": {
+            "inds_netprps": [
+                _summary_row("001_AL", "종합(KOSPI)"),
+                _sector_row("013_AL", "전기/전자", "-2000", "1500", "500"),
+                _sector_row("008_AL", "화학", "300", "-100", "-200"),
+            ]
+        },
+        "1": {
+            "inds_netprps": [
+                _summary_row("101_AL", "종합(KOSDAQ)"),
+                _sector_row("124_AL", "전기/전자", "-50", "20", "30"),
+            ]
+        },
+    }
+    _patch_client(monkeypatch, responses)
+
+    session = FakeSession()
+    rows_written = await market_flow.collect(session, DATE)
+
+    # market_flow 반환 계약은 그대로(26) — sector_flow 적재분은 포함하지 않는다.
+    assert rows_written == 26
+
+    params = [stmt.compile().params for stmt in session.executed]
+    sector_params = [p for p in params if "sector_code" in p]
+    assert len(sector_params) == 3  # kospi 2개 + kosdaq 1개
+
+    by_code = {(p["market"], p["sector_code"]): p for p in sector_params}
+    kospi_elec = by_code[("kospi", "013_AL")]
+    assert kospi_elec["sector_name"] == "전기/전자"
+    assert kospi_elec["frgnr_net_value"] == -2000
+    assert kospi_elec["orgn_net_value"] == 1500
+    assert kospi_elec["ind_net_value"] == 500
+    assert kospi_elec["date"] == DATE
+    assert kospi_elec["source"] == "kiwoom"
+
+    kospi_chem = by_code[("kospi", "008_AL")]
+    assert kospi_chem["frgnr_net_value"] == 300
+
+    kosdaq_elec = by_code[("kosdaq", "124_AL")]
+    assert kosdaq_elec["sector_name"] == "전기/전자"
+    assert kosdaq_elec["frgnr_net_value"] == -50
+
+    # 종합 행(inds_cd가 시장별 summary code) 자신은 sector_flow에 들어가지 않는다.
+    assert ("kospi", "001_AL") not in by_code
+    assert ("kosdaq", "101_AL") not in by_code
+
+
+def test_parse_sector_rows_excludes_summary_row_only():
+    """`_parse_sector_rows`는 종합 행 하나만 제외하고 나머지는(시가총액 규모별/
+    지수구성별 분류 포함) 성격을 가리지 않고 전부 반환한다 — "진짜 업종"
+    필터링은 quant/sector_rotation.py의 책임(모듈 docstring 참고)."""
+    rows = [
+        _summary_row("001_AL", "종합(KOSPI)"),
+        _sector_row("002_AL", "대형주", "1", "2", "3"),  # 규모별 분류, 그래도 포함
+        _sector_row("013_AL", "전기/전자", "10", "20", "30"),
+    ]
+    parsed = market_flow._parse_sector_rows(rows, "kospi")
+    codes = {p["sector_code"] for p in parsed}
+    assert codes == {"002_AL", "013_AL"}
+    assert "001_AL" not in codes
+
+
 async def test_collect_skips_market_when_summary_row_missing(monkeypatch):
     """inds_cd가 기대값과 다르면(또는 목록이 비어 있으면) 크래시하지 않고 해당
     시장은 0행으로 건너뛴다."""
@@ -128,10 +209,16 @@ async def test_collect_skips_market_when_summary_row_missing(monkeypatch):
     session = FakeSession()
     rows_written = await market_flow.collect(session, DATE)
 
-    # kospi contributes 0 rows, kosdaq contributes 13.
+    # kospi contributes 0 market_flow rows, kosdaq contributes 13. The lone
+    # kospi row (inds_cd="002", not the "001_AL" summary code) is still a
+    # non-summary row, so it becomes exactly one sector_flow upsert for kospi
+    # (see test_collect_upserts_sector_rows_alongside_summary below for the
+    # dedicated sector_flow coverage) — only the market_flow-shaped params
+    # (identified by the "investor" key) are checked here.
     assert rows_written == 13
     params = [stmt.compile().params for stmt in session.executed]
-    assert all(p["market"] == "kosdaq" for p in params)
+    market_flow_params = [p for p in params if "investor" in p]
+    assert all(p["market"] == "kosdaq" for p in market_flow_params)
 
 
 async def test_fetch_kiwoom_flow_picks_summary_row_not_first_row(monkeypatch):
