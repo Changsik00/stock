@@ -458,9 +458,12 @@ export async function fetchMarketIntraday(market, interval) {
 
 // GET /api/markets/index-tiles/live -> { kospi: {close, change_rate, date, time,
 // prev_close, source}|null, kosdaq: {...}|null, futures: {...}|null, market_closed,
+// risk: {kospi, kosdaq, kospi_sidecar, kosdaq_sidecar, alerts, has_data}|null,
 // cached_at } — 대시보드 상단 "지수" 타일(코스피/코스닥/선물) 1D 실시간(60초 서버
 // 캐시, 2026-07-21). 코스피/코스닥은 ka20005 1분봉 마지막 종가, 선물은 네이버
 // fchart "오늘" 봉 마지막 종가 — 등락률은 셋 다 index_ohlcv 전일 확정 종가 대비.
+// `risk`는 PLAN.md §5.36(시장 위험 경보 배너) — 서킷브레이커/사이드카 발동 기준
+// 도달·거래량 급증 판정(RiskAlertBanner.jsx가 소비). 장 마감이면 null.
 // 로컬 전용 기능(다른 라이브 엔드포인트와 동일한 이유), STATIC_DATA 대상 아님.
 export async function fetchIndexTilesLive() {
   return getJson('/api/markets/index-tiles/live')

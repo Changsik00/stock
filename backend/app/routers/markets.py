@@ -106,7 +106,7 @@ from ..models import (
     Stock,
     VolumeProfileDaily,
 )
-from ..quant import flow_acceleration, regime_backtest, sector_rotation, volume_surge
+from ..quant import flow_acceleration, regime_backtest, risk_alert, sector_rotation, volume_surge
 from ..quant.volume_profile import compute_volume_profile, detect_levels
 from ..services import DB_MARKET, get_market_series_from_db
 from . import basis as basis_router
@@ -1597,21 +1597,58 @@ async def _warm_index_tiles_live(session: AsyncSession) -> dict:
         market_closed = _market_closed_kst(now_kst)
 
         result: dict[str, dict | None] = {"kospi": None, "kosdaq": None, "futures": None}
+        flow_accelerations: dict[str, dict[str, dict | None]] | None = None
         if not market_closed:
             for market in ("kospi", "kosdaq"):
                 result[market] = await _index_tile_from_intraday(session, market)
             result["futures"] = await _index_tile_futures_live(session)
+
+            # 수급 가속도(기울기) 위험 경보(PLAN.md §5.36-4, 2026-07-28 같은 대화
+            # 중 추가 요청) — §5.15 `/api/markets/regime`의 `_compute_regime_combo`가
+            # 이미 쓰는 것과 완전히 같은 함수·같은 4개 series_key(코스피/코스닥 x
+            # 외국인/기관계, REGIME_MARKETS/REGIME_INVESTORS)를 여기서 독립적으로
+            # 한 번 더 계산한다 — 가벼운 인덱스 조회 3회 x 4조합뿐이고, 이 파일의
+            # 다른 라이브 엔드포인트들도 서로의 캐시에 의존하지 않고 각자 계산하는
+            # 기존 관례를 그대로 따른다(regime 캐시에 의존하면 두 엔드포인트가
+            # 서로 결합돼 오히려 더 복잡해진다). 서킷브레이커/사이드카/거래량
+            # 급증과 동일한 이유로 장 마감이면(이 if 블록 밖) 계산하지 않는다 —
+            # "지금 당장의 위험"이 아니게 되기 때문.
+            flow_accelerations = {market: {} for market in REGIME_MARKETS}
+            for market in REGIME_MARKETS:
+                for investor in REGIME_INVESTORS:
+                    series_key = f"flow_{market}_{investor}"
+                    flow_accelerations[market][investor] = await flow_acceleration.compute_flow_acceleration(
+                        session, series_key, now_kst
+                    )
 
         # 장 마감이거나 라이브 호출이 실패한 시장만 DB 확정치로 채운다.
         for market in ("kospi", "kosdaq", "futures"):
             if result.get(market) is None:
                 result[market] = await _index_tile_confirmed(session, market)
 
+        # 위험 경보 판정(PLAN.md §5.36) — 장 마감이면 생략한다. `risk`는 "지금 당장
+        # 진행 중인 위험"을 알리는 배너 용도인데, 장 마감 후엔 세 시장 모두
+        # index_ohlcv EOD 확정치(그날 최종 수치)로 채워져 있어 "방금 그 임계값을
+        # 넘었다"는 관찰이 더 이상 시의성이 없다(이미 끝난 장의 최종 결과일 뿐,
+        # 재평가해도 다음 개장 전까지 값이 바뀌지 않는다) — 새 배치가 하루 지난
+        # 하락폭을 "위험 경보"로 계속 띄우는 건 오히려 오해를 부른다. 그래서
+        # 장중에만 계산하고, 장 마감이면 `None`으로 둬 프런트가 배너를 아예
+        # 렌더하지 않게 한다(별도 "장마감이라 판정 생략" 문구조차 배너로 띄우지
+        # 않음 — 이미 `.banner`(NXT/장마감 안내)가 그 역할을 하고 있어 중복이다).
+        risk = (
+            risk_alert.classify_market_risk(
+                result.get("kospi"), result.get("kosdaq"), result.get("futures"), flow_accelerations
+            )
+            if not market_closed
+            else None
+        )
+
         payload = {
             "kospi": result.get("kospi"),
             "kosdaq": result.get("kosdaq"),
             "futures": result.get("futures"),
             "market_closed": market_closed,
+            "risk": risk,
             "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         }
         _index_tiles_cache["data"] = payload
@@ -1630,8 +1667,33 @@ async def index_tiles_live(session: AsyncSession = Depends(get_session)):
     index_ohlcv 최신 확정 종가(prev_close) 대비. **장 마감이면 키움/네이버 호출을
     생략**하고 세 시장 모두 index_ohlcv 확정치(EOD)로 즉시 응답한다.
 
+    **`risk`(PLAN.md §5.36, 시장 위험 경보 상단 배너)**: `quant/risk_alert.py::
+    classify_market_risk`가 위 kospi/kosdaq/futures 값을 그대로 받아 서킷브레이커
+    (코스피/코스닥 각각 0~3단계)·사이드카(코스피만, K200 선물 ±5%)·거래량 급증
+    (자체 휴리스틱, KRX 공식 제도 아님)을 판정한 결과 — 새 외부 호출 없이 이미
+    받아 온 값만 재사용한다. **장 마감이면 `null`**이다(더 이상 "지금 당장의
+    위험"이 아니라 하루 지난 EOD 확정치라 배너 시의성이 없음, `_warm_index_tiles_
+    live` 주석 참고). 서킷브레이커/사이드카는 KRX 공식 규정 수치를 그대로 쓰지만,
+    이 값은 1분봉 종가로 임계값 이탈을 근사 관찰한 것일 뿐 KRX의 실제 발동 선언을
+    수신하는 공식 채널이 아니므로, 이 필드를 노출하는 모든 화면은 "발동되었습니다"
+    단정이 아니라 "발동 기준에 해당하는 변동폭이 관찰됨" 같은 관찰형 문구만 써야
+    한다(`quant/risk_alert.py` 모듈 docstring "정직성 원칙" 절).
+
+    **`risk.alerts`의 `flow_slope` 종류(PLAN.md §5.36-4, 2026-07-28 추가 요청)**:
+    §5.17 `quant/flow_acceleration.py`가 계산하는 코스피/코스닥 x 외국인/기관계
+    4개 조합의 "기울기"(`recent_velocity`/`prior_velocity`, 각 30분 구간 순매수
+    변화량 — `/api/markets/regime`이 쓰는 것과 동일한 함수를 여기서 독립적으로
+    한 번 더 호출)를 재사용해, 두 구간 모두 매도 중이고 최근 구간 매도 속도가
+    직전 구간의 `FLOW_SLOPE_ALERT_MULTIPLE`배 이상으로 빨라졌으면 경보를 얹는다.
+    거래량 급증과 마찬가지로 KRX 공식 제도가 아니라 이 프로젝트가 자체적으로
+    정한 미검증 휴리스틱이고, §5.17이 명시한 "아직 정규화/검증 안 된 신호"라는
+    한계도 그대로 적용된다 — "매도가 계속될 것" 같은 예측이 아니라 방금까지
+    관찰된 사실만 서술해야 한다(`quant/risk_alert.py::_classify_flow_slope`
+    docstring 참고).
+
     Returns ``{"kospi": {close, change_rate, date, time, prev_close, source}|None,
     "kosdaq": {...}|None, "futures": {...}|None, "market_closed": bool,
-    "cached_at": iso8601}``.
+    "risk": {kospi, kosdaq, kospi_sidecar, kosdaq_sidecar, flow_slope, alerts,
+    has_data}|None, "cached_at": iso8601}``.
     """
     return await _warm_index_tiles_live(session)

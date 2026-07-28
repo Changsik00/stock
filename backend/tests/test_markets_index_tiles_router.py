@@ -144,6 +144,24 @@ def _force_market_open(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _stub_flow_acceleration(monkeypatch):
+    """PLAN.md §5.36-4 — `_warm_index_tiles_live`가 이제 장중마다
+    `flow_acceleration.compute_flow_acceleration`을 4개 series_key에 대해
+    호출한다(각 호출은 `session.execute`를 3번씩 쓴다). 이 파일의 기존
+    테스트들은 prev_close 조회용 `_FakeQueueSession`을 3개 결과만 채워 두므로
+    (kospi/kosdaq/futures 순), 그대로 두면 새로 추가된 12번의 session.execute
+    호출이 큐를 초과해 IndexError로 깨진다. 기존 테스트들은 기울기 경보와
+    무관하므로 기본값으로 None(판정 불가)을 반환하도록 이 함수 자체를
+    monkeypatch해 세션을 전혀 건드리지 않게 한다 — 기울기 경보를 실제로
+    검증하는 테스트는 이 monkeypatch를 자기 안에서 다시 덮어쓴다."""
+
+    async def _fake_compute_flow_acceleration(session, series_key, now, window_minutes=30):
+        return None
+
+    monkeypatch.setattr(markets.flow_acceleration, "compute_flow_acceleration", _fake_compute_flow_acceleration)
+
+
+@pytest.fixture(autouse=True)
 def _restore_kiwoom_client():
     yield
     markets.KiwoomClient = _real_kiwoom_client
@@ -336,6 +354,113 @@ async def test_index_tiles_live_no_db_data_returns_none_not_error(monkeypatch):
     assert body["kospi"] is None
     assert body["kosdaq"] is None
     assert body["futures"] is None
+
+
+async def test_index_tiles_live_includes_risk_field_at_circuit_breaker_level(monkeypatch):
+    """PLAN.md §5.36 — 코스피가 전일 대비 -8% 이상 급락한 상황을 코스피
+    close/prev_close 조합으로 재현해 `risk.kospi.circuit_breaker_level`이
+    1단계로 뜨는지 확인한다(코스피/코스닥 둘 다 같은 fake sector response를
+    쓰므로 close=3050.0으로 동일 — prev_close만 각각 다르게 줘서 코스피만
+    -8% 이상이 되도록 만든다: (3050-3315.22)/3315.22*100 ≈ -8.0%)."""
+    markets.KiwoomClient = _make_fake_kiwoom_client(_sector_response("+305000"))
+
+    def fake_futures_fetch(start, end):
+        return [{"date": dt.date(2026, 7, 28), "open": 402.0, "high": 410.0, "low": 400.0, "close": 408.0, "volume": 12}]
+
+    monkeypatch.setattr(markets, "_fetch_futures_today_blocking", fake_futures_fetch)
+    # kospi prev_close=3315.22 -> change_rate ~= -8.0%(CB1 경계), kosdaq
+    # prev_close=3050.0(등락 없음) -> CB 0단계.
+    app.dependency_overrides[get_session] = _prev_close_session(3315.22, 3050.0, 400.0)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/index-tiles/live")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["risk"] is not None
+    assert body["kospi"]["change_rate"] <= -8.0
+    assert body["risk"]["kospi"]["circuit_breaker_level"] == 1
+    assert body["risk"]["kosdaq"]["circuit_breaker_level"] == 0
+    assert body["risk"]["alerts"][0]["kind"] == "circuit_breaker"
+    assert body["risk"]["alerts"][0]["market"] == "kospi"
+    assert body["risk"]["kosdaq_sidecar"] == {
+        "supported": False,
+        "reason": body["risk"]["kosdaq_sidecar"]["reason"],
+    }
+    assert body["risk"]["kosdaq_sidecar"]["supported"] is False
+
+
+async def test_index_tiles_live_risk_is_null_when_market_closed(monkeypatch):
+    """장 마감이면 `risk`를 계산하지 않고 `null`로 둔다 — 더 이상 "지금 당장의
+    위험"이 아니라 하루 지난 EOD 확정치이기 때문(`_warm_index_tiles_live`
+    주석 참고)."""
+    monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: True)
+
+    def _raise(*args, **kwargs):  # pragma: no cover
+        raise AssertionError("KiwoomClient should not be constructed when market is closed")
+
+    markets.KiwoomClient = _raise
+    monkeypatch.setattr(
+        markets,
+        "get_market_series_from_db",
+        _fake_confirmed({"kospi": 3000.0, "kosdaq": 800.0, "futures": 400.0}),
+    )
+    app.dependency_overrides[get_session] = _unused_session
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/index-tiles/live")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["market_closed"] is True
+    assert body["risk"] is None
+
+
+async def test_index_tiles_live_includes_flow_slope_alert_when_selling_accelerates(monkeypatch):
+    """PLAN.md §5.36-4(2026-07-28 같은 대화 중 추가 요청) — 코스피 외국인 매도
+    속도가 직전 30분 대비 배수 이상 빨라진 상황을 `flow_acceleration.
+    compute_flow_acceleration` monkeypatch로 재현한다. 실 `intraday_sample`에
+    정밀한 시각별 행을 시딩하는 대신, 이미 이 값을 계산하는 함수 자체를
+    모킹하는 게 가장 단순하고 견고하다(§5.36-4 프롬프트 지시 그대로)."""
+    markets.KiwoomClient = _make_fake_kiwoom_client(_sector_response("+305000"))
+
+    def fake_futures_fetch(start, end):
+        return [{"date": dt.date(2026, 7, 28), "open": 402.0, "high": 410.0, "low": 400.0, "close": 408.0, "volume": 12}]
+
+    monkeypatch.setattr(markets, "_fetch_futures_today_blocking", fake_futures_fetch)
+    # kospi/kosdaq 둘 다 close=3050.0(동일 fake sector response) -> prev_close도
+    # 3050.0으로 맞춰 등락률 0%(CB/사이드카 비활성). futures도 변동 작게(2%)
+    # 둬서 사이드카(±5%) 미달 -> 이 테스트에서 활성화되는 경보는 flow_slope 하나뿐.
+    app.dependency_overrides[get_session] = _prev_close_session(3050.0, 3050.0, 400.0)
+
+    async def fake_compute_flow_acceleration(session, series_key, now, window_minutes=30):
+        if series_key == "flow_kospi_외국인":
+            return {
+                "window_minutes": 30,
+                "recent_velocity": -200.0,
+                "prior_velocity": -50.0,
+                "acceleration": -150.0,
+            }
+        return None
+
+    monkeypatch.setattr(markets.flow_acceleration, "compute_flow_acceleration", fake_compute_flow_acceleration)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/index-tiles/live")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["risk"] is not None
+    flow_alerts = [a for a in body["risk"]["alerts"] if a["kind"] == "flow_slope"]
+    assert len(flow_alerts) == 1
+    assert flow_alerts[0]["market"] == "kospi"
+    assert flow_alerts[0]["investor"] == "외국인"
+    assert flow_alerts[0]["recent_velocity"] == -200.0
+    assert flow_alerts[0]["prior_velocity"] == -50.0
+    assert flow_alerts[0]["multiple"] == 4.0
+    assert body["risk"]["flow_slope"]["kospi"]["외국인"]["alert"] is True
+    assert body["risk"]["flow_slope"]["kospi"]["기관계"]["evaluable"] is False
+    assert body["risk"]["flow_slope"]["kosdaq"]["외국인"]["evaluable"] is False
 
 
 async def test_index_tiles_live_prev_close_ignores_todays_seeded_row(monkeypatch):

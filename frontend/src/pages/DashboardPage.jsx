@@ -47,6 +47,7 @@ import MacroChart from '../components/MacroChart'
 import MarketFundChart from '../components/MarketFundChart'
 import Modal from '../components/Modal'
 import PeriodPicker from '../components/PeriodPicker'
+import RiskAlertBanner from '../components/RiskAlertBanner'
 import SentimentGauge from '../components/SentimentGauge'
 import StockDetailModal from '../components/StockDetailModal'
 import StockSearch from '../components/StockSearch'
@@ -2876,6 +2877,16 @@ export default function DashboardPage() {
           </span>
         )}
       </div>
+
+      {/* 시장 위험 경보 배너(PLAN.md §5.36, 2026-07-28) — 서킷브레이커/사이드카
+          발동 기준 도달·거래량 급증을 알린다. index-tiles/live의 `risk` 필드가
+          이미 판정을 끝내 놓은 값을 그대로 넘기기만 한다(새 fetch 없음, 아래
+          indexTilesLive는 기존 1분 티어가 채운다). 장 마감이면 백엔드가 `risk`
+          자체를 null로 주므로(더 이상 "지금 당장의 위험"이 아님) 이 배너는
+          자동으로 숨는다. 아래 NXT/장마감 안내(.banner)보다 먼저 둬서 "지금
+          진행 중인 위험"이 항상 가장 눈에 먼저 띄게 한다(실제로는 risk가 장중
+          에만 채워지므로 두 배너가 동시에 뜰 일은 거의 없다). */}
+      {!STATIC_DATA && <RiskAlertBanner risk={indexTilesLive?.risk} />}
 
       {/* 장 상태 배너(PLAN.md §5.9) — 정규장 중엔 렌더하지 않는다(가장 흔한 상태라
           배너로 화면을 어지럽히지 않는다). 정적 배포(STATIC_DATA)는 라이브 폴링이

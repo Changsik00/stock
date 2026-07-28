@@ -58,6 +58,25 @@
   --badge-warn-fg: #9a3412;
   --badge-info-bg: #dbeafe;
   --badge-info-fg: #1e3a8a;
+
+  /* 시장 위험 경보 배너(PLAN.md §5.36, 2026-07-28) 전용 심각도 톤 — RiskAlertBanner.jsx.
+     이 파일 대부분의 배지/오버레이는 "관찰 사실만 서술, 경고색 없음" 원칙
+     (atRiskBadgeLabel 주석 등)을 따르지만, 이 배너는 해석·예측이 아니라 KRX가
+     실제로 정한 규정 임계값(서킷브레이커 8/15/20%, 사이드카 ±5%) 도달 여부를
+     알리는 용도라 그 원칙의 예외로 둔다(사용자가 "위험하다고 경고 발동을
+     해달라"고 명시적으로 요청). danger=서킷브레이커 2·3단계, warn=서킷브레이커
+     1단계·사이드카(둘 다 KRX 공식 제도), info=거래량 급증(이 프로젝트 자체
+     휴리스틱, 공식 제도 아님 — danger/warn보다 톤을 낮춰 시각적으로도 "공식
+     규정과 다른 종류"임을 구분한다). */
+  --risk-danger-bg: #fde2e2;
+  --risk-danger-fg: #8f1d1d;
+  --risk-danger-border: #e08a8a;
+  --risk-warn-bg: #fff1cc;
+  --risk-warn-fg: #7a4b00;
+  --risk-warn-border: #f0c36d;
+  --risk-info-bg: #eef1f6;
+  --risk-info-fg: #3c4a5e;
+  --risk-info-border: #c8d0dc;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -106,6 +125,19 @@
     --badge-warn-fg: #431407;
     --badge-info-bg: #60a5fa;
     --badge-info-fg: #0c1c3d;
+
+    /* 라이트 :root 블록 "시장 위험 경보 배너" 주석 참고 — 다크 테마는 어두운
+       페이지 위에서 옅은 배경이 붕 뜨는 대비라 채도 높은 배경 + 밝은 글자로
+       반전한다(--badge-etf-* 등 기존 다크 오버라이드와 동일한 관례). */
+    --risk-danger-bg: #4a1414;
+    --risk-danger-fg: #ffb4b4;
+    --risk-danger-border: #7a2323;
+    --risk-warn-bg: #4a3200;
+    --risk-warn-fg: #ffd580;
+    --risk-warn-border: #7a5500;
+    --risk-info-bg: #23272e;
+    --risk-info-fg: #c9d3e0;
+    --risk-info-border: #3a4150;
   }
 }
 
@@ -151,6 +183,18 @@
   --badge-warn-fg: #431407;
   --badge-info-bg: #60a5fa;
   --badge-info-fg: #0c1c3d;
+
+  /* 라이트 :root 블록 "시장 위험 경보 배너" 주석 + 위 @media 다크 오버라이드와
+     동일한 값(수동 다크 테마 토글용, data-theme='dark'). */
+  --risk-danger-bg: #4a1414;
+  --risk-danger-fg: #ffb4b4;
+  --risk-danger-border: #7a2323;
+  --risk-warn-bg: #4a3200;
+  --risk-warn-fg: #ffd580;
+  --risk-warn-border: #7a5500;
+  --risk-info-bg: #23272e;
+  --risk-info-fg: #c9d3e0;
+  --risk-info-border: #3a4150;
 }
 
 * {
@@ -386,6 +430,82 @@ header h1 {
   color: var(--text-secondary);
   margin-bottom: 16px;
   line-height: 1.5;
+}
+
+/* 시장 위험 경보 배너(PLAN.md §5.36) — 레이아웃만 여기서 정의하고 심각도별
+   색은 위 :root의 --risk-*(danger/warn/info) 토큰을 그대로 쓴다
+   (RiskAlertBanner.jsx). .banner와 달리 의도적으로 경고 톤을 쓰는 예외임을
+   위 --risk-* 변수 선언부 주석에 근거를 남겨 뒀다. */
+.risk-banner {
+  border: 1px solid var(--risk-warn-border);
+  background: var(--risk-warn-bg);
+  color: var(--risk-warn-fg);
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.risk-banner--danger {
+  border-color: var(--risk-danger-border);
+  background: var(--risk-danger-bg);
+  color: var(--risk-danger-fg);
+}
+
+.risk-banner--warn {
+  border-color: var(--risk-warn-border);
+  background: var(--risk-warn-bg);
+  color: var(--risk-warn-fg);
+}
+
+.risk-banner--info {
+  border-color: var(--risk-info-border);
+  background: var(--risk-info-bg);
+  color: var(--risk-info-fg);
+}
+
+.risk-banner-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.risk-banner-icon {
+  flex: none;
+}
+
+.risk-banner-headline {
+  flex: 1;
+  font-weight: 600;
+}
+
+.risk-banner-dismiss {
+  flex: none;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+  opacity: 0.7;
+}
+
+.risk-banner-dismiss:hover {
+  opacity: 1;
+}
+
+.risk-banner-secondary {
+  margin-top: 6px;
+  font-size: 12px;
+  opacity: 0.9;
+}
+
+.risk-banner-disclaimer {
+  margin-top: 4px;
+  font-size: 11px;
+  opacity: 0.75;
 }
 
 .section-title {
