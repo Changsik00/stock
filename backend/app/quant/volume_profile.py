@@ -30,7 +30,8 @@ volume-at-price, Level 2 호가창 누적)은 이 프로젝트에 없다. 갖고
 신호로 승격하려면 그때 가서 동일한 백테스트 검증을 거쳐야 한다(지금은 하지
 않는다).
 
-**입력 형태 — 종목/지수 공용**: `routers/stocks.py::_read_candles`(종목)와
+**입력 형태 — 종목/지수 공용**: `services.py::get_stock_series_from_db`(종목,
+2026-07-28 전 `routers/stocks.py::_read_candles`에서 PLAN.md §5.35-2로 이전)와
 `services.py::get_market_series_from_db`(지수)는 이미 동일한 응답 형태로
 맞춰져 있다(각 모듈 docstring 참고) — `{"date", "open", "high", "low", "close",
 "changeRate", "volume", "value"}`. 이 모듈은 그중 `high`/`low`/`volume` 세
@@ -106,7 +107,7 @@ def _valid_bars(bars: list[dict]) -> list[tuple[float, float, float]]:
 
 def compute_volume_profile(bars: list[dict], num_bins: int = DEFAULT_NUM_BINS) -> dict:
     """`bars`(일봉 또는 분봉 OHLCV 리스트, 순서 무관 — 각 원소는 최소
-    `"high"`/`"low"`/`"volume"` 키를 가진 dict, `_read_candles`/
+    `"high"`/`"low"`/`"volume"` 키를 가진 dict, `get_stock_series_from_db`/
     `get_market_series_from_db`의 출력 그대로 넘기면 됨)를 받아 전체 가격
     구간(모든 유효 봉의 low 최솟값 ~ high 최댓값)을 `num_bins`개 등폭
     구간(bin)으로 나누고, 각 봉의 거래량을 그 봉이 걸치는 bin들에 균등분배해

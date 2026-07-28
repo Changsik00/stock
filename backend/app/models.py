@@ -445,3 +445,47 @@ class IntradaySample(Base):
     time: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
     value: Mapped[float] = mapped_column(Numeric(14, 4), nullable=False)
     resolution_seconds: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
+
+
+class VolumeProfileDaily(Base):
+    """거래량 프로파일 일별 스냅샷 (PLAN.md §5.35) — §5.34
+    (``quant/volume_profile.py``)의 온디맨드 계산 결과를 매일 배치로 적재해
+    "POC가 어느 방향으로 이동 중인지" 같은 추이를 볼 수 있게 누적한다(§5.34는
+    요청마다 다시 계산할 뿐 아무것도 남기지 않았다 — 사용자 지적: "단발성으로
+    확인하지 말고 누적 정보로 추이 분석을 해야 하는데").
+
+    ``entity_type``은 ``"index"``(지수: 코스피/코스닥/선물) 또는
+    ``"stock"``(개별 종목, watchlist 대상). ``entity_code``는 지수면
+    ``routers/markets.py``의 ``MARKETS``와 동일한 표기(``kospi``/``kosdaq``/
+    ``futures`` — ``collectors/ohlcv.py`` 내부의 ``k200_futures``/``kospi200``
+    표기가 아니다. 이 테이블은 ``services.py::get_market_series_from_db``를
+    거쳐 이미 변환된 값을 그대로 쓴다), 종목이면 ``stocks.code``와 같은 값이다.
+
+    **entity_code에 FK를 걸지 않는다** — 지수 식별자(kospi/kosdaq/futures)는
+    ``stocks`` 테이블의 행이 아니기 때문(``MarketFlow.market``/
+    ``SectorFlow.sector_code``가 이미 쓰는 것과 동일한, 문자열 비FK 선례).
+
+    ``levels``는 ``quant/volume_profile.py::detect_levels()``의 반환값을
+    가공 없이 그대로 JSONB로 저장한다. 종목이 watchlist에 막 추가돼 아직
+    캔들이 적거나, 지수라도 초기 적재 구간이 짧으면 ``poc_price=None``/
+    ``levels=[]``일 수 있다 — 이는 오류가 아니라 "아직 표본이 부족하다"는
+    정직한 관찰이므로(``detect_levels``의 ``MIN_BARS_FOR_LEVELS`` 미달) 그
+    상태 그대로 행을 적재한다(행 자체를 건너뛰면 나중에 추이를 조회할 때
+    "그 날짜엔 계산을 안 한 것"과 "계산했더니 표본 부족이었던 것"을 구분할
+    수 없다). ``bar_count``가 그 판단 근거를 남긴다.
+
+    ``lookback_days``는 그 스냅샷 계산에 실제로 쓰인 조회 창(예: 180)을
+    기록한다 — 나중에 스냅샷 간 조회 창이 달라졌을 수 있다는 맥락을 추이
+    해석 시 함께 볼 수 있게 하기 위함.
+    """
+
+    __tablename__ = "volume_profile_daily"
+
+    entity_type: Mapped[str] = mapped_column(String(10), primary_key=True)  # index | stock
+    entity_code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    poc_price: Mapped[float | None] = mapped_column(Numeric(18, 4))
+    levels: Mapped[list | None] = mapped_column(JSONB)
+    bar_count: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
+    total_volume: Mapped[float | None] = mapped_column(Numeric(24, 4))
+    lookback_days: Mapped[int] = mapped_column(SmallInteger, nullable=False)

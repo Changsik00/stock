@@ -2216,6 +2216,85 @@ close/volume)과 온디맨드 분봉(1분 단위 OHLCV)뿐이다. 그래서 이 
 | 5.34-2 | API 반영 | 종목상세 또는 지수 시리즈 조회에 거래량 프로파일 결과 추가(신규 엔드포인트 또는 기존 확장, 구현 중 판단) | curl로 실제 종목/지수 데이터에 대한 지지/저항 후보 가격대 확인 |
 | 5.34-3 | 프런트 반영 | `CandleChart.jsx`에 지지/저항 수평선 오버레이(중립 톤, "근사치" 명시), 종목상세/지수 캔들차트에 적용 | 코드 리뷰 + `vite build` 클린 확인 |
 
+### Phase 5.35 — 거래량 프로파일 일별 스냅샷 적재(추이 분석 기반) (2026-07-28 사용자 요청)
+
+사용자: "단발성으로 확인 하지 말고.. 누적 정보로 추이 분석을 해야 하는데
+그렇게 저장하고 있니?" — §5.34의 거래량 프로파일이 요청마다 최근 N일
+캔들을 다시 읽어 그 자리에서 계산하는 완전 온디맨드 방식이라(DB에
+결과를 남기지 않음) "POC가 어느 방향으로 이동 중인지" 같은 추이를 볼
+방법이 없었다. 매일 배치로 스냅샷을 쌓아 추이 조회가 가능한 구조로
+바꾼다.
+
+**스코프 조사 결과(설계 전 확인)**:
+- 지수(코스피/코스닥/선물)는 `index_ohlcv`에 이미 매일 배치로 전량
+  쌓이고 있어(`collectors/ohlcv.py::collect_ohlcv`) 바로 스냅샷 가능.
+- 개별 종목은 `stock_ohlcv`가 사용자가 열어본 종목만 온디맨드로
+  캐시되는 구조라(`routers/stocks.py::_ensure_candles_cached`) 전
+  종목(4305개) 스냅샷은 불가능 — 사용자 지적대로 "지수에 영향을 많이
+  주는 종목" 후보군으로 스코프를 좁힌다. 다만 이 프로젝트엔 시가총액/
+  지수 편입비중 데이터가 없어 진짜 "지수 가중치" 기준은 못 만든다 —
+  대신 이미 매일 배치로 쌓이는 "오늘 활동성 상위" 3개 테이블(수급 상위
+  `value_rank`, 거래대금 상위 `flow_rank`, ETF 경유 상위 `flow_path`)의
+  코드 합집합을 근사 기준으로 쓴다(대형주가 반복적으로 상위에 뜨는 경향
+  때문에 실용적으로는 나쁘지 않은 근사 — 사용자 확인 완료).
+- 이 세 테이블의 코드를 누적 등록할 대상으로 **`watchlist` 테이블**을
+  재사용한다 — Phase 2-3 설계 당시("일별 수집 대상 종목") 만들어졌지만
+  실제로는 어디에도 연결되지 않은 채 0행으로 방치돼 있던 걸 발견했다
+  (`models.py:184`, PLAN.md 옛 §2-3 참고). 정확히 지금 필요한 개념이라
+  되살려 쓴다 — 한 번 오르면 계속 유지(삭제 없음), 시간이 지날수록
+  "자주 활동하는 종목군"으로 자연 수렴.
+
+**설계(3단 파이프라인, 반드시 이 순서로 실행돼야 함)**:
+1. `collectors/watchlist_sync.py` — `value_rank`/`flow_rank`/`flow_path`의
+   `target_date`(또는 그 날짜에 아직 데이터가 없으면 가장 최근 날짜로
+   자동 대체 — 기존 self-healing 관례) 코드 합집합을 `watchlist`에
+   `ON CONFLICT (code) DO NOTHING`으로 upsert(신규 등록만, 삭제 없음).
+2. `collectors/stock_ohlcv_watchlist.py` — `watchlist`의 전 코드에 대해
+   일봉을 배치로 갱신. `routers/stocks.py`의 기존 온디맨드 캔들
+   fetch/upsert 로직(`_ensure_candles_cached`/`_upsert_ohlcv_rows`)을
+   공용 모듈로 추출해 재사용(중복 구현 금지) — 다만 종목별 실패가 배치
+   전체를 막지 않도록 코드별 try/except로 격리(`short_selling_market.py`
+   시장별 격리와 동일 패턴)하고, 네이버 소스에 부담을 주지 않도록 코드
+   사이에 짧은 지연을 둔다.
+3. `collectors/volume_profile_snapshot.py`(job명 `volume_profile_daily`) —
+   지수 3종(`kospi`/`kosdaq`/`futures`, `routers/markets.py`의 MARKETS와
+   동일 — `services.py::get_market_series_from_db` 재사용) + `watchlist`
+   전 종목을 대상으로 `quant/volume_profile.py`의
+   `compute_volume_profile`/`detect_levels`를 돌려 신규 테이블
+   `volume_profile_daily`에 upsert.
+
+**순서 보장**: `collectors/__init__.py::register_all()`의 임포트 순서가
+곧 `_run_all_jobs`의 실행 순서(REGISTRY는 dict라 삽입 순서 유지,
+`scheduler.py::_run_all_jobs` 확인 — 순차 for 루프, 병렬 아님)이므로 이
+세 모듈은 반드시 `value_rank`/`flow_rank`/`flow_path`/`ohlcv`보다
+뒤, 그리고 이 셋끼리도 watchlist_sync → stock_ohlcv_watchlist →
+volume_profile_snapshot 순으로 임포트한다 — 기존 알파벳순 관례를
+의도적으로 깨는 것이므로 `__init__.py`에 왜 순서를 지켰는지 주석을
+남긴다. 이와 별개로 방어적으로 각 잡이 "그날 데이터가 아직 없으면
+최신 가용 데이터로 대체"하는 self-healing도 유지한다(수동 개별 실행,
+향후 재정렬 등에 대비).
+
+**테이블 설계**: `volume_profile_daily` — PK
+`(entity_type, entity_code, date)`, `entity_type`은 `"index"|"stock"`
+(지수 코드는 `stocks.code`에 없으므로 FK 없이 문자열로 — `market_flow`/
+`sector_flow`가 이미 쓰는 방식과 동일), `poc_price`/`levels`(JSONB,
+`detect_levels()` 결과 그대로)/`bar_count`/`total_volume`/
+`lookback_days` 컬럼.
+
+**API**: 프런트 변경 없이(하루치만 쌓인 시점엔 추이 그래프를 그려도
+의미가 없음 — 데이터가 쌓인 뒤 별도 단계로 미룬다) 최소한의 조회
+엔드포인트만 추가— `GET /api/markets/{market}/volume-profile-history`,
+`GET /api/stocks/{code}/volume-profile-history` — 저장된 스냅샷을
+그대로 반환(재계산 아님), curl로 누적 확인용.
+
+| # | 작업 | 내용 | 완료 기준 |
+|---|---|---|---|
+| 5.35-1 ✅ | watchlist 재활용 | `collectors/watchlist_sync.py` 신규 — value_rank/flow_rank/flow_path 코드 합집합 upsert | 배치 실행 후 watchlist 행 수 증가 확인(DB) — 실행 결과 63행 신규 삽입(합계 430행) 확인 |
+| 5.35-2 ✅ | 종목 일봉 배치 | `collectors/stock_ohlcv_watchlist.py` 신규, 기존 캔들 fetch/upsert 로직 공용화(`services.py`로 이전) | 배치 실행 후 watchlist 종목들의 stock_ohlcv 갱신 확인(DB) — 실행 결과 430종목 중 79,531행 upsert, 실패 0건, distinct 코드 20→436 확인 |
+| 5.35-3 ✅ | 프로파일 스냅샷 적재 | `collectors/volume_profile_snapshot.py` 신규 + `volume_profile_daily` 테이블/마이그레이션(`770ef1e191e5`) | 배치 실행 후 지수 3종 + watchlist 종목 행 생성(433행), POC가 §5.34 온디맨드 계산과 일치 확인(005930: 저장된 poc_price=264775.0 == 온디맨드 재계산 poc_price, total_volume은 NXT 장중 재조회로 소폭(약 0.02%) 차이 — 당일 거래량이 그 사이 갱신된 정상적인 차이) |
+| 5.35-4 ✅ | 조회 API | market/stock 라우터에 `volume-profile-history` 엔드포인트 추가 | curl로 누적 스냅샷 조회 확인 — `/api/markets/kospi/volume-profile-history`, `/api/stocks/005930/volume-profile-history` 둘 다 실데이터 반환 확인 |
+| 5.35-5 ✅ | 순서/자가치유 검증 | `collectors/__init__.py` 임포트 순서 + 각 잡의 "최신 가용 데이터 대체" 로직 | 단위테스트(18개 신규, 전체 590 passed) + admin 수동 트리거로 3단 순차 실행 확인(watchlist_sync→stock_ohlcv_watchlist→volume_profile_daily, collect_log 순서로 확정) |
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)

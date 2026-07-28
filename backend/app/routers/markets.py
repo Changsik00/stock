@@ -97,7 +97,15 @@ from ..collectors import intraday_snapshot
 from ..collectors.market_flow import fetch_live_flow
 from ..db import get_session
 from ..market_hours import KST, is_market_closed as _market_closed_kst, is_nxt_closed
-from ..models import IndexOhlcv, MacroSeries, MarketBreadth, MarketFlow, ShortSellingMarket, Stock
+from ..models import (
+    IndexOhlcv,
+    MacroSeries,
+    MarketBreadth,
+    MarketFlow,
+    ShortSellingMarket,
+    Stock,
+    VolumeProfileDaily,
+)
 from ..quant import flow_acceleration, regime_backtest, sector_rotation, volume_surge
 from ..quant.volume_profile import compute_volume_profile, detect_levels
 from ..services import DB_MARKET, get_market_series_from_db
@@ -349,6 +357,57 @@ async def market_short_selling_series(
         "market": market,
         "days": days,
         "series": [_serialize_short_selling_row(r) for r in rows],
+    }
+
+
+def _serialize_volume_profile_row(r: VolumeProfileDaily) -> dict:
+    return {
+        "date": r.date.isoformat(),
+        "poc_price": float(r.poc_price) if r.poc_price is not None else None,
+        "levels": r.levels if r.levels is not None else [],
+        "bar_count": r.bar_count,
+        "total_volume": float(r.total_volume) if r.total_volume is not None else None,
+        "lookback_days": r.lookback_days,
+    }
+
+
+@router.get("/api/markets/{market}/volume-profile-history")
+async def market_volume_profile_history(
+    market: str,
+    days: int = Query(90, ge=1, le=400),
+    session: AsyncSession = Depends(get_session),
+):
+    """`volume_profile_daily`(collectors/volume_profile_snapshot.py가 매일 적재하는
+    §5.34 거래량 프로파일 스냅샷, PLAN.md §5.35-4)의 지수(entity_type="index")
+    누적 시계열을 그대로 반환한다 — **재계산 아님**, 순수 조회. 저장된 스냅샷을
+    쌓아 나중에 "POC가 어느 방향으로 이동 중인지" 같은 추이를 볼 수 있게 하려는
+    용도이며, 이 엔드포인트 자체는 그 추이를 판정하지 않는다(§5 house rule과
+    동일 — 관찰 지표를 그대로 노출할 뿐 "지지/저항이 될 것" 같은 판단을 추가하지
+    않는다).
+
+    최근 하루이틀치만 쌓인 시점엔 추이라 부를 만한 게 없다 — 프런트 반영은
+    데이터가 더 쌓인 뒤 별도 단계로 미룬다(PLAN.md §5.35 API 절). 지금은 curl로
+    누적 여부를 확인하는 용도.
+    """
+    if market not in MARKETS:
+        raise HTTPException(400, f"market must be one of {sorted(MARKETS)}")
+
+    since = dt.date.today() - dt.timedelta(days=days)
+    stmt = (
+        select(VolumeProfileDaily)
+        .where(
+            VolumeProfileDaily.entity_type == "index",
+            VolumeProfileDaily.entity_code == market,
+            VolumeProfileDaily.date >= since,
+        )
+        .order_by(VolumeProfileDaily.date)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+
+    return {
+        "market": market,
+        "days": days,
+        "series": [_serialize_volume_profile_row(r) for r in rows],
     }
 
 

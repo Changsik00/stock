@@ -15,6 +15,10 @@
   대차잔고(대시보드 "대차잔고" 타일, macro_series.lending_balance)와는 별개
   지표다.
 - ``GET /api/stocks/{code}/whale``: Phase 4+ 예정, 아직 501 스텁.
+- ``GET /api/stocks/{code}/volume-profile-history``: `collectors/
+  volume_profile_snapshot.py`가 watchlist 종목에 대해 매일 적재한 §5.34 거래량
+  프로파일 스냅샷의 누적 시계열을 그대로 반환한다(PLAN.md §5.35-4, 재계산
+  아님 — DB 전용 읽기).
 
 캔들/수급 실패 처리(§5.3 에러 규약 "외부 API 실패는 502 + {source, detail}"을
 아래처럼 세분화):
@@ -62,7 +66,15 @@ from ..clients.kiwoom import (
 from ..collectors.program_stock import parse_program_trade_rows
 from ..db import get_session
 from ..market_hours import KST, is_nxt_closed
-from ..models import ProgramTrade, ShortSellingStock, Stock, StockFlow, StockOhlcv, ValueRank
+from ..models import (
+    ProgramTrade,
+    ShortSellingStock,
+    Stock,
+    StockFlow,
+    StockOhlcv,
+    ValueRank,
+    VolumeProfileDaily,
+)
 from ..quant.signals import (
     compute_vwap,
     detect_breakout,
@@ -71,6 +83,11 @@ from ..quant.signals import (
     volume_spike,
 )
 from ..quant.volume_profile import compute_volume_profile, detect_levels
+from ..services import (
+    get_stock_series_from_db,
+    plan_stock_ohlcv_fetch_start,
+    upsert_stock_ohlcv_rows,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -100,10 +117,6 @@ PROGRAM_TRADE_BACKFILL_DAYS = 90
 # 2년 범위도 한 번에 됨을 실측 확인) — collectors/short_selling_market.py의
 # LOOKBACK_DAYS(120)와 동일한 값을 써서 시장 전체 수집기와 조회 창을 맞춘다.
 SHORT_SELLING_BACKFILL_DAYS = 120
-
-# 캔들 최초 백필 시 거래일 수 -> 달력일 버퍼(주말 비율 5/7에 공휴일 여유를 더함).
-_CANDLE_CALENDAR_BUFFER_RATIO = 1.6
-_CANDLE_CALENDAR_BUFFER_MIN_DAYS = 10
 
 # 이미 캐시가 있는 code에 대해 "오래됨" 판정이 나도, 이 시간 안에 재시도했으면
 # 외부 호출을 또 하지 않는다(모듈 docstring 참고 — 공휴일에 매 요청마다 재호출되는
@@ -161,35 +174,6 @@ async def search_stocks(
 # -- 캔들 (stock_ohlcv 캐시 + 네이버 fchart 온디맨드) --------------------------
 
 
-async def _upsert_ohlcv_rows(session: AsyncSession, code: str, rows: list[dict]) -> int:
-    count = 0
-    for row in rows:
-        stmt = pg_insert(StockOhlcv).values(
-            code=code,
-            date=row["date"],
-            open=row.get("open"),
-            high=row.get("high"),
-            low=row.get("low"),
-            close=row.get("close"),
-            volume=row.get("volume"),
-            value=row.get("value"),  # 네이버 fchart는 거래대금 미제공 -> 항상 NULL
-        )
-        stmt = stmt.on_conflict_do_update(
-            index_elements=[StockOhlcv.code, StockOhlcv.date],
-            set_={
-                "open": stmt.excluded.open,
-                "high": stmt.excluded.high,
-                "low": stmt.excluded.low,
-                "close": stmt.excluded.close,
-                "volume": stmt.excluded.volume,
-                "value": stmt.excluded.value,
-            },
-        )
-        await session.execute(stmt)
-        count += 1
-    return count
-
-
 async def _ensure_candles_cached(session: AsyncSession, code: str, days: int) -> None:
     """stock_ohlcv에 code의 최신 거래일 캔들이 이미 있고 **장 마감**이면 아무 것도
     하지 않는다(캐시 히트, 외부 호출 생략 — 그 값이 진짜 확정 종가이므로). 없거나
@@ -211,6 +195,15 @@ async def _ensure_candles_cached(session: AsyncSession, code: str, days: int) ->
     NXT에서 20:00까지 계속 거래된다. 지수/집계 통계(index-tiles/basis/groups 등)는
     정규장에서 그대로 고정되는 게 실측으로 확인돼(``is_market_closed`` 그대로 유지)
     이 함수만 더 넓은 창을 쓴다 — market_hours.py 모듈 docstring 참고.
+
+    **2026-07-28 리팩터(PLAN.md §5.35-2)**: upsert 자체(``services.
+    upsert_stock_ohlcv_rows``)와 "전체 백필 vs 증분 top-up" 크기 산정
+    (``services.plan_stock_ohlcv_fetch_start``)을 ``services.py``로 옮겼다 —
+    새로 생긴 ``collectors/stock_ohlcv_watchlist.py``(watchlist 전 종목 배치
+    갱신)가 이 온디맨드 경로와 정확히 같은 로직을 필요로 해서, 두 곳에 같은
+    코드를 베껴 두는 대신 한 곳으로 합쳤다. 쿨다운 dict(``_candle_fetch_
+    attempted_at``)와 장중 판정은 이 함수(온디맨드 전용 관심사)에 그대로
+    남는다 — 배치 잡은 하루 1회뿐이라 쿨다운이 필요 없다.
     """
     target_end = _latest_trading_day()
     existing_max = (
@@ -222,61 +215,21 @@ async def _ensure_candles_cached(session: AsyncSession, code: str, days: int) ->
     if existing_max is not None and existing_max >= target_end and not market_open:
         return  # NXT까지 마감 — 확정치, 캐시 히트
 
-    if existing_max is None:
-        calendar_days = (
-            int(days * _CANDLE_CALENDAR_BUFFER_RATIO) + _CANDLE_CALENDAR_BUFFER_MIN_DAYS
-        )
-        fetch_start = target_end - dt.timedelta(days=calendar_days)
-    else:
+    if existing_max is not None:
         # 캐시는 있지만 오래됐거나(기존 사유) 장중이라 오늘치가 아직 잠정치인 경우 —
         # 쿨다운 확인(모듈 docstring "공휴일" 안전장치 + 장중 재조회 과호출 방지 겸용).
         now = time.monotonic()
         last_attempt = _candle_fetch_attempted_at.get(code)
         if last_attempt is not None and (now - last_attempt) < _EXTERNAL_FETCH_COOLDOWN_SECONDS:
             return  # 최근에 이미 재시도했음 — 있는 캐시로 서빙
-        # 마지막 캐시일부터 다시 받아 당일 수정치까지 반영(짧은 구간이라 저렴).
-        fetch_start = existing_max
+
+    # 신규 코드면 전체 백필 시작일을, 기존 코드면 마지막 캐시일(top-up)을 반환한다
+    # (services.plan_stock_ohlcv_fetch_start, 배치 경로와 공유하는 순수 계산).
+    fetch_start = plan_stock_ohlcv_fetch_start(existing_max, target_end, days)
 
     _candle_fetch_attempted_at[code] = time.monotonic()
     rows = await asyncio.to_thread(naver_index.fetch_stock_series, code, fetch_start, target_end)
-    await _upsert_ohlcv_rows(session, code, rows)
-
-
-async def _read_candles(session: AsyncSession, code: str, days: int) -> list[dict]:
-    """DB stock_ohlcv에서 최근 `days` 거래일을 읽어 markets series의 prices와 동일한
-    컨벤션으로 반환한다(services.get_market_series_from_db와 동일 로직 — changeRate는
-    컬럼이 없어 하루치를 더 읽어 전일 종가 대비로 계산)."""
-    stmt = (
-        select(StockOhlcv)
-        .where(StockOhlcv.code == code)
-        .order_by(StockOhlcv.date.desc())
-        .limit(days + 1)
-    )
-    rows = list(reversed((await session.execute(stmt)).scalars().all()))
-
-    out: list[dict] = []
-    prev_close: float | None = None
-    for r in rows:
-        close = float(r.close) if r.close is not None else None
-        change_rate = 0.0
-        if prev_close is not None and close is not None and prev_close:
-            change_rate = (close - prev_close) / prev_close * 100
-        out.append(
-            {
-                "date": r.date.strftime("%Y%m%d"),
-                "open": float(r.open) if r.open is not None else None,
-                "high": float(r.high) if r.high is not None else None,
-                "low": float(r.low) if r.low is not None else None,
-                "close": close,
-                "changeRate": round(change_rate, 4),
-                "volume": int(r.volume) if r.volume is not None else 0,
-                "value": int(r.value) if r.value is not None else 0,
-            }
-        )
-        if close is not None:
-            prev_close = close
-
-    return out[-days:] if len(out) > days else out
+    await upsert_stock_ohlcv_rows(session, code, rows)
 
 
 # -- 수급 (stock_flow 캐시 + 키움 ka10059 온디맨드) ----------------------------
@@ -754,12 +707,12 @@ async def stock_series(
             502, detail={"source": "naver_fchart", "detail": str(e)[:300]}
         ) from e
 
-    prices = await _read_candles(session, code, days)
+    prices = await get_stock_series_from_db(session, code, days)
 
     # 거래량 프로파일(PLAN.md §5.34) — 옵트인일 때만 계산한다. 이미 위에서 읽어
     # 둔 prices(캔들 응답의 소스와 동일)를 그대로 재사용하므로 새 DB 조회/외부
     # API 호출이 전혀 없다(quant/volume_profile.py 모듈 docstring "입력 형태"
-    # 참고 — _read_candles 출력 그대로 넘길 수 있게 필드가 맞춰져 있음).
+    # 참고 — get_stock_series_from_db 출력 그대로 넘길 수 있게 필드가 맞춰져 있음).
     volume_profile_result: dict | None = None
     if include_volume_profile:
         profile = compute_volume_profile(prices)
@@ -818,6 +771,50 @@ async def stock_series(
         "program_trade": program_trade,
         "short_selling": short_selling,
         **({"volume_profile": volume_profile_result} if include_volume_profile else {}),
+    }
+
+
+def _serialize_volume_profile_row(r: VolumeProfileDaily) -> dict:
+    return {
+        "date": r.date.isoformat(),
+        "poc_price": float(r.poc_price) if r.poc_price is not None else None,
+        "levels": r.levels if r.levels is not None else [],
+        "bar_count": r.bar_count,
+        "total_volume": float(r.total_volume) if r.total_volume is not None else None,
+        "lookback_days": r.lookback_days,
+    }
+
+
+@router.get("/{code}/volume-profile-history")
+async def stock_volume_profile_history(
+    code: str,
+    days: int = Query(90, ge=1, le=400),
+    session: AsyncSession = Depends(get_session),
+):
+    """`volume_profile_daily`(collectors/volume_profile_snapshot.py가 watchlist
+    종목에 대해 매일 적재하는 §5.34 거래량 프로파일 스냅샷, PLAN.md §5.35-4)의
+    누적 시계열을 그대로 반환한다 — **재계산 아님**, 순수 조회
+    (routers/markets.py::market_volume_profile_history의 종목판, 동일한 house
+    rule: 추이를 그대로 노출할 뿐 판정을 추가하지 않는다).
+
+    watchlist에 없거나 아직 배치가 한 번도 안 돈 종목은 빈 ``series``를 그대로
+    반환한다(에러 아님 — "아직 스냅샷이 없다"와 "조회 실패"는 다른 상태)."""
+    since = dt.date.today() - dt.timedelta(days=days)
+    stmt = (
+        select(VolumeProfileDaily)
+        .where(
+            VolumeProfileDaily.entity_type == "stock",
+            VolumeProfileDaily.entity_code == code,
+            VolumeProfileDaily.date >= since,
+        )
+        .order_by(VolumeProfileDaily.date)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+
+    return {
+        "code": code,
+        "days": days,
+        "series": [_serialize_volume_profile_row(r) for r in rows],
     }
 
 
