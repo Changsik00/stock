@@ -1142,16 +1142,36 @@ header h1 {
    ellipsis가 박스 오른쪽 픽셀 경계에서만 잘려, flex:none인 Badge(코스피/코스닥/ETF)가
    줄어들 자리를 못 만들고 텍스트 중간이 그대로 잘려 나갔다("코" "E" 처럼 한 글자만
    보이는 원인). 이제 이 박스는 overflow만 숨기고, 실제 말줄임은 이름 텍스트를 감싼
-   .top5-row-label에서만 일어나게 해 배지는 항상 전체 텍스트로 렌더된다. */
+   .top5-row-label에서만 일어나게 해 배지는 항상 전체 텍스트로 렌더된다.
+
+   2026-07-29 시도했다가 부족했던 수정 (기록용 — 같은 실수 반복 방지):
+   .top5-row-name에 flex/min-width 지정이 없어 flex item 기본값(min-width: auto)을
+   그대로 물려받아 "자식들의 최소 콘텐츠 크기"(=배지 전체 너비 포함)만큼만
+   줄어들던 문제가 있어, `.top5-row-name`에 `flex: 1 1 0`/`min-width: 0`,
+   `.top5-row-label`에 `flex: 1 1 auto`를 추가했다. 이 자체는 틀리지 않았지만
+   —Playwright로 실측한 결과— 이것만으로는 스켈핑 후보 카드가 고쳐지지
+   않았다: `.badge`는 `flex: none`(줄어들지 않음)이라 컨테이너 폭이 부족하면
+   flex-shrink:1인 라벨이 "남는 공간 우선 차지"가 아니라 "부족분을 전부
+   떠안는" 쪽이 되어, 배지 3~4개(시장+수급+위험+관심TOP, 실측 약 190~230px)가
+   이름칸 전체 폭(실측 약 206px)보다 넓을 때는 라벨이 0px까지 밀려 종목명이
+   통째로 사라졌다. 즉 CSS만으로는 물리적으로 공간이 부족한 상황을 해결할 수
+   없었고, 실제 수정은 JSX 쪽에서 압축 카드가 보여주는 배지 개수 자체를
+   최대 2개(시장 + 신호 배지 1개)로 줄이는 것이었다(DashboardPage.jsx의
+   스켈핑 후보 renderRow 주석 참고). 아래 flex 선언들은 배지가 줄어든 뒤에도
+   라벨이 남는 공간을 정상적으로 쓰고 필요할 때 이름에서만 말줄임이 일어나게
+   하는 보조 장치로는 유효해 그대로 유지한다. */
 .top5-row-name {
   display: flex;
   align-items: center;
   gap: 5px;
   overflow: hidden;
+  flex: 1 1 0;
+  min-width: 0;
   color: var(--text-primary);
 }
 
 .top5-row-label {
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

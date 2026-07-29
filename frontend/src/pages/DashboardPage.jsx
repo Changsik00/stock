@@ -3697,26 +3697,37 @@ export default function DashboardPage() {
             >
               {/* 사용자 지적(2026-07-21): 카드 폭이 좁아 배지 4개(시장·회전율·스코어·
                   관심TOP)가 이름칸을 다 밀어내 종목명이 안 보였다 — 회전율/스코어
-                  배지는 정보 밀도가 낮은 보조 정보라 "전체 보기" 모달(위 ScalpFullModal,
+                  배지는 정보 밀도가 낮은 보조 정보라 "전체 보기" 모달(ScalpCandidatesFullModal,
                   가로 폭이 훨씬 넓음)에서만 유지하고, 압축 카드에서는 다른 3개 랭킹
                   카드와 동일하게 배지 최대 2개(시장·관심TOP)만 남긴다.
-                  PLAN.md §5.20-3: 수급 유입(flow_net_value) 배지는 예외적으로 압축
-                  카드에도 남긴다 — 이번 기능 자체가 "오늘 수급이 몰리는 종목을
-                  찾는다"는 사용자 요청(알테오젠 사례)에서 시작됐고, 스코어 가중치도
-                  flow가 0.40으로 가장 크므로(quant/screener.py 참고) 왜 이 종목이
-                  상위인지 압축 카드에서도 바로 보여야 의미가 있다는 판단.
-                  PLAN.md §5.27-2: at_risk(하락폭 과다) 배지도 같은 이유로 압축
-                  카드에 남긴다 — "위험 성격이 다르다"는 사용자 지적이 이번 기능의
-                  직접 계기라 정보 밀도가 낮은 보조 배지(회전율/스코어)와 달리
-                  전체 보기로 넘어가지 않아도 바로 보여야 의미가 있다. */}
+                  PLAN.md §5.20-3/§5.27-2: 수급 유입(flow_net_value)·at_risk(하락폭
+                  과다) 배지도 각각 "왜 상위인지"·"위험 성격이 다르다"는 이유로 압축
+                  카드에 노출하기로 했었으나, 시장+flow+at_risk+관심TOP 4개가 전부
+                  붙으면(예: 하락폭 과다 + 수급 유입이 동시에 뜨는 종목) 이름칸
+                  (실측 약 206px)에 배지만 약 230px+가 들어가 라벨이 완전히 0px로
+                  밀려나 종목명 전체가 안 보이는 문제가 재발했다(2026-07-29, 사용자
+                  재지적 — Playwright로 실측 확인). CSS flex-basis 튜닝만으로는
+                  물리적으로 공간이 부족해 해결 불가 — 배지 자체를 줄이는 수밖에
+                  없었다.
+                  2026-07-29 재수정: 압축 카드는 시장 배지 + "가장 긴급한 신호
+                  배지 최대 1개"만 남긴다 — at_risk(하락 경고, 드물게 발생)가
+                  있으면 그걸, 없으면 flow(핵심 스코어 근거)를 보여준다. 관심TOP은
+                  이제 압축 카드에서 뺐다(둘 다 없을 때만 등장하는 경우가 드물고,
+                  실시간 관심 TOP5 카드에서 이미 별도로 확인 가능) — 회전율/스코어와
+                  마찬가지로 "전체 보기" 모달에서만 확인한다. 이렇게 하면 배지는
+                  항상 최대 2개(시장+신호 1개)로 고정되어 이름칸이 항상 남는다. */}
               <span className="top5-row-name">
                 <span className="top5-row-label">
                   {i + 1}. {row.name || row.code}
                 </span>
                 {row.market && <Badge kind={row.market} />}
-                {flowBadgeLabel(row.flow_net_value) && <Badge kind="info">{flowBadgeLabel(row.flow_net_value)}</Badge>}
-                {atRiskBadgeLabel(row.at_risk) && <Badge kind="info">{atRiskBadgeLabel(row.at_risk)}</Badge>}
-                {row.in_attention_top && <Badge kind="live">관심 TOP</Badge>}
+                {atRiskBadgeLabel(row.at_risk) ? (
+                  <Badge kind="info">{atRiskBadgeLabel(row.at_risk)}</Badge>
+                ) : (
+                  flowBadgeLabel(row.flow_net_value) && (
+                    <Badge kind="info">{flowBadgeLabel(row.flow_net_value)}</Badge>
+                  )
+                )}
               </span>
               <span className={`top5-row-value ${rateClass(row.change_rate)}`}>{rateLabel(row.change_rate)}</span>
             </Top5RowTile>
