@@ -1544,44 +1544,25 @@ header h1 {
   margin-top: 16px;
 }
 
-.stock-detail-short-selling-list {
+.stock-detail-short-selling-legend {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  list-style: none;
-  margin: 8px 0 0;
-  padding: 0;
-}
-
-.stock-detail-short-selling-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 8px 12px;
-  font-size: 13px;
-}
-
-.stock-detail-short-selling-date {
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-}
-
-.stock-detail-short-selling-value {
-  flex: none;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-primary);
-}
-
-.stock-detail-short-selling-balance {
-  flex: none;
+  gap: 16px;
+  margin: 8px 0 4px;
   font-size: 12px;
   color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
+}
+
+.stock-detail-short-selling-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.stock-detail-short-selling-legend-item .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
 }
 
 .etf-weight-event.up {

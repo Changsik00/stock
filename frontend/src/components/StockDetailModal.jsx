@@ -1,5 +1,16 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis } from 'recharts'
+import {
+  Bar,
+  CartesianGrid,
+  ComposedChart,
+  Line,
+  LineChart,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
 import { STATIC_DATA, fetchEtfWeightChanges, fetchStockIntraday, fetchStockSeries, fetchStockSignals } from '../api'
 import { DEFAULT_INVESTORS, INTRADAY_OPTIONS, INVESTOR_COLOR_VAR } from '../constants'
 import { formatDate, formatEok } from '../format'
@@ -332,39 +343,161 @@ function ProgramTradeSection({ rows }) {
   )
 }
 
+// Y축 눈금 전용 억원 정수 표기 — 툴팁의 eok()/formatEok()는 소액(|1억원| 미만)일 때
+// 소수 1자리를 보여주는 세밀한 규칙이 있지만(위 formatEok 주석 참고), 축 눈금은
+// 공간이 좁아 그 정밀도가 필요 없다. 원본 데이터는 항상 백만원 단위 그대로 두고
+// (차트 데이터 자체를 프런트에서 미리 나눠두면 이 세션에서 이미 한 번 틀렸던
+// 백만원→억원 /100 변환 실수를 두 곳에서 따로 반복할 위험이 생긴다) 이 함수
+// 하나만 축 표시 시점에 나눈다 — 변환 지점을 하나로 좁혀서 재발을 막는다.
+function axisEok(million) {
+  if (million === null || million === undefined) return ''
+  return numFmt.format(Math.round(million / 100))
+}
+
+// 실측 확인(Playwright 훅오버 테스트): balance_value가 null인 지점을 hover해도
+// recharts는 그 Line의 payload 엔트리 자체를 만들지 않는다(활성 dot이 없으니
+// 보고할 값도 없다는 판단인 듯) — 그래서 "잔고 데이터 없음" 문구를 여기서 따로
+// 만들 필요가 없다(만들어도 절대 렌더링되지 않는 죽은 분기가 된다). 공백의 의미
+// (보고의무 미발생/T+2 지연)는 위 섹션 상단 disclaimer에서 이미 설명한다.
+function shortSellingTooltip({ active, payload, label }) {
+  if (!active || !payload?.length) return null
+  const valueEntry = payload.find((p) => p.dataKey === 'value')
+  const balanceEntry = payload.find((p) => p.dataKey === 'balance_value')
+  return (
+    <div className="tooltip">
+      <div className="tooltip-date">{label}</div>
+      {valueEntry && valueEntry.value !== null && valueEntry.value !== undefined && (
+        <div className="tooltip-row">
+          <span>
+            <span className="dot" style={{ background: 'var(--series-value)' }} /> 거래대금
+          </span>
+          <strong>{eok(valueEntry.value)}</strong>
+        </div>
+      )}
+      {balanceEntry && balanceEntry.value !== null && balanceEntry.value !== undefined && (
+        <div className="tooltip-row">
+          <span>
+            <span className="dot" style={{ background: 'var(--series-price)' }} /> 잔고
+          </span>
+          <strong>{eok(balanceEntry.value)}</strong>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // 종목별 공매도(PLAN.md §5.32) — series 응답에 이미 포함돼 있어(§5.32-3,
 // /{code}/series의 short_selling) EtfWeightChangeSection과 달리 별도 fetch가
-// 필요 없다. ProgramTradeSection과 동일한 "row-list, 최근 10거래일, 데이터
-// 없으면 섹션 자체를 렌더하지 않음" 관례를 그대로 따르되, 값이 순매수(부호 있음)가
-// 아니라 거래대금(항상 양수)이라 up/down 색상을 붙이지 않는다. 순보유잔고는
-// 보고의무 발생 종목만 T+2 지연으로 채워지므로(clients/krx_short_selling.py 모듈
-// docstring) 있는 행만 부가로 보여준다 — 대시보드의 "대차잔고"/"공매도 비중"
-// 타일(시장 전체 집계)과 소스·범위가 다르다는 걸 오해하지 않도록 toggle-hint로
-// 명시한다.
+// 필요 없다. 원래는 ProgramTradeSection과 동일한 "row-list, 최근 10거래일" 텍스트
+// 목록이었으나, 사용자 피드백("보기 힘들다 · 누적된 내용을 보는 게 아니라서 ·
+// 점점 늘어나는지 특정일에 몰렸는지 한번에 보고 싶다")에 따라 콤보 차트로
+// 교체한다 — 값을 하루씩 읽어야 하던 목록 대신, 선택한 기간(days) 전체를 한
+// 화면에서 "거래대금(막대, 특정일 급증 여부)"과 "잔고(선, 누적 추세)"로 동시에
+// 보여준다.
+//
+// 값이 순매수(부호 있음)가 아니라 거래대금(항상 양수)이라 up/down 색상을 붙이지
+// 않고, FlowLineChart와 겹치지 않는 별도 색(--series-value/--series-price)을 쓴다
+// (메모리: 등락 빨강/파랑 관례는 상승/하락 표현에 쓰는 것이지, 이 둘은 애초에
+// 오르내리는 값이 아니라 서로 다른 두 지표라 해당 관례 대상이 아니다).
+//
+// "대차잔고율"처럼 사용자가 언급한 비율은 이 프로젝트에 존재하지 않는 지표다 —
+// 종목별 상장주식수/유통주식수를 수집하지 않아 분모가 없고, 임의로 지어낸
+// 비율을 보여주면 없는 숫자를 만들어내는 것이므로(작업 지시) 원본 그대로인
+// 거래대금/잔고 두 시계열만 그린다.
+//
+// 잔고(balance_value/balance_qty)는 보고의무가 발생한 종목만 T+2 지연으로 채워져
+// 희박하다(clients/krx_short_selling.py 모듈 docstring) — Line의 connectNulls를
+// 기본값(false)으로 둬 실측 없는 구간을 이어 그리지 않는다(있지도 않은 추세를
+// 보간해서 보여주지 않기 위함). 잔고 데이터가 이 종목에 한 건도 없으면 오른쪽
+// 축/선 자체를 아예 렌더하지 않는다. 거래대금(수백~수천억)과 잔고(수십~수백억)는
+// 자릿수 차이가 커서(실측: 005930 기준 거래대금 중앙값이 잔고 중앙값의 약 20배)
+// 같은 축을 쓰면 잔고 선이 거의 평평하게 눌려 안 보이므로 우측 보조축을 쓴다.
 function ShortSellingSection({ rows }) {
   const withData = (rows || []).filter((r) => r.value !== null && r.value !== undefined)
   if (withData.length === 0) return null
 
-  const recent = withData.slice(-10).reverse() // 최신이 위로 오게
+  const hasBalance = withData.some((r) => r.balance_value !== null && r.balance_value !== undefined)
+  const data = withData.map((r) => ({
+    date: r.date,
+    label: dateLabel(r.date),
+    value: r.value,
+    balance_value: r.balance_value ?? null,
+  }))
 
   return (
     <div className="stock-detail-short-selling">
       <div className="toggle-hint">
-        공매도 거래대금(최근 {recent.length}거래일) · KRX 정보데이터시스템 실측 — 위 대시보드의 "대차잔고"/"공매도
-        비중" 타일(시장 전체 집계)과는 별개로 이 종목의 실제 공매도 거래입니다. 순보유잔고는 보고의무가 발생한
-        경우만 2거래일 지연으로 표시됩니다.
+        공매도 거래대금·잔고 추이 ({data.length}거래일) · KRX 정보데이터시스템 실측 — 위 대시보드의 "대차잔고"/"공매도
+        비중" 타일(시장 전체 집계)과는 별개로 이 종목의 실제 공매도 거래입니다. 잔고(순보유잔고)는 보고의무가 발생한
+        경우만 2거래일 지연으로 채워지므로 구간이 비어 있을 수 있습니다 — 데이터 누락이나 오류가 아니라 정상적인
+        공백입니다.
       </div>
-      <ul className="stock-detail-short-selling-list">
-        {recent.map((r) => (
-          <li className="stock-detail-short-selling-row" key={r.date}>
-            <span className="stock-detail-short-selling-date">{mmdd(r.date)}</span>
-            <span className="stock-detail-short-selling-value">{eok(r.value)}</span>
-            <span className="stock-detail-short-selling-balance">
-              {r.balance_value !== null && r.balance_value !== undefined ? `잔고 ${eok(r.balance_value)}` : ''}
-            </span>
-          </li>
-        ))}
-      </ul>
+      <div className="stock-detail-short-selling-legend">
+        <span className="stock-detail-short-selling-legend-item">
+          <span className="dot" style={{ background: 'var(--series-value)' }} /> 거래대금(억원)
+        </span>
+        {hasBalance && (
+          <span className="stock-detail-short-selling-legend-item">
+            <span className="dot" style={{ background: 'var(--series-price)' }} /> 잔고(억원)
+          </span>
+        )}
+      </div>
+      <ResponsiveContainer width="100%" height={200}>
+        <ComposedChart data={data} margin={{ top: 8, right: hasBalance ? 44 : 12, left: 8, bottom: 0 }}>
+          <CartesianGrid stroke="var(--grid)" vertical={false} />
+          <XAxis
+            dataKey="label"
+            stroke="var(--axis)"
+            tick={{ fill: 'var(--text-muted)', fontSize: 12 }}
+            tickLine={false}
+            minTickGap={24}
+          />
+          <YAxis
+            yAxisId="value"
+            stroke="var(--axis)"
+            tick={{ fill: 'var(--text-muted)', fontSize: 12 }}
+            tickLine={false}
+            axisLine={false}
+            tickFormatter={axisEok}
+            width={56}
+          />
+          {hasBalance && (
+            <YAxis
+              yAxisId="balance"
+              orientation="right"
+              stroke="var(--axis)"
+              tick={{ fill: 'var(--text-muted)', fontSize: 12 }}
+              tickLine={false}
+              axisLine={false}
+              tickFormatter={axisEok}
+              width={56}
+            />
+          )}
+          <Tooltip content={shortSellingTooltip} cursor={{ fill: 'var(--grid)' }} />
+          <Bar
+            yAxisId="value"
+            dataKey="value"
+            name="거래대금"
+            fill="var(--series-value)"
+            radius={[2, 2, 0, 0]}
+            isAnimationActive={false}
+          />
+          {hasBalance && (
+            <Line
+              yAxisId="balance"
+              type="monotone"
+              dataKey="balance_value"
+              name="잔고"
+              stroke="var(--series-price)"
+              strokeWidth={2}
+              dot={{ r: 2 }}
+              isAnimationActive={false}
+              activeDot={{ r: 4 }}
+              connectNulls={false}
+            />
+          )}
+        </ComposedChart>
+      </ResponsiveContainer>
     </div>
   )
 }
