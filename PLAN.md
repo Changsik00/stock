@@ -2627,6 +2627,7 @@ UI 문구에 명시한다.
 | 5.42-2 ✅ | D-day 정렬 집계 함수 | 신규 `quant/expiry_pattern.py` — 순수 함수(`aggregate_expiry_pattern`) + 얇은 세션 래퍼(`compute_expiry_pattern`, scalp_hitrate.py와 동일한 분리 이유) | 단위테스트 7개 + 실 DB 값 검증 — **완료(2026-07-30)**. cycle_count=35(2023-08-10~2026-07-09), D-0 평균 베이시스 0.35/중앙값 0.09로 D-14~D-1 구간(대체로 1.0~1.7 평균) 대비 뚜렷하게 작음 — 만기 수렴 현상과 방향은 일치하나 중간 구간은 단조롭지 않고 노이즈가 있음(있는 그대로 보고, 과장 안 함) |
 | 5.42-3 ✅ | API 반영 | `GET /api/markets/basis/expiry-pattern` 추가, 캐시 없음(값싼 인덱스 DB 읽기 + 클릭 시에만 호출) | curl로 실데이터 확인 — **완료(2026-07-30)** |
 | 5.42-4 ✅ | 프런트 반영 | "다음 만기" 타일 클릭 시 `ExpiryPatternModal`로 D-day별 베이시스 평균/중앙값 그래프(`ExpiryPatternChart.jsx`, MacroChart 컨벤션 재사용) 표시, 표본수·기간 항상 노출 | vite build 클린 확인 — **완료(2026-07-30)**. pytest 674→685(11개 신규). STATIC_DATA 정적 배포에서는 타일 클릭 시 기존 foreignPosition 모달로 폴백 — 브라우저 자동화 도구가 이번 세션엔 없어 실제 클릭 스크린샷 검증은 못 함(코드리뷰+curl+빌드로 대체, 정직하게 명시) |
+| 5.42-5 | 베이시스 %(지수 대비 비율) 추가 | 사용자 지적(2026-07-30): "포인트를 지수로 환산하면 어떻게 되지?" — 3년 구간 동안 지수 수준 자체가 크게 바뀌어 절대 pt만으로는 사이클 간 비교가 왜곡될 수 있음. `quant/expiry_pattern.py`에 `basis_pct = (선물종가-현물종가)/현물종가*100`을 각 사이클 D-day별로 함께 계산해 `mean_basis_pct`/`median_basis_pct`로 point에 추가(기존 pt 필드는 유지, 추가 필드) | 단위테스트 + 실 DB 값 검증, 프런트 `ExpiryPatternChart.jsx`에 pt/% 토글 추가(§5.41 외국인/기관계 토글과 동일 UI 패턴) — vite build 클린 |
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
