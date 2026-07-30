@@ -2698,6 +2698,42 @@ flow는 코스피+코스닥 두 시장의 investors를 합산한 뒤 계산. 기
 | 5.44-2 ✅ | 과거 대비 baseline 함수 | `app/quant/flow_baseline.py` 신규 — 순수 함수 `aggregate_flow_baseline`(percentile 산식, quant/flow_percentile.py와 동일한 동점 평균 공식) + 세션 래퍼 `compute_flow_market_baseline`(`market_flow` 확정치, "오늘(as_of) 미만" 제외, 최근 20거래일, `MIN_BASELINE_DAYS=10` 미만이면 reason) | 단위테스트 11개(순수 4 + aggregate 4 + 세션 3, 실 dev Postgres) + 실 DB 값 수기 검산 일치 — **완료(2026-07-30)** |
 | 5.44-3 ✅ | API+프런트 반영 | `/api/markets/sentiment` 응답에 `components.flow.by_market.{kospi,kosdaq}.{score,individual,foreign,institution,baseline}` 추가(라이브일 때만, EOD 폴백이면 키 자체 없음). `SentimentGauge.jsx`에 `FlowByMarket`/`FlowMarketRow` 추가 — 코스피/코스닥 개별 점수 + "최근 N거래일 대비 X%ile" 표시(관찰 지표, 매매 신호 아님 문구 고정) | curl 확인 + vite build 클린 — **완료(2026-07-30)**. 13:51 KST 실측: 코스피 +49.7(최근 20거래일 대비 80.0%ile, 평균 -3.1), 코스닥 +20.2(60.0%ile, 평균 -9.6) — psql로 코스피 20일 원자료 직접 재계산해 mean/percentile 정확히 일치 확인. 브라우저 자동화 도구 이번 세션도 없음(§5.42-4/5.43-3과 동일) — 코드리뷰+curl+빌드로 대체. pytest 692→703(11개 신규) |
 
+### Phase 5.45 — "투자자별 수급 요약"에 선물 추가 + 현물/선물 명확화 (2026-07-30 사용자 지적)
+
+사용자: "투자자별 수급 요약 > 3개 항목을 누르면 차트가 보이는데... 개인,
+외인, 기관이 코스닥, 코스피만 보는데.. 현물인지 선물인지 모르자나.." →
+"현물 선물 모두 나와야 해". 대시보드 "투자자별 수급 요약" 섹션(개인/외인/
+기관계 3개 KPI 타일, 클릭 시 `FlowSummaryModal`)이 지금 코스피+코스닥
+(현물)만 보여주고 어디에도 "현물"이라는 명시가 없어 혼동을 줌.
+
+**설계 전 확인(중요 발견)**: `FlowSummaryModal`의 기존 안내 문구가
+"코스피+코스닥 합계 (선물 제외 — 투자자별 수급 미수집)"인데, **이 문구가
+이제 틀렸다** — §4.5-2/§4.7에서 K200 선물 투자자별(개인/외국인/기관계)
+순매수를 이미 수집하기 시작했고(`collectors/futures_flow.py` →
+`market_flow` market='k200_futures'), `routers/markets.py::FLOW_MARKETS`에
+이미 `"futures"`가 포함돼 있어 `GET /api/markets/futures/series`의
+`flows`가 이미 선물 투자자별 EOD 데이터를 반환한다 — **3M(EOD) 탭은 새
+수집 없이 바로 가능**. 다만 1D(장중 누적) 쪽은 `intraday_sample`에
+`futures_외국인` 하나만 있고(§5.13/§4.7) `futures_개인`/`futures_기관계`는
+수집한 적이 없다 — 이 부분은 정직하게 스코프 한계로 남긴다(억지로 만들지
+않음, 필요해지면 별도 조사·구현).
+
+**설계**:
+1. `FlowSummaryModal`의 `marketFilter`(코스피/코스닥/합계)에 "선물" 옵션
+   추가 — 3M 탭은 `fetchMarketSeries('futures', days).flows` 그대로 사용.
+   1D 탭은 선물 선택 시 외국인만 지원됨을 명시(개인/기관계는 표시 안 함,
+   또는 안내 문구로 한계 명시).
+2. 오래된 "선물 제외 — 투자자별 수급 미수집" 문구를 사실에 맞게 수정.
+3. 대시보드 컴팩트 타일("투자자별 수급 요약") 섹션 제목/타일에 "(현물)"
+   명시해 이 3개 타일이 현물(코스피+코스닥) 기준임을 클릭 전에도 알 수
+   있게 함 — 선물 값은 모달 안에서 필터로 확인.
+
+| # | 작업 | 내용 | 완료 기준 |
+|---|---|---|---|
+| 5.45-1 | 모달 필터 확장 | `FlowSummaryModal`에 "선물" marketFilter 옵션 추가(3M 전체 지원, 1D는 외국인만) | 코드리뷰 + vite build 클린 + 실데이터 확인 |
+| 5.45-2 | 문구 정정 | "선물 제외 — 투자자별 수급 미수집" 등 오래된 안내 문구를 실제 수집 상태에 맞게 수정 | 코드리뷰 |
+| 5.45-3 | 컴팩트 타일 명확화 | "투자자별 수급 요약" 섹션에 현물임을 명시 | vite build 클린 |
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
