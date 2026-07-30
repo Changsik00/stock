@@ -130,6 +130,7 @@ from ..db import get_session
 from ..derivatives import days_to_expiry, is_quadruple_witching, next_futures_expiry
 from ..market_hours import KST, is_market_closed
 from ..models import IndexOhlcv
+from ..quant.expiry_pattern import compute_expiry_pattern
 
 logger = logging.getLogger(__name__)
 
@@ -315,6 +316,45 @@ async def basis_series(
         "latest": latest_status,
         "expiry": _build_expiry(dt.date.today()),
     }
+
+
+@router.get("/api/markets/basis/expiry-pattern")
+async def basis_expiry_pattern(session: AsyncSession = Depends(get_session)) -> dict:
+    """K200 선물 만기 수렴 패턴 — D-day별 베이시스 과거 관찰 집계(PLAN.md §5.42-3).
+
+    ``index_ohlcv``의 ``k200_futures``/``kospi200`` 전체 히스토리(2023-07~,
+    days 파라미터 없음 — 만기 패턴 분석은 최대한 많은 과거 사이클이 필요해
+    짧은 창을 쓰지 않는다)를 읽어 ``derivatives.expiries_between``로 과거
+    만기일 목록을 만들고, ``quant/expiry_pattern.compute_expiry_pattern``으로
+    사이클별 D-day 정렬 + 평균/중앙값/표본수를 집계한다. 새 외부 호출 없음
+    (DB 읽기 전용) — 캐시를 두지 않는다: 이 데이터는 하루 1회(일별 배치) 이상
+    바뀌지 않고 이 엔드포인트도 60초/1분 폴링 대상이 아니라 사용자가 "다음
+    만기" 타일을 클릭할 때만 호출되는 인덱스 조회라, ``basis/live`` 같은
+    메모리 캐시 계층이 낼 이득이 없다(§5.4 "DB 캐싱 우선" — 이미 인덱스가
+    걸린 값싼 DB 읽기는 그 자체가 캐시 역할을 한다).
+
+    Returns (표본 부족 — 과거 사이클이 ``quant/expiry_pattern.MIN_CYCLES``
+    미만이면):
+        ``{"cycle_count", "date_from": None, "date_to": None,
+        "max_lookback_days", "points": [], "reason": str}``.
+
+    Returns (정상):
+        ``{"cycle_count" (집계에 쓰인 과거 만기 사이클 수), "date_from"/
+        "date_to" (가장 이르고 늦은 사이클의 만기일, iso), "max_lookback_days"
+        (D-0부터 며칠 전까지 보는지), "points": [{"d_day" (0=만기일, 음수일수록
+        더 이전), "mean_basis", "median_basis", "n" (그 d_day에 데이터가 있는
+        사이클 수 — 데이터 시작 초기 사이클은 lookback이 짧아 |d_day|가 클수록
+        n이 줄 수 있다)}], "reason": None}``.
+
+    **이건 과거 관찰 통계이지 예측이 아니다 — §5.15/§5.23/§5.33/§5.40과 동일한
+    house rule**: "과거 N회 사이클에서 D-day별 베이시스가 이랬다"는 사실
+    서술일 뿐, 이번 사이클도 같은 패턴으로 수렴한다는 보장이 없다. 응답의
+    모든 평균/중앙값 옆에는 반드시 ``cycle_count``(표본수)와 ``date_from``/
+    ``date_to``(관찰 기간)를 함께 표시해야 하며, "수렴 신호" 같은 확정적
+    문구를 붙이면 안 된다(``quant/expiry_pattern.py`` 모듈 docstring 참고).
+    이 지표는 트레이딩 시그널로 검증된 적이 없다.
+    """
+    return await compute_expiry_pattern(session)
 
 
 @router.get("/api/markets/basis/live")

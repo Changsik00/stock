@@ -58,3 +58,27 @@ def is_quadruple_witching(date: dt.date) -> bool:
 def days_to_expiry(date: dt.date) -> int:
     """``date``에서 다음 만기일까지 남은 일수(D-day, 당일이면 0)."""
     return (next_futures_expiry(date) - date).days
+
+
+def expiries_between(start: dt.date, end: dt.date) -> list[dt.date]:
+    """``[start, end]`` 구간(양끝 포함)에 속하는 모든 K200 선물 만기일(각 달의
+    둘째 목요일)을 오름차순으로 나열한다(PLAN.md §5.42-1, 만기 수렴 패턴 분석용).
+
+    ``next_futures_expiry``처럼 "다음 하나"만 계산하는 게 아니라 구간 전체를
+    월 단위로 순회한다 — ``_second_thursday``를 그대로 재사용해 연도 경계도
+    ``(year, month)`` 튜플 비교로 자연스럽게 넘어간다(12월 다음은 다음 해 1월).
+    ``start > end``면 빈 리스트."""
+    if start > end:
+        return []
+
+    result: list[dt.date] = []
+    year, month = start.year, start.month
+    while (year, month) <= (end.year, end.month):
+        candidate = _second_thursday(year, month)
+        if start <= candidate <= end:
+            result.append(candidate)
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+    return result

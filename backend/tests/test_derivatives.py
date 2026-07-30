@@ -10,6 +10,7 @@ import datetime as dt
 
 from app.derivatives import (
     days_to_expiry,
+    expiries_between,
     is_quadruple_witching,
     next_futures_expiry,
 )
@@ -89,3 +90,46 @@ def test_days_to_expiry_zero_on_expiry_day():
 def test_days_to_expiry_after_rollover():
     # 2026-07-19 -> 다음 만기 08-13까지 25일.
     assert days_to_expiry(dt.date(2026, 7, 19)) == 25
+
+
+# ---------------------------------------------------------------------------
+# expiries_between — 구간 내 모든 과거 만기일 나열 (PLAN.md §5.42-1)
+# ---------------------------------------------------------------------------
+
+
+def test_expiries_between_multi_year_range_has_twelve_per_year():
+    # 2024-01-01~2025-12-31 만 2년 -> 정확히 24개(매달 1개), 연도 경계(12월->1월)도
+    # 자연스럽게 넘어가는지 함께 확인.
+    result = expiries_between(dt.date(2024, 1, 1), dt.date(2025, 12, 31))
+    assert len(result) == 24
+    assert result == sorted(result)
+    assert result[0] == dt.date(2024, 1, 11)  # 2024-01 둘째 목요일
+    assert result[-1] == dt.date(2025, 12, 11)  # 2025-12 둘째 목요일
+    # 연도 경계를 건너 12월->1월로 넘어가는 지점이 끊기지 않았는지.
+    dec_2024 = dt.date(2024, 12, 12)
+    jan_2025 = dt.date(2025, 1, 9)
+    assert dec_2024 in result
+    assert jan_2025 in result
+    assert result.index(jan_2025) == result.index(dec_2024) + 1
+
+
+def test_expiries_between_short_range_within_one_month():
+    # 둘째 목요일 이전에서 끝나는 짧은 구간 -> 그 달 만기가 아직 안 왔으므로 빈 리스트.
+    assert expiries_between(dt.date(2026, 7, 1), dt.date(2026, 7, 8)) == []
+    # 둘째 목요일을 포함하도록 하루만 늘리면 1개.
+    assert expiries_between(dt.date(2026, 7, 1), dt.date(2026, 7, 9)) == [dt.date(2026, 7, 9)]
+
+
+def test_expiries_between_boundary_inclusion_exact_expiry_dates():
+    # start/end가 정확히 만기일이면 양끝 다 포함된다.
+    start = dt.date(2026, 6, 11)  # 2026-06 둘째 목요일
+    end = dt.date(2026, 7, 9)  # 2026-07 둘째 목요일
+    assert expiries_between(start, end) == [start, end]
+    # start를 하루 뒤로 밀면 6월 만기가 빠진다.
+    assert expiries_between(start + dt.timedelta(days=1), end) == [end]
+    # end를 하루 앞으로 당기면 7월 만기가 빠진다.
+    assert expiries_between(start, end - dt.timedelta(days=1)) == [start]
+
+
+def test_expiries_between_start_after_end_returns_empty():
+    assert expiries_between(dt.date(2026, 7, 9), dt.date(2026, 7, 1)) == []

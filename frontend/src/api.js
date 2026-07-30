@@ -424,6 +424,18 @@ export async function fetchBasis(days = 180) {
   return getJson(`/api/markets/basis?days=${days}`)
 }
 
+// GET /api/markets/basis/expiry-pattern -> { cycle_count, date_from, date_to,
+// max_lookback_days, points: [{d_day, mean_basis, median_basis, n}], reason } (PLAN.md
+// §5.42) — 과거 K200 선물 만기 사이클들을 D-day(만기까지 남은 거래일수)로 정렬해
+// 베이시스 평균/중앙값/표본수를 집계한 관찰 통계(예측 아님, quant/expiry_pattern.py
+// 모듈 docstring 참고). index_ohlcv 전체 히스토리를 매번 다시 계산하는 값싼 DB
+// 읽기라 폴링하지 않고 "다음 만기" 타일 클릭 시 모달 마운트할 때 1회만 호출한다
+// (fetchScalpHitrate와 동일한 패턴). 로컬 전용 기능, STATIC_DATA 대상 아님 —
+// 정적 배포에서는 호출하지 않는다(호출부에서 가드, scalpHitrate와 동일 이유).
+export async function fetchExpiryPattern() {
+  return getJson('/api/markets/basis/expiry-pattern')
+}
+
 // GET /api/etf/derivative-flow?days=N -> { days, universe: {total, leverage, inverse},
 // latest: {date, net_bet, lp_hedge_est, leverage_inflow, inverse_inflow, counts}|null,
 // series: [...] } (PLAN.md §4.5-1/4.5-5) — 파생형(레버리지/인버스) ETF 방향성 게이지.

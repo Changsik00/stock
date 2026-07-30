@@ -9,6 +9,7 @@ import {
   fetchBreadthLive,
   fetchDerivativeFlow,
   fetchEtfWeightChanges,
+  fetchExpiryPattern,
   fetchFlowConcentrationIntradayAccumulated,
   fetchFlowIntradayAccumulated,
   fetchFlowLive,
@@ -38,6 +39,7 @@ import BreadthBadge from '../components/BreadthBadge'
 import BreadthRatioChart from '../components/BreadthRatioChart'
 import CandleChart from '../components/CandleChart'
 import EtfDirectionCard from '../components/EtfDirectionCard'
+import ExpiryPatternChart from '../components/ExpiryPatternChart'
 import ForeignPositionChart from '../components/ForeignPositionChart'
 import FlowChart from '../components/FlowChart'
 import FlowPathTable from '../components/FlowPathTable'
@@ -1579,6 +1581,56 @@ function DerivativeEtfModal() {
       latest={data?.latest}
       series={data?.series ?? []}
     />
+  )
+}
+
+// K200 선물 만기 수렴 패턴 상세(PLAN.md §5.42) — "다음 만기" 타일 클릭 시 여는
+// 모달. DerivativeEtfModal과 동일한 자기완결 패턴(마운트 시 1회만 fetch, 폴링
+// 없음 — index_ohlcv 전체를 매번 다시 집계하는 값싼 DB 읽기라 하루에도 몇 번씩
+// 바뀔 데이터가 아니다). 로컬 전용 기능이라 STATIC_DATA 정적 배포에서는 호출하지
+// 않는다(fetchScalpHitrate와 동일 이유, api.js 주석 참고) — 대신 "다음 만기"
+// 타일의 onClick 자체가 STATIC_DATA일 때는 기존 foreignPosition 모달을 열도록
+// 분기해 정적 배포에서도 클릭이 헛돌지 않게 한다.
+function ExpiryPatternModal() {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    fetchExpiryPattern()
+      .then((body) => {
+        if (!cancelled) setData(body)
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  if (loading) return <div className="state">불러오는 중…</div>
+  if (error) return <div className="state error">{error}</div>
+  if (!data || data.reason) {
+    return <div className="state">{data?.reason || '표시할 데이터가 없습니다.'}</div>
+  }
+
+  return (
+    <div>
+      {/* PLAN.md §5.42 "표본 수(사이클 개수)를 항상 그래프에 함께 노출한다" —
+          툴팁 안에 숨기지 않고 그래프 바로 위에 상시 노출. 관찰형 문구만 쓰고
+          "이번에도 이렇게 수렴할 것"이라는 예측형 표현은 쓰지 않는다(§5.15/
+          §5.23/§5.33/§5.40과 동일한 house rule). */}
+      <div className="toggle-hint" style={{ marginBottom: 8 }}>
+        과거 {data.cycle_count}회 만기 사이클({data.date_from} ~ {data.date_to}) 평균 — 이번
+        사이클도 같은 패턴을 보인다는 보장은 없는 과거 관찰 통계입니다.
+      </div>
+      <ExpiryPatternChart points={data.points ?? []} />
+    </div>
   )
 }
 
@@ -3371,7 +3423,13 @@ export default function DashboardPage() {
           value={expiry?.date ? `${mmdd(expiry.date)} · D-${expiry.d_day}` : '…'}
           sub={expiry?.quadruple && <Badge kind="warn">네 마녀의 날</Badge>}
           title={expiry?.date ? formatDate(expiry.date) : undefined}
-          onClick={() => setModal({ type: 'foreignPosition', title: '외인 현물 vs 선물 · 베이시스' })}
+          onClick={() =>
+            setModal(
+              STATIC_DATA
+                ? { type: 'foreignPosition', title: '외인 현물 vs 선물 · 베이시스' }
+                : { type: 'expiryPattern', title: '만기 수렴 패턴 (D-day별 베이시스)' }
+            )
+          }
         />
       </div>
 
@@ -3865,6 +3923,7 @@ export default function DashboardPage() {
         {modal?.type === 'flowSummary' && <FlowSummaryModal />}
         {modal?.type === 'foreignPosition' && <ForeignPositionModal />}
         {modal?.type === 'derivativeEtf' && <DerivativeEtfModal />}
+        {modal?.type === 'expiryPattern' && <ExpiryPatternModal />}
         {/* 랭킹 3종 전체 보기 모달 — onRowClick을 STATIC_DATA일 때 undefined로 넘겨
             행 클릭 자체를 비활성화한다(TOP5 카드와 동일한 정적 모드 판단, 위
             Top5RowTile 주석 참고). */}
