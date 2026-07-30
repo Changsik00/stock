@@ -18,6 +18,12 @@ misfire_grace_time / 등록 여부 (PLAN.md §5.11의 2026-07-22 사고, §5.22)
 새벽에 이미 마감해도 기존 18:00 배치까지 기다려야 했던 문제의 해결책)가 같은
 실수(그레이스 타임 누락)를 처음부터 반복하지 않도록, 그리고 REGISTRY 전체가
 아니라 "macro" 잡 하나만 도는지 별도로 검증한다.
+
+**2026-07-31 추가(PLAN.md §5.46)**: 19:30 flow_rank 전용 저녁 재수집 배치(네이버
+소스가 18:00 정기 배치 시점엔 그날 최종 랭킹을 아직 발행하지 않았을 수 있다는
+문제의 해결책 — 실측: 07-30 18:03 실행분 collect_log.message가 "실제 적재된
+날짜: 2026-07-28, 2026-07-29"로 하루 이상 뒤처진 재적재를 남김)도 같은 패턴으로
+검증한다.
 """
 
 from __future__ import annotations
@@ -113,3 +119,59 @@ async def test_run_macro_job_warns_and_skips_when_macro_missing(monkeypatch, cap
 
     assert calls == []
     assert any("macro" in rec.message for rec in caplog.records)
+
+
+def test_flow_rank_catchup_job_registered_with_generous_misfire_grace_time(fake_scheduler):
+    kwargs = fake_scheduler._call_for_id("flow_rank_catchup")
+    assert kwargs["replace_existing"] is True
+    assert kwargs["misfire_grace_time"] >= 1800
+
+    # add_job(func, trigger, ...) — trigger는 두 번째 위치 인자로 전달됨
+    args = [a for a in fake_scheduler.calls if a[1].get("id") == "flow_rank_catchup"][0][0]
+    trigger = args[1]
+    fields = {f.name: str(f) for f in trigger.fields}
+    assert fields["hour"] == "19"
+    assert fields["minute"] == "30"
+    assert fields["day_of_week"] == "mon-fri"
+    assert str(trigger.timezone) == "Asia/Seoul"
+
+
+async def test_run_flow_rank_catchup_job_runs_only_flow_rank(monkeypatch):
+    calls = []
+
+    async def fake_run_job(job_name, target_date, collect_fn):
+        calls.append((job_name, target_date, collect_fn))
+        return {"job": job_name, "status": "ok", "rows": 0}
+
+    sentinel_fn = object()
+    monkeypatch.setattr(
+        scheduler_module, "REGISTRY", {"flow_rank": sentinel_fn, "other": object()}
+    )
+    monkeypatch.setattr(scheduler_module, "run_job", fake_run_job)
+
+    await scheduler_module._run_flow_rank_catchup_job()
+
+    assert len(calls) == 1
+    job_name, target_date, collect_fn = calls[0]
+    assert job_name == "flow_rank"
+    assert collect_fn is sentinel_fn
+    assert target_date == dt.date.today()
+
+
+async def test_run_flow_rank_catchup_job_warns_and_skips_when_flow_rank_missing(
+    monkeypatch, caplog
+):
+    calls = []
+
+    async def fake_run_job(job_name, target_date, collect_fn):
+        calls.append(job_name)
+        return {}
+
+    monkeypatch.setattr(scheduler_module, "REGISTRY", {"other": object()})
+    monkeypatch.setattr(scheduler_module, "run_job", fake_run_job)
+
+    with caplog.at_level("WARNING"):
+        await scheduler_module._run_flow_rank_catchup_job()
+
+    assert calls == []
+    assert any("flow_rank" in rec.message for rec in caplog.records)
