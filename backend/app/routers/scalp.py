@@ -47,6 +47,16 @@ change_rate(최대 7분 캐시)로 폴백한다. 처음엔 무조건 value-rank�
 /api/markets/scalp-candidates`` 자체는 DB에 쓰지 않는다(§5.2 "DB 미저장" —
 장중 스냅샷 성격은 attention/value-rank/live와 동일).
 
+**GET /api/markets/scalp-candidates/hitrate (PLAN.md §5.40-2, 적중률 사후
+검증)**: ``scalp_pick``에 이미 쌓인 진입 스코어/순위와 호라이즌별
+change_rate(§5.7)를 ``quant/scalp_hitrate.py``로 집계해 반환한다 — 새
+스크리닝이 아니라 기존 스크리너의 사후 검증 투명성 노출이다. **정직하게
+명시**: 표본이 작고(2026-07-30 기준 며칠~열흘 안팎) 이 기간이 극심한 하락장
+(§5.36 서킷브레이커 발동 수준)이라 평상시 성과를 대표하지 않는다 — 응답의
+모든 퍼센트 옆에 표본수(``total_picks``)·기간(``date_from``/``date_to``)이
+항상 함께 있고, "검증됨"이 아니라 "지금까지 관찰된 결과"로만 해석해야 한다
+(PLAN.md §5.40 명시 요구, ``quant/scalp_hitrate.py`` 모듈 docstring 참고).
+
 **GET /api/markets/scalp-candidates/track-record (PLAN.md §5.7-3, 관찰 기록)**:
 위 스크리닝 결과가 실제로 의미 있는지 사후 검증할 근거를 쌓기 위해, 그날 상위
 후보에 "처음" 등장한 종목과 이후 고정 호라이즌(5/15/30/60분·당일 마감)
@@ -69,6 +79,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_session
 from ..market_hours import KST
 from ..models import ScalpPick, StockFlow
+from ..quant.scalp_hitrate import compute_scalp_hitrate
 from ..quant.screener import compute_scalp_scores
 from .flow_rank import _warm_value_rank_live
 from .markets import _warm_attention
@@ -300,3 +311,29 @@ async def scalp_candidates_track_record(
             for r in rows
         ],
     }
+
+
+@router.get("/api/markets/scalp-candidates/hitrate")
+async def scalp_candidates_hitrate(session: AsyncSession = Depends(get_session)) -> dict:
+    """스켈핑 후보 스크리너 적중률 사후 검증 집계(PLAN.md §5.40-2). ``scalp_pick``
+    전체(§5.7)를 ``quant/scalp_hitrate.compute_scalp_hitrate``로 집계한 결과를
+    그대로 반환한다 — 새 외부 호출·새 수집 없음(DB 읽기 전용).
+
+    Returns ``{"total_picks", "distinct_days", "date_from", "date_to",
+    "horizons": {"5m"|"15m"|"30m"|"60m"|"eod": {"n", "win_rate",
+    "avg_change_rate", "median_change_rate"}}, "rank_buckets": {"top3"|
+    "rank4_10": {같은 호라이즌 키: {"n", "win_rate", "avg_change_rate"}
+    (버킷은 표본이 더 작아 median 생략)}}}``.
+
+    **표본이 하나도 없으면** 크래시하지 않고 전부 0/None인 정직한 결과를
+    반환한다(``quant/scalp_hitrate.py`` 모듈 docstring 참고).
+
+    **반드시 표본수·기간과 함께 해석할 것 — "검증됨"이 아니다**: 표본이
+    작고(2026-07-30 기준 며칠~열흘 안팎) 이 기간이 극심한 하락장(§5.36
+    서킷브레이커 발동 수준의 이례적 기간)이라 평상시를 대표하지 않는다. 이
+    응답의 어떤 퍼센트도 "이 스크리너는 승률 XX%로 검증됨" 같은 확정적
+    주장의 근거로 쓰면 안 되고, 항상 ``total_picks``/``date_from``/
+    ``date_to``와 함께 "지금까지 관찰된 결과"로만 표현해야 한다(PLAN.md
+    §5.40 명시 요구, 모듈 docstring의 house rule 계승).
+    """
+    return await compute_scalp_hitrate(session)

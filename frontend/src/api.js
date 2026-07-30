@@ -479,6 +479,18 @@ export async function fetchScalpCandidates(limit = 10) {
   return getJson(`/api/markets/scalp-candidates?limit=${limit}`)
 }
 
+// GET /api/markets/scalp-candidates/hitrate -> { total_picks, distinct_days, date_from,
+// date_to, horizons: { "5m"|"15m"|"30m"|"60m"|"eod": { n, win_rate, avg_change_rate,
+// median_change_rate } }, rank_buckets: { "top3"|"rank4_10": { 같은 호라이즌 키: { n,
+// win_rate, avg_change_rate } } } } (PLAN.md §5.40) — 스켈핑 후보 스크리너의 사후
+// 검증 집계(scalp_pick 전체를 그때그때 다시 계산, 새 외부 호출 없음). 하루 몇 건씩만
+// 늘어나는 데이터라 scalpCandidates처럼 폴링하지 않고 마운트 시 1회만 호출한다
+// (fetchSentiment과 동일한 패턴). 로컬 전용 기능(scalpCandidates와 같은 이유),
+// STATIC_DATA 대상 아님 — 정적 배포에서는 호출하지 않는다(호출부에서 가드).
+export async function fetchScalpHitrate() {
+  return getJson('/api/markets/scalp-candidates/hitrate')
+}
+
 // GET /api/macro/series?ids=usdkrw,wti,brent&days=N -> { days, series: { id: [...] } }
 export async function fetchMacroSeries(ids, days) {
   const idParam = Array.isArray(ids) ? ids.join(',') : ids

@@ -26,6 +26,7 @@ import {
   fetchMarketSeries,
   fetchRegime,
   fetchScalpCandidates,
+  fetchScalpHitrate,
   fetchSectorRotation,
   fetchSentiment,
   fetchShortSellingMarket,
@@ -300,6 +301,30 @@ function volumeSurgeLabel(volumeSurge) {
 function scalpScoreBadgeLabel(score) {
   if (score === null || score === undefined) return null
   return `스코어 ${scalpScoreLabel(score)}`
+}
+
+// 스켈핑 후보 스크리너 적중률 사후 검증(PLAN.md §5.40) — GET
+// /api/markets/scalp-candidates/hitrate(quant/scalp_hitrate.py) 응답을 카드 하단의
+// 작은 안내 문구 한 줄로 옮긴다. **표본수·기간을 퍼센트 옆에 항상 함께 노출하고
+// "검증됨"이 아니라 "관찰됨"으로만 서술한다**(§5.40 명시 요구, 비타협 — 표본이
+// 며칠~열흘 안팎이고 이 기간이 서킷브레이커 수준의 극심한 하락장이라 평상시를
+// 대표하지 않는다). 15분 호라이즌을 대표값으로 고정해 쓴다 — 5개 호라이즌을 전부
+// 한 줄에 욱여넣으면 오히려 안 읽히고, 스켈핑(초단기)과 당일 마감(EOD)의 중간
+// 지점이라 어느 한쪽에 치우치지 않는 대표성이 가장 낫다는 판단(구현 시 취향 —
+// 다른 호라이즌으로 바꾸고 싶으면 이 함수만 고치면 된다). 표본이 아직 없거나
+// 15분 호라이즌 표본이 0이면 null(카드에 아예 줄을 그리지 않는다 — 다른 배지/
+// 라벨의 "부재 시 생략" 관례와 동일).
+function scalpHitrateFootnote(hitrate) {
+  if (!hitrate || !hitrate.total_picks) return null
+  const h = hitrate.horizons?.['15m']
+  if (!h || !h.n) return null
+  const sign = h.avg_change_rate > 0 ? '+' : ''
+  return (
+    `최근 ${hitrate.distinct_days}거래일(${hitrate.date_from}~${hitrate.date_to}, ` +
+    `15분 표본 ${h.n}건) 관찰: 15분 후 상승 확률 ${h.win_rate}%, 평균 변동 ` +
+    `${sign}${h.avg_change_rate.toFixed(1)}%(중앙값 ${h.median_change_rate > 0 ? '+' : ''}${h.median_change_rate.toFixed(1)}%) ` +
+    `— 표본이 작고 이례적 하락장 기간이라 일반화할 수 없음, 검증된 성과 아님`
+  )
 }
 
 // PLAN.md §5.20-3 — 종목별 당일 외국인+기관 순매수(flow_net_value) 배지. 단위는
@@ -1990,7 +2015,16 @@ function SectorRotationCard({ data }) {
 // TOP5 요약 행 — 표(FlowRankTable 등)를 그대로 축소하지 않고, "종목명·핵심 숫자·배지"
 // 만 남긴 가벼운 목록을 별도로 그린다(사용자 요구: "100개짜리 리스트도 뒤로").
 // ---------------------------------------------------------------------------
-function Top5Card({ title, hint, rows, onMore, renderRow, emptyText = '표시할 데이터가 없습니다.', hoverDate }) {
+function Top5Card({
+  title,
+  hint,
+  footnote,
+  rows,
+  onMore,
+  renderRow,
+  emptyText = '표시할 데이터가 없습니다.',
+  hoverDate,
+}) {
   return (
     <div className="top5-card" title={hoverDate}>
       <div className="top5-card-header">
@@ -2002,6 +2036,12 @@ function Top5Card({ title, hint, rows, onMore, renderRow, emptyText = '표시할
       {hint && <div className="toggle-hint" style={{ marginBottom: 6 }}>{hint}</div>}
       {(!rows || rows.length === 0) && <div className="state" style={{ padding: '16px 0' }}>{emptyText}</div>}
       {rows && rows.length > 0 && <div>{rows.slice(0, 5).map(renderRow)}</div>}
+      {/* PLAN.md §5.40 — 스켈핑 후보 적중률 사후 검증 문구. hint(상단, 스크리닝
+          자체의 성격 설명)와 분리해 하단에 둔다 — 관찰 통계는 스크리닝 설명과
+          섹션이 달라 시각적으로도 구분하는 게 자연스럽다. hint와 동일하게 작은
+          muted 텍스트(toggle-hint)만 쓴다 — 강조 배지가 아니라 투명성/맥락
+          제공이 목적이므로 튀지 않게 유지한다. */}
+      {footnote && <div className="toggle-hint" style={{ marginTop: 6 }}>{footnote}</div>}
     </div>
   )
 }
@@ -2096,6 +2136,12 @@ export default function DashboardPage() {
   // 라이브 캐시를 조합한 참고용 스크리닝이라 정적 배포에서는 항상 null(다른 로컬
   // 전용 기능과 동일한 관례).
   const [scalpCandidates, setScalpCandidates] = useState(null)
+  // 스켈핑 후보 스크리너 적중률 사후 검증(PLAN.md §5.40) — GET
+  // /api/markets/scalp-candidates/hitrate 응답 바디를 그대로 담는다. scalp_pick은
+  // 하루에 몇 건씩만 늘어나는 데이터라(scalpCandidates처럼 60초~7분 단위로 값이
+  // 바뀌지 않음) 아래 1분/7분 폴링 티어에 넣지 않고 마운트 시 1회만 불러온다
+  // (fetchSentiment과 동일한 "마운트 1회" 패턴, api.js 참고).
+  const [scalpHitrate, setScalpHitrate] = useState(null)
 
   // "지금 유입 우세" 판정(PLAN.md §5.15) — GET /api/markets/regime 응답 바디를
   // 그대로 담는다({ regime, reason, reliable_signal, market_closed, kospi,
@@ -2140,6 +2186,23 @@ export default function DashboardPage() {
     fetchSentiment()
       .then((body) => {
         if (!cancelled) setSentiment(body)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // 스켈핑 후보 적중률(PLAN.md §5.40) — scalp_pick이 하루에 몇 건씩만 늘어나는
+  // 데이터라(scalpCandidates처럼 60초~7분 단위로 값이 바뀌지 않음) 폴링 없이
+  // 마운트 시 1회만 불러온다(위 fetchSentiment과 동일한 패턴). STATIC_DATA
+  // 정적 배포에서는 로컬 전용 기능이라 호출하지 않는다(scalpCandidates와 동일 이유).
+  useEffect(() => {
+    if (STATIC_DATA) return
+    let cancelled = false
+    fetchScalpHitrate()
+      .then((body) => {
+        if (!cancelled) setScalpHitrate(body)
       })
       .catch(() => {})
     return () => {
@@ -3687,6 +3750,7 @@ export default function DashboardPage() {
         <Top5Card
           title="스켈핑 후보"
           hint="참고용 스크리닝 — 매매 신호 아님 · 7분 갱신(관심 TOP 배지만 1분)"
+          footnote={scalpHitrateFootnote(scalpHitrate)}
           rows={filterRowsByMarket(scalpCandidates?.rows, rankingMarketFilter)}
           onMore={() => setModal({ type: 'scalp', title: '스켈핑 후보 — 전체' })}
           renderRow={(row, i) => (
