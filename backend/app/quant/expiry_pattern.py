@@ -1,4 +1,4 @@
-"""K200 선물 만기 수렴 패턴 관찰 (PLAN.md §5.42, 2026-07-30 사용자 요청).
+"""K200 선물 만기 수렴 패턴 관찰 (PLAN.md §5.42/§5.42-5, 2026-07-30 사용자 요청).
 
 **배경**: 대시보드 "외인 양손 · 현선물" 섹션의 "다음 만기" 타일이 날짜+D-day+
 네 마녀의 날 배지만 보여줄 뿐 분석적 깊이가 없다는 사용자 지적에서 시작했다.
@@ -13,6 +13,20 @@ D-0으로 놓고, 그 이전 거래일들을 D-1, D-2, ... 순으로 거슬러 �
 사이클마다 달력 간격이 들쭉날쭉해도 "만기까지 남은 거래일수"는 사이클 간
 비교가 가능하다). 그런 다음 동일 D-day끼리 모든 사이클의 베이시스 값을 모아
 평균/중앙값/표본수를 계산한다.
+
+**베이시스 %(지수 대비 비율) — §5.42-5, 사용자 지적(2026-07-30)**: "포인트를
+지수로 환산하면 어떻게 되지?"라는 질문에서 시작했다. 이 프로젝트가 수집한
+3년 구간(2023-07~) 동안 K200 지수 수준 자체가 크게 오르내렸기 때문에, 절대
+pt(포인트) 단위의 베이시스만으로는 지수가 낮았던 시기의 사이클과 지수가
+높았던 시기의 사이클을 나란히 평균 내는 게 왜곡될 수 있다(예: 지수 200일 때
+베이시스 1.0pt와 지수 350일 때 베이시스 1.0pt는 상대적 크기가 다르다). 그래서
+각 거래일마다 ``basis_pct = (선물종가-현물종가)/현물종가*100``을 pt 베이시스와
+나란히 계산해 D-day별 평균/중앙값(``mean_basis_pct``/``median_basis_pct``)을
+함께 반환한다 — 기존 pt 필드(``mean_basis``/``median_basis``)는 그대로
+유지하고 추가하는 것뿐이라 하위 호환이다. routers/basis.py의 다른
+``basis_pct`` 필드들과 동일하게 소수점 4자리로 반올림한다(§5.42-5 구현 시
+기존 관례 확인 — ``routers/basis.py::basis_series``/``basis_expiry_pattern``
+근처의 ``basis_pct`` 필드가 ``round(x, 4)``를 쓰고 있어 그대로 맞춘다).
 
 **이건 과거 관찰 통계이지 예측이 아니다 — §5.15/§5.23/§5.33/§5.40과 동일한
 house rule**: "과거 N회 사이클에서 D-day별 베이시스가 이랬다"는 사실 서술일
@@ -151,19 +165,32 @@ def aggregate_expiry_pattern(
         ``{"cycle_count", "date_from" (가장 이른 사이클의 만기일, iso),
         "date_to" (가장 늦은 사이클의 만기일, iso), "max_lookback_days",
         "points": [{"d_day" (0=만기일, 음수일수록 더 이전), "mean_basis",
-        "median_basis", "n" (그 d_day에 데이터가 있는 사이클 수 — 데이터
-        시작 초기 사이클은 lookback이 짧아 큰 |d_day|일수록 n이 줄어들 수
-        있다)}], "reason": None}`` — points는 d_day 오름차순
-        (-max_lookback_days -> 0).
+        "median_basis" (pt 단위), "mean_basis_pct", "median_basis_pct"
+        (모듈 docstring "베이시스 %" 참고 — 같은 D-day의 현물종가 대비 비율,
+        %), "n" (그 d_day에 데이터가 있는 사이클 수 — 데이터 시작 초기
+        사이클은 lookback이 짧아 큰 |d_day|일수록 n이 줄어들 수 있다)}],
+        "reason": None}`` — points는 d_day 오름차순 (-max_lookback_days -> 0).
     """
     common_dates = sorted(set(futures_by_date) & set(spot_by_date))
     if not common_dates or not expiries:
         return _insufficient(0, "가격 데이터 또는 과거 만기일 후보가 없음")
 
+    # pt(포인트)와 %(현물 대비 비율) 두 단위를 같은 날짜에서 함께 계산해둔다
+    # (모듈 docstring "베이시스 %" 참고) — 아래 D-day 워크 루프가 두 값을
+    # 튜플로 함께 들고 다니므로 루프 자체는 한 번만 돈다(pt/% 각각 별도
+    # 루프를 두면 두 로직이 어긋날 위험이 있어 피한다).
     basis_by_date = {d: futures_by_date[d] - spot_by_date[d] for d in common_dates}
+    basis_pct_by_date = {
+        d: basis_by_date[d] / spot_by_date[d] * 100 for d in common_dates
+    }
     last_date = common_dates[-1]
 
-    cycles: list[dict[int, float]] = []
+    # 사이클별 D-day -> (pt 베이시스, % 베이시스) 튜플. 별도 병렬 dict
+    # (cycle_pct_values 등)를 두는 대신 튜플로 묶은 이유: 두 값은 항상 같은
+    # (사이클, k) 쌍에서 함께 생기고 함께 소비되므로, 병렬 구조로 나누면
+    # 두 dict의 키 집합이 우연히도 항상 동일해야 한다는 불변식을 코드가 아니라
+    # 사람이 눈으로 지켜야 한다 — 튜플이면 그 불변식이 타입 구조로 강제된다.
+    cycles: list[dict[int, tuple[float, float]]] = []
     cycle_expiries: list[dt.date] = []
     for expiry in sorted(expiries):
         if expiry > last_date:
@@ -172,12 +199,13 @@ def aggregate_expiry_pattern(
         if anchor_idx is None:
             continue  # 구간 이전이거나 데이터 갭.
 
-        cycle_values: dict[int, float] = {}
+        cycle_values: dict[int, tuple[float, float]] = {}
         for k in range(0, max_lookback_days + 1):
             idx = anchor_idx - k
             if idx < 0:
                 break  # 데이터 시작 이전 — 이 사이클은 여기서부터 lookback 없음.
-            cycle_values[k] = basis_by_date[common_dates[idx]]
+            d = common_dates[idx]
+            cycle_values[k] = (basis_by_date[d], basis_pct_by_date[d])
         cycles.append(cycle_values)
         cycle_expiries.append(expiry)
 
@@ -190,14 +218,18 @@ def aggregate_expiry_pattern(
 
     points: list[dict[str, Any]] = []
     for k in range(0, max_lookback_days + 1):
-        values = [c[k] for c in cycles if k in c]
-        if not values:
+        pairs = [c[k] for c in cycles if k in c]
+        if not pairs:
             continue
+        values = [p[0] for p in pairs]
+        pct_values = [p[1] for p in pairs]
         points.append(
             {
                 "d_day": -k,
                 "mean_basis": round(statistics.mean(values), 2),
                 "median_basis": round(statistics.median(values), 2),
+                "mean_basis_pct": round(statistics.mean(pct_values), 4),
+                "median_basis_pct": round(statistics.median(pct_values), 4),
                 "n": len(values),
             }
         )

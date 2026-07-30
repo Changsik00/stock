@@ -1595,6 +1595,13 @@ function ExpiryPatternModal() {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  // pt/% 토글(PLAN.md §5.42-5) — §5.41 flowInvestor 토글과 동일한
+  // toggle-row/toggle-chip 패턴. 기본값을 '%'로 둔 이유: 이 필드 자체가
+  // "3년 구간 동안 지수 수준이 크게 바뀌어 pt만으로는 사이클 간 비교가
+  // 왜곡된다"는 사용자 지적에서 나왔으므로, 처음 여는 화면이 그 문제를
+  // 이미 해결한 뷰(%)를 보여주는 게 자연스럽다. pt는 원 지표라 토글로 한
+  // 클릭이면 바로 볼 수 있어 잃는 것도 없다.
+  const [unitMode, setUnitMode] = useState('pct')
 
   useEffect(() => {
     let cancelled = false
@@ -1629,7 +1636,22 @@ function ExpiryPatternModal() {
         과거 {data.cycle_count}회 만기 사이클({data.date_from} ~ {data.date_to}) 평균 — 이번
         사이클도 같은 패턴을 보인다는 보장은 없는 과거 관찰 통계입니다.
       </div>
-      <ExpiryPatternChart points={data.points ?? []} />
+      <div className="toggle-row">
+        {[
+          { key: 'pct', label: '%(지수 대비)' },
+          { key: 'pt', label: 'pt(포인트)' },
+        ].map((opt) => (
+          <button
+            key={opt.key}
+            type="button"
+            className={`toggle-chip ${unitMode === opt.key ? 'active' : ''}`}
+            onClick={() => setUnitMode(opt.key)}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+      <ExpiryPatternChart points={data.points ?? []} mode={unitMode} />
     </div>
   )
 }

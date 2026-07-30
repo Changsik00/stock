@@ -342,9 +342,13 @@ async def basis_expiry_pattern(session: AsyncSession = Depends(get_session)) -> 
         ``{"cycle_count" (집계에 쓰인 과거 만기 사이클 수), "date_from"/
         "date_to" (가장 이르고 늦은 사이클의 만기일, iso), "max_lookback_days"
         (D-0부터 며칠 전까지 보는지), "points": [{"d_day" (0=만기일, 음수일수록
-        더 이전), "mean_basis", "median_basis", "n" (그 d_day에 데이터가 있는
-        사이클 수 — 데이터 시작 초기 사이클은 lookback이 짧아 |d_day|가 클수록
-        n이 줄 수 있다)}], "reason": None}``.
+        더 이전), "mean_basis", "median_basis" (pt 단위), "mean_basis_pct",
+        "median_basis_pct" (PLAN.md §5.42-5 — 같은 D-day의 현물종가 대비
+        비율 %, 3년 구간 동안 지수 수준 자체가 크게 바뀌어 절대 pt만으로는
+        사이클 간 비교가 왜곡될 수 있어 추가한 필드. 기존 pt 필드는 그대로
+        유지되는 추가 필드다), "n" (그 d_day에 데이터가 있는 사이클 수 —
+        데이터 시작 초기 사이클은 lookback이 짧아 |d_day|가 클수록 n이 줄
+        수 있다)}], "reason": None}``.
 
     **이건 과거 관찰 통계이지 예측이 아니다 — §5.15/§5.23/§5.33/§5.40과 동일한
     house rule**: "과거 N회 사이클에서 D-day별 베이시스가 이랬다"는 사실
