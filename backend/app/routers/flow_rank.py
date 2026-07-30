@@ -26,11 +26,15 @@ limit개를 반환한다 — direction="in"(기본값, 하위호환)이면 기�
 (유입 상위), direction="out"이면 via_etf_net < 0인 행만 오름차순(가장 큰 음수=가장
 큰 유출이 1등)으로 정렬한다(§4.6 3.6-4 "ETF 경유 유출 상위 병기").
 
-sentiment는 market_breadth(등락 비율)·flow_rank(외인+기관 순매수/순매도 상위 합)·
-etf_stats(ETF 순유입 합 ÷ AUM 합) 세 요소를 app/sentiment.py의 순수 함수로 가중평균한
-근사 게이지다(§4.6 한계: 상위 랭킹·ETF 유니버스 기반 근사치, 시장 전체 정밀값 아님).
-세 요소는 서로 다른 테이블이라 "가장 최근 가용 날짜"가 어긋날 수 있다 — 그대로 두고
-응답에 요소별 date를 그대로 노출해 투명하게 밝힌다.
+sentiment는 breadth(등락 비율)·flow(현물 수급)·futures(선물 수급, §5.43 신규)·
+etf(ETF 순유입 합 ÷ AUM 합) 네 요소를 app/sentiment.py의 순수 함수로 가중평균한
+게이지다. breadth/flow/futures 셋은 라이브 우선(장중이면 오늘 실측, 실패/마감이면
+EOD 폴백)이고 etf만 EOD 전용이다(§5.43 설계 노트 — ETF 순유입/AUM 라이브 소스가
+확인되지 않음). flow는 §5.43 이전에는 flow_rank(외인+기관 순매수/순매도 상위 합,
+상위 랭킹 근사치)만 썼지만, 이제 라이브가 가능하면 코스피+코스닥 전체 투자자별
+net_value 합산(근사가 아닌 시장 전체 값)으로 계산하고, 라이브가 없을 때만 옛
+flow_rank 근사치로 폴백한다. 요소마다 "가장 최근 가용 날짜"·소스가 다를 수 있다 —
+그대로 두고 응답에 요소별 date/source를 그대로 노출해 투명하게 밝힌다.
 
 ## GET /api/markets/value-rank/live (PLAN.md §4.7 3단 갱신 주기, 2026-07-20 장중 실측)
 
@@ -108,10 +112,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..clients import naver_rank, naver_value_rank
 from ..db import get_session
 from ..market_hours import KST, is_nxt_closed
-from ..models import EtfStat, FlowPath, FlowRank, MarketBreadth, Stock, ValueRank
+from ..models import EtfStat, FlowPath, FlowRank, MarketBreadth, MarketFlow, Stock, ValueRank
 from ..quant import etf_weight_changes
-from ..sentiment import breadth_score, compute_sentiment, etf_score, flow_score
-from .markets import _warm_breadth_live
+from ..sentiment import breadth_score, compute_sentiment, etf_score, flow_live_score, flow_score
+from .markets import _warm_breadth_live, _warm_flow_live, _warm_futures_flow_live
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +133,17 @@ ETF_WEIGHT_CHANGE_EVENTS = {
 }
 # sentiment 요소별 원재료를 찾을 때 "가장 최근 가용 날짜"를 얼마나 과거까지 훑을지.
 SENTIMENT_LOOKBACK_DAYS = 30
+
+# sentiment futures 요소(§5.43 신규)의 EOD 폴백이 읽는 market_flow.market 값
+# (collectors/futures_flow.py MARKET 상수와 동일한 문자열).
+FUTURES_MARKET = "k200_futures"
+
+# flow_live_score에 넘길 3분류 투자자 라벨 — routers.markets._warm_flow_live/
+# _warm_futures_flow_live의 investors dict와 market_flow.investor 컬럼 모두 이
+# 정확한 한국어 문자열을 키로 쓴다(collectors/market_flow.py 참고).
+_INVESTOR_INDIVIDUAL = "개인"
+_INVESTOR_FOREIGN = "외국인"
+_INVESTOR_INSTITUTION = "기관계"
 
 # 5~10분 장중 라이브 캐시 TTL — collectors/live_refresh.py 신규 인터벌 잡과 맞춘다.
 LIVE_TTL_SECONDS = 420  # 7분
@@ -489,6 +504,10 @@ async def _load_breadth_component_live(session: AsyncSession) -> dict | None:
 
 
 async def _load_flow_component(session: AsyncSession) -> dict:
+    """flow_rank(외인+기관 순매수/순매도 상위 랭킹 합, 상위 N 근사치) 기준 flow
+    요소 — market_sentiment의 폴백 경로(라이브를 못 쓸 때: 장 마감이거나 flow/live
+    자체가 실패)다. §5.43 이전에는 이 함수가 유일한 경로였다(breadth의
+    _load_breadth_component와 동일한 위치)."""
     since = dt.date.today() - dt.timedelta(days=SENTIMENT_LOOKBACK_DAYS)
     latest_date = (
         await session.execute(
@@ -499,7 +518,7 @@ async def _load_flow_component(session: AsyncSession) -> dict:
     ).scalar()
 
     if latest_date is None:
-        return {"score": None, "date": None, "buy_sum": 0, "sell_sum": 0}
+        return {"score": None, "date": None, "buy_sum": 0, "sell_sum": 0, "source": "eod"}
 
     # Postgres SUM(bigint) -> numeric(Decimal), not bigint — cast back to int so this
     # mixes cleanly with app.sentiment's float arithmetic (compute_sentiment does
@@ -534,6 +553,144 @@ async def _load_flow_component(session: AsyncSession) -> dict:
         "date": latest_date.isoformat(),
         "buy_sum": buy_sum,
         "sell_sum": sell_sum,
+        "source": "eod",
+    }
+
+
+def _sum_investor_net_values(*investor_dicts: dict | None) -> tuple[float, float, float]:
+    """investors 딕셔너리(들 — routers.markets._warm_flow_live/
+    _warm_futures_flow_live 응답의 "investors" 값, {투자자명: {"net_value", ...}})
+    에서 개인/외국인/기관계 net_value를 뽑아 합산한다. flow(현물) 요소는 코스피+
+    코스닥 두 시장 investors를 함께 넘겨 합산하고, futures(선물) 요소는 단일
+    시장이라 하나만 넘긴다. 키가 없으면 0(그 투자자 분류가 이번 응답에 없다는
+    뜻 — 예: 한쪽 시장 조회 실패, 개장 초반 일부 분류 결측 등)."""
+    individual = foreign = institution = 0.0
+    for d in investor_dicts:
+        if not d:
+            continue
+        individual += (d.get(_INVESTOR_INDIVIDUAL) or {}).get("net_value") or 0
+        foreign += (d.get(_INVESTOR_FOREIGN) or {}).get("net_value") or 0
+        institution += (d.get(_INVESTOR_INSTITUTION) or {}).get("net_value") or 0
+    return individual, foreign, institution
+
+
+async def _load_flow_component_live(session: AsyncSession) -> dict | None:
+    """flow/live(routers.markets._warm_flow_live, 코스피+코스닥 키움 라이브 +
+    DB 확정치 내부 폴백)를 재사용해 코스피+코스닥 전체 투자자별(개인/외국인/
+    기관계) net_value를 합산하고 sentiment.flow_live_score로 계산한다
+    (PLAN.md §5.43-2) — 기존 flow_rank 상위 랭킹 근사치(_load_flow_component)를
+    대체하는 시장 전체 계산이라 더는 근사치가 아니다.
+
+    _load_breadth_component_live와 완전히 동일한 게이트 원칙(§5.5-4)을 쓴다:
+    market_closed면 무조건 None을 반환해 호출자가 기존 EOD 경로
+    (_load_flow_component)로 넘어가게 한다. _warm_flow_live 자체는 내부적으로
+    (장중 키움 라이브 -> 실패 시 DB 확정치) 폴백을 이미 갖고 있어 market_closed
+    상황에서도 값을 채워 돌려줄 수 있지만, 이 게이트는 breadth와 동일하게
+    "장 마감이면 옛 EOD 경로로" 원칙을 우선한다 — 두 폴백 소스가 다르다는
+    비일관성보다 게이트 동작 자체의 일관성(breadth/flow가 같은 규칙)을 택했다."""
+    live = await _warm_flow_live(session)
+    if live.get("market_closed"):
+        return None
+    kospi = live.get("kospi")
+    kosdaq = live.get("kosdaq")
+    if kospi is None and kosdaq is None:
+        return None
+
+    individual, foreign, institution = _sum_investor_net_values(
+        (kospi or {}).get("investors"), (kosdaq or {}).get("investors")
+    )
+
+    return {
+        "score": flow_live_score(individual, foreign, institution),
+        "date": dt.datetime.now(KST).date().isoformat(),
+        "individual": individual,
+        "foreign": foreign,
+        "institution": institution,
+        "source": "live",
+    }
+
+
+async def _load_futures_component_live() -> dict | None:
+    """futures-flow/live(routers.markets._warm_futures_flow_live, K200 선물
+    네이버 라이브)를 재사용해 선물 투자자별(개인/외국인/기관계) net_value로
+    sentiment.flow_live_score를 계산한다(PLAN.md §5.43-2, 신규 요소).
+
+    market_closed면(또는 investors가 비어 있으면 — 캐시조차 없는 기동 직후 등)
+    None을 반환해 호출자가 EOD 폴백(_load_futures_component_eod, market_flow
+    market='k200_futures' 확정치)으로 넘어가게 한다 — breadth/flow와 동일한
+    게이트. _warm_futures_flow_live는 session 인자를 받지 않는다(flow와 달리
+    자체 DB 폴백이 없다 — 아래 _load_futures_component_eod docstring 참고)."""
+    live = await _warm_futures_flow_live()
+    if live.get("market_closed"):
+        return None
+    investors = live.get("investors") or {}
+    if not investors:
+        return None
+
+    individual, foreign, institution = _sum_investor_net_values(investors)
+
+    return {
+        "score": flow_live_score(individual, foreign, institution),
+        "date": live.get("date") or dt.datetime.now(KST).date().isoformat(),
+        "individual": individual,
+        "foreign": foreign,
+        "institution": institution,
+        "source": "live",
+    }
+
+
+async def _load_futures_component_eod(session: AsyncSession) -> dict:
+    """K200 선물 EOD 폴백 — collectors/futures_flow.py가 매일 적재하는
+    market_flow(market='k200_futures') 확정치를 읽어 sentiment.flow_live_score로
+    계산한다(PLAN.md §5.43-2).
+
+    **설계 노트**: _warm_futures_flow_live 자체는 flow(_warm_flow_live)와 달리
+    DB 폴백이 없다 — 장 마감이면 마지막 메모리 캐시만 재사용하고(없으면
+    investors={}), market_flow 테이블에 쓰지도 읽지도 않는다(routers/markets.py
+    모듈 docstring "market_flow DB에는 쓰지 않는다" 절 참고). PLAN.md §5.43
+    태스크 표는 "EOD 폴백 없이 라이브 불가 시 None"도 허용했지만, market_flow에는
+    이미 collectors/futures_flow.py 일별 배치가 채워둔 k200_futures 확정치가
+    존재하므로(§4.5 4.5-2) 이를 그대로 재사용해 breadth/flow와 대등하게 "장
+    마감 시간대에도 futures 요소가 항상 None이 되지는 않도록" 만들었다 — 이
+    함수가 없다면 밤/주말에는 게이지가 영구히 3요소로만 재정규화된다."""
+    since = dt.date.today() - dt.timedelta(days=SENTIMENT_LOOKBACK_DAYS)
+    latest_date = (
+        await session.execute(
+            select(func.max(MarketFlow.date)).where(
+                MarketFlow.market == FUTURES_MARKET, MarketFlow.date >= since
+            )
+        )
+    ).scalar()
+
+    if latest_date is None:
+        return {
+            "score": None,
+            "date": None,
+            "individual": 0,
+            "foreign": 0,
+            "institution": 0,
+            "source": "eod",
+        }
+
+    rows = (
+        await session.execute(
+            select(MarketFlow).where(
+                MarketFlow.market == FUTURES_MARKET, MarketFlow.date == latest_date
+            )
+        )
+    ).scalars().all()
+    by_investor = {r.investor: (r.net_value or 0) for r in rows}
+    individual = by_investor.get(_INVESTOR_INDIVIDUAL, 0)
+    foreign = by_investor.get(_INVESTOR_FOREIGN, 0)
+    institution = by_investor.get(_INVESTOR_INSTITUTION, 0)
+
+    return {
+        "score": flow_live_score(individual, foreign, institution),
+        "date": latest_date.isoformat(),
+        "individual": individual,
+        "foreign": foreign,
+        "institution": institution,
+        "source": "eod",
     }
 
 
@@ -548,7 +705,7 @@ async def _load_etf_component(session: AsyncSession) -> dict:
     ).scalar()
 
     if latest_date is None:
-        return {"score": None, "date": None, "net_inflow_sum": 0, "aum_sum": 0}
+        return {"score": None, "date": None, "net_inflow_sum": 0, "aum_sum": 0, "source": "eod"}
 
     # (see buy_sum/sell_sum comment above — same Postgres numeric->Decimal cast issue)
     net_inflow_sum = int(
@@ -577,39 +734,78 @@ async def _load_etf_component(session: AsyncSession) -> dict:
         "date": latest_date.isoformat(),
         "net_inflow_sum": net_inflow_sum,
         "aum_sum": aum_sum,
+        "source": "eod",
     }
 
 
 @router.get("/api/markets/sentiment")
 async def market_sentiment(session: AsyncSession = Depends(get_session)) -> dict:
-    """시장 종합 매수세/매도세 게이지(-100~+100) (PLAN.md §4.6 3.6-4).
+    """시장 종합 매수세/매도세 게이지(-100~+100) (PLAN.md §4.6 3.6-4, §5.43).
 
-    breadth(market_breadth 등락 비율)·flow(flow_rank 외인+기관 순매수/순매도 상위 합)·
-    etf(etf_stats 순유입 합 ÷ AUM 합) 세 요소를 app/sentiment.py의 순수 함수로 가중평균
-    한다. 각 요소는 서로 다른 테이블이라 "가장 최근 가용 날짜"를 독립적으로 찾으므로
-    날짜가 어긋날 수 있다 — 그대로 두고 components[*].date에 그대로 노출한다(투명성).
-    요소 하나라도 데이터가 없으면(None) 나머지 요소로 가중치를 재정규화한다
-    (compute_sentiment 참고). 셋 다 없으면 score도 None.
+    breadth(등락 비율)·flow(현물 수급)·futures(선물 수급, §5.43 신규)·etf(ETF 순유입
+    합 ÷ AUM 합) 네 요소를 app/sentiment.py의 순수 함수로 가중평균한다. 각 요소는
+    서로 다른 소스라 "가장 최근 가용 날짜"를 독립적으로 찾으므로 날짜가 어긋날 수
+    있다 — 그대로 두고 components[*].date에 그대로 노출한다(투명성). 요소 하나라도
+    데이터가 없으면(None) 나머지 요소로 가중치를 재정규화한다(compute_sentiment
+    참고). 넷 다 없으면 score도 None.
 
-    approx=True는 항상 고정값이다 — 이 프로젝트의 flow/etf 요소는 상위 랭킹·ETF
-    유니버스 기반 근사치이지 시장 전체 정밀값이 아니다(§4.6 한계 절, 정밀값은 향후
-    KRX/KIS market_flow 연동 후 대체 예정).
+    approx=True는 항상 고정값이다 — etf 요소는 여전히 ETF 유니버스 기반 근사치이고
+    (§4.6 한계 절), flow/futures도 라이브가 아닐 때는 flow_rank 상위 랭킹 근사치로
+    폴백할 수 있다(아래 flow 절 참고). breadth/flow/futures 셋 다 라이브일 때는
+    시장 전체 값이라 근사가 아니지만, 요소 구성 자체가 상황에 따라 바뀌므로
+    approx 플래그는 단순화를 위해 항상 True로 고정한다.
 
     **breadth 요소는 2026-07-21(PLAN.md §5.5-4)부터 라이브를 우선한다**: 장중이고
     breadth/live(routers.markets._warm_breadth_live, 1분 캐시) 조회가 성공하면 그
     adv/dec/flat으로 계산하고(``components.breadth.source == "live"``), 장
     마감이거나 라이브가 실패하면 기존 market_breadth DB EOD 확정치로 폴백한다
-    (``source == "eod"``) — 완전 대체가 아니라 우선순위 추가다. flow(flow_rank)·
-    etf(etf_stats) 요소는 이번 범위 밖이라 그대로 EOD 전용이다(flow_rank는 §4.7-4에서
-    라이브가 부적합 판정된 상태).
+    (``source == "eod"``) — 완전 대체가 아니라 우선순위 추가다.
+
+    **flow 요소는 2026-07-30(PLAN.md §5.43)부터 라이브를 우선한다**: 장중이고
+    flow/live(routers.markets._warm_flow_live, 코스피+코스닥 키움 라이브 + DB
+    확정치 내부 폴백) 조회가 성공하면 두 시장 투자자별(개인/외국인/기관계)
+    net_value를 합산해 sentiment.flow_live_score로 계산하고(``source == "live"``,
+    ``individual``/``foreign``/``institution`` 필드로 원재료 노출), 장 마감이거나
+    라이브가 실패하면 **기존 flow_rank 상위 랭킹 근사치**(``source == "eod"``,
+    ``buy_sum``/``sell_sum`` 필드)로 폴백한다. §5.43 이전에는 flow_rank 근사치만
+    있었다(§4.6 한계 — 상위 N 종목의 매수/매도 합만 볼 뿐 시장 전체를 못 봄) — 이제
+    라이브 경로는 시장 전체 투자자 합계를 그대로 쓰므로 더는 근사치가 아니다. 라이브/
+    EOD 두 경로가 서로 다른 필드 셋을 노출하는 비대칭이 있다 — 두 소스의 원재료
+    자체가 다르기 때문에(투자자별 net_value vs 랭킹 매수/매도 합) 억지로 통일하지
+    않았다.
+
+    **futures 요소는 2026-07-30(PLAN.md §5.43)부터 신규 추가된다**: 이 프로젝트가
+    이미 "외인 양손"(현물+선물 동시 수급)을 중요한 신호로 다뤄왔는데(§4.7 외인 양손
+    절 등) 기존 게이지는 선물을 전혀 반영하지 않았다는 사용자 지적("반쪽
+    정보였다")에서 나왔다. 장중이고 futures-flow/live(routers.markets.
+    _warm_futures_flow_live, K200 선물 네이버 라이브) 조회가 성공하면 선물
+    투자자별 net_value로 flow_live_score를 계산하고(``source == "live"``), 장
+    마감이거나 라이브가 실패하면 market_flow(market='k200_futures') EOD 확정치로
+    폴백한다(``source == "eod"``, collectors/futures_flow.py 일별 배치가 채워둠).
+    두 경로 다 없으면(배치도 미실행) score는 None이고 나머지 요소로 재정규화된다.
+
+    **etf 요소는 라이브 소스가 없다(EOD 전용, §5.43 설계 노트)**: ETF 순유입/AUM은
+    펀드 보고 특성상 일단위로만 확정되고, 이 프로젝트가 조사한 범위에서 장중
+    실시간으로 갱신되는 소스를 찾지 못했다 — breadth/flow/futures 세 요소와 달리
+    라이브 우선 게이트 자체가 없고, ``_load_etf_component``가 유일한 경로다.
     """
     breadth = await _load_breadth_component_live(session)
     if breadth is None:
         breadth = await _load_breadth_component(session)
-    flow = await _load_flow_component(session)
+
+    flow = await _load_flow_component_live(session)
+    if flow is None:
+        flow = await _load_flow_component(session)
+
+    futures = await _load_futures_component_live()
+    if futures is None:
+        futures = await _load_futures_component_eod(session)
+
     etf = await _load_etf_component(session)
 
-    score, weights = compute_sentiment(breadth["score"], flow["score"], etf["score"])
+    score, weights = compute_sentiment(
+        breadth["score"], flow["score"], futures["score"], etf["score"]
+    )
 
     return {
         "score": score,
@@ -617,6 +813,7 @@ async def market_sentiment(session: AsyncSession = Depends(get_session)) -> dict
         "components": {
             "breadth": {"weight": weights["breadth"], **breadth},
             "flow": {"weight": weights["flow"], **flow},
+            "futures": {"weight": weights["futures"], **futures},
             "etf": {"weight": weights["etf"], **etf},
         },
     }

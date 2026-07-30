@@ -16,7 +16,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import async_session_factory, engine
-from app.models import EtfStat, FlowPath, FlowRank, MarketBreadth
+from app.models import EtfStat, FlowPath, FlowRank, MarketBreadth, MarketFlow
 from app.routers import markets
 from app.routers.flow_rank import router
 
@@ -43,6 +43,7 @@ async def _clear_test_rows() -> None:
             MarketBreadth.__table__.delete().where(MarketBreadth.date == TEST_DATE)
         )
         await session.execute(EtfStat.__table__.delete().where(EtfStat.date == TEST_DATE))
+        await session.execute(MarketFlow.__table__.delete().where(MarketFlow.date == TEST_DATE))
         await session.commit()
 
 
@@ -107,6 +108,19 @@ async def seeded_sentiment_inputs():
         await session.execute(
             pg_insert(EtfStat).values(code="069500", date=TEST_DATE, nav=10000.0, aum=100000, net_inflow=2000)
         )
+        # §5.43 신규 futures 요소의 EOD 폴백(market_flow market='k200_futures')용 시드.
+        # flow_live_score(-200, 800, -100) = (800-100)/(200+800+100)*100 = 63.6363... -> 63.6.
+        for investor, net_value in [("개인", -200), ("외국인", 800), ("기관계", -100)]:
+            await session.execute(
+                pg_insert(MarketFlow).values(
+                    market="k200_futures",
+                    date=TEST_DATE,
+                    investor=investor,
+                    net_value=net_value,
+                    net_volume=None,
+                    source="naver",
+                )
+            )
         await session.commit()
     yield
     await _clear_test_rows()
@@ -155,13 +169,13 @@ async def test_flow_path_rejects_unknown_direction():
     assert resp.status_code == 400
 
 
-async def test_sentiment_combines_breadth_flow_etf_components(seeded_sentiment_inputs, monkeypatch):
-    # PLAN.md §5.5-4부터 market_sentiment의 breadth 요소는 breadth/live(실제 네이버
-    # 호출)를 우선 시도한다 — 이 테스트는 seeded_sentiment_inputs로 심어둔 EOD
-    # MarketBreadth(TEST_DATE=2099-01-01) 경로를 검증하려는 것이므로, 장을 강제로
-    # "마감" 상태로 만들어 라이브 호출 자체를 건너뛰게 한다(test_markets_breadth_router.py
-    # 의 `_force_market_open`과 반대 방향의 동일한 monkeypatch 패턴 — 실네트워크 호출 없이
-    # EOD 폴백 경로만 결정적으로 재현).
+async def test_sentiment_combines_all_components_when_market_closed(seeded_sentiment_inputs, monkeypatch):
+    # PLAN.md §5.5-4/§5.43부터 market_sentiment의 breadth/flow/futures 세 요소는
+    # 각각 live 우선 시도한다 — 이 테스트는 seeded_sentiment_inputs로 심어둔 EOD
+    # 픽스처(MarketBreadth/FlowRank/EtfStat/MarketFlow, TEST_DATE=2099-01-01) 경로를
+    # 검증하려는 것이므로, 장을 강제로 "마감" 상태로 만들어 세 라이브 호출 모두
+    # 건너뛰게 한다(breadth/flow/futures 라이브 게이트가 모두 같은 전역
+    # `_market_closed_kst`를 참조하므로 patch 하나로 셋 다 막힌다).
     monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: True)
 
     app = _make_app()
@@ -175,6 +189,7 @@ async def test_sentiment_combines_breadth_flow_etf_components(seeded_sentiment_i
 
     breadth = body["components"]["breadth"]
     flow = body["components"]["flow"]
+    futures = body["components"]["futures"]
     etf = body["components"]["etf"]
 
     # breadth: adv=1000, dec=700, flat=300 (kospi+kosdaq 합산) -> (1000-700)/2000*100 = 15.0
@@ -185,22 +200,36 @@ async def test_sentiment_combines_breadth_flow_etf_components(seeded_sentiment_i
     assert breadth["score"] == 15.0
     assert breadth["source"] == "eod"
 
-    # flow: buy_sum=1500, sell_sum=500 -> (1500-500)/2000*100 = 50.0
+    # flow: market_closed=True -> live 게이트가 None -> 옛 flow_rank 랭킹 근사치로 폴백.
+    # buy_sum=1500, sell_sum=500 -> (1500-500)/2000*100 = 50.0
     assert flow["date"] == TEST_DATE.isoformat()
     assert flow["buy_sum"] == 1500
     assert flow["sell_sum"] == 500
     assert flow["score"] == 50.0
+    assert flow["source"] == "eod"
 
-    # etf: net_inflow_sum=2000, aum_sum=100000 -> 2000/100000*100 = 2.0
+    # futures(§5.43 신규): market_closed=True -> live 게이트가 None -> market_flow
+    # (market='k200_futures') EOD 확정치로 폴백. flow_live_score(-200, 800, -100)
+    # = (800-100)/(200+800+100)*100 = 63.6363... -> 63.6
+    assert futures["date"] == TEST_DATE.isoformat()
+    assert futures["individual"] == -200
+    assert futures["foreign"] == 800
+    assert futures["institution"] == -100
+    assert futures["score"] == 63.6
+    assert futures["source"] == "eod"
+
+    # etf: net_inflow_sum=2000, aum_sum=100000 -> 2000/100000*100 = 2.0 (항상 EOD)
     assert etf["date"] == TEST_DATE.isoformat()
     assert etf["net_inflow_sum"] == 2000
     assert etf["aum_sum"] == 100000
     assert etf["score"] == 2.0
+    assert etf["source"] == "eod"
 
-    # weighted: 15*0.4 + 50*0.35 + 2*0.25 = 6 + 17.5 + 0.5 = 24.0
-    assert body["score"] == 24.0
-    assert breadth["weight"] == 0.4
-    assert flow["weight"] == 0.35
+    # weighted: 15*0.35 + 50*0.20 + 63.6*0.20 + 2*0.25 = 5.25 + 10 + 12.72 + 0.5 = 28.47 -> 28.5
+    assert body["score"] == 28.5
+    assert breadth["weight"] == 0.35
+    assert flow["weight"] == 0.20
+    assert futures["weight"] == 0.20
     assert etf["weight"] == 0.25
 
     # 반환된 score/weight가 app.sentiment.compute_sentiment의 재정규화 로직과 일치하는지도
@@ -208,31 +237,66 @@ async def test_sentiment_combines_breadth_flow_etf_components(seeded_sentiment_i
     # 그대로 전달하는지만 재확인) 간단히 크로스체크한다.
     from app.sentiment import compute_sentiment  # noqa: PLC0415
 
-    expected_score, expected_weights = compute_sentiment(15.0, 50.0, 2.0)
+    expected_score, expected_weights = compute_sentiment(15.0, 50.0, 63.6, 2.0)
     assert body["score"] == expected_score
     assert breadth["weight"] == expected_weights["breadth"]
 
 
-async def test_sentiment_prefers_live_breadth_when_market_open(seeded_sentiment_inputs, monkeypatch):
-    """PLAN.md §5.5-4 — 장중이고 breadth/live 조회가 성공하면 breadth 요소는 그
-    라이브 adv/dec/flat을 쓴다(EOD MarketBreadth에 심어둔 TEST_DATE 값이 아니라).
-    flow/etf는 이번 범위 밖이라 여전히 EOD(seeded_sentiment_inputs) 그대로다 —
-    "완전 대체가 아니라 우선순위 추가"라는 설계를 그대로 검증한다. 실네트워크
-    호출을 막기 위해 `_fetch_breadth_blocking`을 가짜 데이터로 monkeypatch한다
-    (test_markets_breadth_router.py와 동일한 패턴)."""
+async def test_sentiment_prefers_live_breadth_flow_futures_when_market_open(
+    seeded_sentiment_inputs, monkeypatch
+):
+    """PLAN.md §5.5-4/§5.43 — 장중이고 breadth/flow/futures 각각의 live 조회가
+    성공하면 세 요소 모두 그 라이브 값을 쓴다(EOD 픽스처가 아니라). etf는 라이브
+    소스가 없어 이번에도 EOD(seeded_sentiment_inputs) 그대로다 — "breadth만 완전
+    대체가 아니라 우선순위 추가"라는 기존 설계를 flow/futures로 확장 검증한다.
+    실네트워크 호출을 막기 위해 각 소스의 blocking/fetch 함수를 가짜 데이터로
+    monkeypatch한다(test_markets_breadth_router.py/test_markets_flow_live_router.py와
+    동일한 패턴)."""
     monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: False)
 
     live_kospi = {"adv": 900, "dec": 100, "flat": 50, "limit_up": 3, "limit_down": 0}
     live_kosdaq = {"adv": 700, "dec": 200, "flat": 30, "limit_up": 1, "limit_down": 0}
 
-    def fake_fetch(market: str) -> dict:
+    def fake_fetch_breadth(market: str) -> dict:
         return live_kospi if market == "kospi" else live_kosdaq
 
-    monkeypatch.setattr(markets, "_fetch_breadth_blocking", fake_fetch)
+    monkeypatch.setattr(markets, "_fetch_breadth_blocking", fake_fetch_breadth)
+
+    fake_kospi_flows = [
+        {"investor": "개인", "net_value": -1000, "net_volume": None},
+        {"investor": "외국인", "net_value": 5000, "net_volume": None},
+        {"investor": "기관계", "net_value": -2000, "net_volume": None},
+    ]
+    fake_kosdaq_flows = [
+        {"investor": "개인", "net_value": -500, "net_volume": None},
+        {"investor": "외국인", "net_value": 1500, "net_volume": None},
+        {"investor": "기관계", "net_value": -300, "net_volume": None},
+    ]
+
+    async def fake_fetch_live_flow(client, market, target_date):
+        return fake_kospi_flows if market == "kospi" else fake_kosdaq_flows
+
+    monkeypatch.setattr(markets, "fetch_live_flow", fake_fetch_live_flow)
+
+    fake_futures_flows = [
+        {"investor": "개인", "net_value": 300, "net_volume": None},
+        {"investor": "외국인", "net_value": -1200, "net_volume": None},
+        {"investor": "기관계", "net_value": 900, "net_volume": None},
+    ]
+
+    def fake_fetch_futures_flow_blocking(target_date):
+        return {"flows": fake_futures_flows, "date": target_date}
+
+    monkeypatch.setattr(markets, "_fetch_futures_flow_blocking", fake_fetch_futures_flow_blocking)
+
     # 모듈 전역 캐시가 이전 테스트(장 마감 케이스)의 값을 들고 있을 수 있으므로
-    # 비워서 이 테스트가 실제로 fake_fetch 경로를 타도록 강제한다.
+    # 비워서 이 테스트가 실제로 위 fake 경로를 타도록 강제한다.
     markets._live_cache["data"] = None
     markets._live_cache["ts"] = 0.0
+    markets._flow_live_cache["data"] = None
+    markets._flow_live_cache["ts"] = 0.0
+    markets._futures_flow_live_cache["data"] = None
+    markets._futures_flow_live_cache["ts"] = 0.0
 
     app = _make_app()
     transport = ASGITransport(app=app)
@@ -242,6 +306,8 @@ async def test_sentiment_prefers_live_breadth_when_market_open(seeded_sentiment_
     assert resp.status_code == 200
     body = resp.json()
     breadth = body["components"]["breadth"]
+    flow = body["components"]["flow"]
+    futures = body["components"]["futures"]
 
     # adv=900+700=1600, dec=100+200=300, flat=50+30=80 -> 라이브 소스, EOD(1000/700/300) 아님.
     assert breadth["source"] == "live"
@@ -250,9 +316,26 @@ async def test_sentiment_prefers_live_breadth_when_market_open(seeded_sentiment_
     assert breadth["flat"] == 80
     assert breadth["date"] == dt.datetime.now(markets.KST).date().isoformat()
 
-    # flow/etf는 이번 범위 밖 — 여전히 seeded EOD(TEST_DATE) 그대로.
-    assert body["components"]["flow"]["date"] == TEST_DATE.isoformat()
+    # flow(§5.43): 코스피+코스닥 investors 합산 -> individual=-1500, foreign=6500,
+    # institution=-2300 -> (6500-2300)/(1500+6500+2300)*100 = 40.7766... -> 40.8
+    assert flow["source"] == "live"
+    assert flow["individual"] == -1500
+    assert flow["foreign"] == 6500
+    assert flow["institution"] == -2300
+    assert flow["score"] == 40.8
+    assert flow["date"] == dt.datetime.now(markets.KST).date().isoformat()
+
+    # futures(§5.43 신규): individual=300, foreign=-1200, institution=900
+    # -> (-1200+900)/(300+1200+900)*100 = -12.5
+    assert futures["source"] == "live"
+    assert futures["individual"] == 300
+    assert futures["foreign"] == -1200
+    assert futures["institution"] == 900
+    assert futures["score"] == -12.5
+
+    # etf는 라이브 소스가 없다(§5.43 설계 노트) — 여전히 seeded EOD(TEST_DATE) 그대로.
     assert body["components"]["etf"]["date"] == TEST_DATE.isoformat()
+    assert body["components"]["etf"]["source"] == "eod"
 
 
 # 참고: "세 요소 전부 데이터 없음 -> score None" 케이스는 이 파일에서 통합테스트로

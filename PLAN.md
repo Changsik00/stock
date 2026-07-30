@@ -2665,9 +2665,9 @@ flow는 코스피+코스닥 두 시장의 investors를 합산한 뒤 계산. 기
 
 | # | 작업 | 내용 | 완료 기준 |
 |---|---|---|---|
-| 5.43-1 | flow/futures 라이브 점수 함수 | `app/sentiment.py`에 순수 함수 추가(투자자별 net_value dict를 받아 순방향/전체활동 비율 계산) | 단위테스트(경계값·전부 0인 경우 등) |
-| 5.43-2 | API 반영 | `routers/flow_rank.py::market_sentiment`에 `_load_flow_component_live`(코스피+코스닥 합산, `_warm_flow_live` 재사용)와 `_load_futures_component_live`(`_warm_futures_flow_live` 재사용) 추가, breadth와 동일한 "라이브 우선 실패시 EOD 폴백" 게이트, 4요소 가중치 재정규화 | curl로 장중 실데이터 확인(오늘 날짜로 나오는지) |
-| 5.43-3 | 프런트 반영 | `SentimentGauge.jsx`에 4번째 요소(선물) 표시, etf만 EOD라는 점을 표시(다른 3개는 라이브) | 코드리뷰 + vite build 클린 |
+| 5.43-1 ✅ | flow/futures 라이브 점수 함수 | `app/sentiment.py`에 `flow_live_score(individual, foreign, institution)` 추가 — breadth_score와 동일한 "순방향/전체활동" 비율, flow(현물)·futures 공용 | 단위테스트 5개(경계값·부호혼합·zero-denominator) — **완료(2026-07-30)** |
+| 5.43-2 ✅ | API 반영 | `routers/flow_rank.py::market_sentiment`에 `_load_flow_component_live`/`_load_futures_component_live` 추가(각각 `_warm_flow_live`/`_warm_futures_flow_live` 재사용), breadth와 동일한 라이브 우선 게이트 + futures 전용 EOD 폴백(`market_flow` k200_futures 확정치, 야간/주말에도 4요소 유지) 신규 추가, 4요소 가중치 재정규화(breadth 0.35/flow 0.20/futures 0.20/etf 0.25, 첫 배정 명시) | curl로 장중 실데이터 확인 — **완료(2026-07-30)**. 13:26 KST 실측: breadth/flow/futures 전부 `source:"live"`+오늘 날짜, etf만 `source:"eod"`+7/28. 산식 손검산 일치(futures: (-188900+185400)/403200*100=-0.87≈-0.9, flow: (9331+9330)/37448*100=49.84≈49.8). pytest 686→692(6개 신규) |
+| 5.43-3 ✅ | 프런트 반영 | `SentimentGauge.jsx`에 4번째 요소(선물) 표시, "장중"(라이브)/"EOD"(폴백 중)/"EOD 전용"(etf, 라이브 자체 없음) 3단계 배지로 구분 | 코드리뷰 + vite build 클린 확인 — **완료(2026-07-30)**. 브라우저 자동화 도구가 이번 세션에도 없어 실제 렌더 스크린샷은 못 함(§5.42-4/-5와 동일 상황) — 코드리뷰+curl+빌드로 대체 |
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
