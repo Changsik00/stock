@@ -2669,6 +2669,35 @@ flow는 코스피+코스닥 두 시장의 investors를 합산한 뒤 계산. 기
 | 5.43-2 ✅ | API 반영 | `routers/flow_rank.py::market_sentiment`에 `_load_flow_component_live`/`_load_futures_component_live` 추가(각각 `_warm_flow_live`/`_warm_futures_flow_live` 재사용), breadth와 동일한 라이브 우선 게이트 + futures 전용 EOD 폴백(`market_flow` k200_futures 확정치, 야간/주말에도 4요소 유지) 신규 추가, 4요소 가중치 재정규화(breadth 0.35/flow 0.20/futures 0.20/etf 0.25, 첫 배정 명시) | curl로 장중 실데이터 확인 — **완료(2026-07-30)**. 13:26 KST 실측: breadth/flow/futures 전부 `source:"live"`+오늘 날짜, etf만 `source:"eod"`+7/28. 산식 손검산 일치(futures: (-188900+185400)/403200*100=-0.87≈-0.9, flow: (9331+9330)/37448*100=49.84≈49.8). pytest 686→692(6개 신규) |
 | 5.43-3 ✅ | 프런트 반영 | `SentimentGauge.jsx`에 4번째 요소(선물) 표시, "장중"(라이브)/"EOD"(폴백 중)/"EOD 전용"(etf, 라이브 자체 없음) 3단계 배지로 구분 | 코드리뷰 + vite build 클린 확인 — **완료(2026-07-30)**. 브라우저 자동화 도구가 이번 세션에도 없어 실제 렌더 스크린샷은 못 함(§5.42-4/-5와 동일 상황) — 코드리뷰+curl+빌드로 대체 |
 
+### Phase 5.44 — flow 요소 코스피/코스닥 분리 + 과거 대비 높낮이 (2026-07-30 사용자 요청)
+
+사용자: "현물, 즉 코스피 기준으로 지금 더 높은지 낮은지는 알 수 있을가?" —
+확인 질문으로 범위 확정: (1) 코스피만 따로 분리해서 보여줄 것, (2) 과거
+대비 높낮이(기준선) 컨텍스트도 추가할 것. 둘 다 필요.
+
+**스코프**: 종합 게이지 -100~100 산식(4요소 가중평균) 자체는 건드리지
+않는다 — `flow` 요소는 여전히 코스피+코스�닥 합산으로 종합 점수에 들어가되,
+**응답에 코스피/코스닥 개별 점수 + 각자의 과거 대비 컨텍스트를 추가 노출**한다
+(프런트 상세 표시용, 종합 산식 변경 아님).
+
+**설계**:
+1. `_load_flow_component_live`가 이미 코스피/코스닥 investors를 각각 갖고
+   있으니(현재는 합산만 함) 시장별로도 `flow_live_score`를 따로 계산해
+   `by_market: {"kospi": {...}, "kosdaq": {...}}`로 추가.
+2. "과거 대비 높낮이"는 그 시장의 최근 N거래일(§5.19/§5.33과 동일한
+   "자기 자신의 과거 baseline, 오늘 제외" 패턴) `market_flow` 확정치로
+   매일의 flow_live_score를 다시 계산해 분포를 만들고, 오늘 라이브 점수가
+   그 분포에서 몇 번째(percentile)인지 계산. 표본 부족(예: N일 미만 데이터)이면
+   정직하게 실패(reason).
+3. 관찰 지표일 뿐 매매 신호 아님 — "높다/낮다"는 사실 서술, "오를 것"이라는
+   예측 아님(§5 house rule 그대로).
+
+| # | 작업 | 내용 | 완료 기준 |
+|---|---|---|---|
+| 5.44-1 | 시장별 분리 | `_load_flow_component_live`에 코스피/코스닥 개별 `flow_live_score` 추가 | 단위테스트 + curl 실데이터 |
+| 5.44-2 | 과거 대비 baseline 함수 | 신규 함수(세션 기반, `market_flow` 최근 N일 확정치로 일별 flow_live_score 재계산 후 percentile) | 단위테스트(표본 부족 처리 포함) + 실 DB 값 검증 |
+| 5.44-3 | API+프런트 반영 | `/api/markets/sentiment` 응답에 `components.flow.by_market` 추가, `SentimentGauge.jsx`에 코스피/코스닥 개별 점수 + "최근 N일 대비 상위/하위 X%" 표시 | curl 확인 + vite build 클린 |
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
