@@ -794,6 +794,24 @@ header h1 {
   color: var(--badge-info-fg);
 }
 
+/* 투자주의/경고/위험종목 지정 배지(PLAN.md §5.39) — 새 팔레트를 만들지 않고
+   §5.36 위험 배너의 심각도 색 언어(--risk-info/warn/danger-*)를 그대로
+   재사용한다(Badge.jsx 주석 참고, "주의<경고<위험"을 "info<warn<danger"에 맞춤). */
+.badge-investor-caution {
+  background: var(--risk-info-bg);
+  color: var(--risk-info-fg);
+}
+
+.badge-investor-warning {
+  background: var(--risk-warn-bg);
+  color: var(--risk-warn-fg);
+}
+
+.badge-investor-risk {
+  background: var(--risk-danger-bg);
+  color: var(--risk-danger-fg);
+}
+
 /* 외인 양손 시그널 배지 줄(PLAN.md §4.5-5) — 섹션 제목 아래, 타일 위에 배치되는
    클릭 가능한 배지 목록. 배지가 없을 때는 렌더되지 않는다(호출부에서 빈 배열이면
    행 자체를 생략). */

@@ -496,3 +496,44 @@ class VolumeProfileDaily(Base):
     bar_count: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
     total_volume: Mapped[float | None] = mapped_column(Numeric(24, 4))
     lookback_days: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+
+
+class InvestorWarningEvent(Base):
+    """투자주의/투자경고/투자위험종목 지정 이력 (PLAN.md §5.39) — KRX가 운영하는
+    3단계 종목 단위 공식 경보 제도(과열/불공정거래 방지 목적). §5.36의
+    서킷브레이커/사이드카가 "지수" 단위인 것과 달리 이건 "종목" 단위 지정이다.
+    소스: KRX 공시채널 KIND(kind.krx.co.kr) — ``clients/kind_investor_warning.py``
+    모듈 docstring "실측 경과" 절 참고.
+
+    ``tier``: "caution"(투자주의)/"warning"(투자경고)/"risk"(투자위험) — 세
+    tier가 서로 다른 실제 제도라 응답 스키마도 다르다. ``released_date``는
+    tier="warning"/"risk"에서만 의미 있다(그 두 tier는 "지정 -> 유지 -> 해제"의
+    기간을 갖는 상태, NULL이면 아직 해제 안 됨=현재 지정 중). tier="caution"은
+    "그날 하루" 통보 개념이라 해제라는 개념 자체가 없어 ``released_date``가
+    항상 NULL이다 — 대신 ``warning_type``(예: "종가급변")이 채워진다. 개념이
+    없는 필드를 억지로 채우지 않는다(§5 "정직한 표시" 원칙, 클라이언트 모듈
+    docstring과 동일).
+
+    PK는 (tier, raw_name, designated_date) — 같은 종목이 같은 tier로 여러 번
+    지정될 수 있어(지정 -> 해제 -> 재지정) code만으로는 유일하지 않고, 이
+    프로젝트의 기존 관례(파일 상단 "시계열 테이블은 복합 PK" 원칙)를 그대로
+    따른다. ``code``는 KIND가 주는 회사명 문자열(``raw_name``)을
+    ``stocks.name``과 정확 일치시켜 수집 시점에 채운다(우선주도 이름 자체가
+    구분되므로— "SK증권" vs "SK증권우" — 별도 접미사 처리 불필요,
+    ``collectors/investor_warning.py`` 참고). 일치하는 종목을 못 찾으면
+    NULL로 남기고 ``raw_name``은 항상 보존한다(매칭 실패를 조용히 버리지
+    않음)."""
+
+    __tablename__ = "investor_warning_event"
+
+    tier: Mapped[str] = mapped_column(String(10), primary_key=True)  # caution/warning/risk
+    raw_name: Mapped[str] = mapped_column(String(100), primary_key=True)
+    designated_date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    code: Mapped[str | None] = mapped_column(String(20), ForeignKey("stocks.code"))
+    market: Mapped[str | None] = mapped_column(String(10))  # KOSPI/KOSDAQ/KONEX
+    warning_type: Mapped[str | None] = mapped_column(String(50))  # tier="caution" 전용
+    notice_date: Mapped[dt.date | None] = mapped_column(Date)
+    released_date: Mapped[dt.date | None] = mapped_column(Date)  # tier="warning"/"risk" 전용
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

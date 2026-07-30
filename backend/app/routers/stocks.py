@@ -13,7 +13,10 @@
   행은 `total_net`만 채워지고 `arb_net`/`non_arb_net`는 항상 null이다. 공매도
   (`short_selling`)는 `clients/krx_short_selling.py` 모듈 docstring 참고 —
   대차잔고(대시보드 "대차잔고" 타일, macro_series.lending_balance)와는 별개
-  지표다.
+  지표다. `include_flow_percentile=true`(옵트인, PLAN.md §5.38)이면 응답에
+  `flow_percentile`(동일 시가총액 tier 내 오늘 수급 percentile,
+  quant/flow_percentile.py)을 추가한다 — 새 외부 호출 없이 value_rank+
+  stock_flow만 조인한다.
 - ``GET /api/stocks/{code}/whale``: Phase 4+ 예정, 아직 501 스텁.
 - ``GET /api/stocks/{code}/volume-profile-history``: `collectors/
   volume_profile_snapshot.py`가 watchlist 종목에 대해 매일 적재한 §5.34 거래량
@@ -67,6 +70,7 @@ from ..collectors.program_stock import parse_program_trade_rows
 from ..db import get_session
 from ..market_hours import KST, is_nxt_closed
 from ..models import (
+    InvestorWarningEvent,
     ProgramTrade,
     ShortSellingStock,
     Stock,
@@ -75,6 +79,8 @@ from ..models import (
     ValueRank,
     VolumeProfileDaily,
 )
+from ..quant.flow_percentile import compute_flow_percentiles
+from ..quant.investor_warning_status import classify_investor_warning_status
 from ..quant.signals import (
     compute_vwap,
     detect_breakout,
@@ -571,6 +577,49 @@ async def _read_short_selling(session: AsyncSession, code: str, days: int) -> li
     ]
 
 
+async def _read_investor_warning_status(session: AsyncSession, code: str) -> dict:
+    """이 종목의 현재 투자주의/투자경고/투자위험 지정 상태(PLAN.md §5.39).
+    ``investor_warning_event``는 하루 1회 배치(collectors/investor_warning.py)로
+    채워지는 테이블이라 별도 온디맨드 외부 호출·캐시가 필요 없다 — DB 조회만
+    한다(다른 소스들의 `_ensure_*_cached` 패턴과 달리 이 함수만 이 형태인
+    이유).
+
+    caution tier의 "활성" 판정에 필요한 전역 기준일(이 프로젝트에 있는 caution
+    데이터 중 가장 최근 지정일 — quant/investor_warning_status.py 모듈 docstring
+    "tier별 활성 정의가 다르다" 절 참고)을 이 종목 것과 별개로 한 번 더 조회한다."""
+    stmt = select(InvestorWarningEvent).where(InvestorWarningEvent.code == code)
+    rows = [
+        {
+            "tier": r.tier,
+            "market": r.market,
+            "warning_type": r.warning_type,
+            "notice_date": r.notice_date,
+            "designated_date": r.designated_date,
+            "released_date": r.released_date,
+        }
+        for r in (await session.execute(stmt)).scalars().all()
+    ]
+
+    caution_as_of = (
+        await session.execute(
+            select(func.max(InvestorWarningEvent.designated_date)).where(
+                InvestorWarningEvent.tier == "caution"
+            )
+        )
+    ).scalar_one_or_none()
+
+    result = classify_investor_warning_status(rows, caution_as_of=caution_as_of)
+    return {
+        "active_tier": result["active_tier"],
+        "label": result["label"],
+        "market": result["market"],
+        "designated_date": (
+            result["designated_date"].strftime("%Y%m%d") if result["designated_date"] else None
+        ),
+        "warning_type": result["warning_type"],
+    }
+
+
 async def _ensure_stock_master_stub(
     session: AsyncSession,
     code: str,
@@ -634,6 +683,104 @@ async def _read_turnover(session: AsyncSession, code: str) -> dict | None:
     return {"value": float(row.turnover), "date": row.date.strftime("%Y%m%d")}
 
 
+# quant/screener.py·routers/scalp.py::_stock_flow_lookup와 동일한 "외국인+기관계"
+# 조합(PLAN.md §5.38-3) — 의도적 중복(screener.py의 LARGE_DECLINE_WARNING_PCT
+# 중복 관례와 동일한 이유: 이 모듈은 다른 라우터 모듈에 의존하지 않는다).
+_FLOW_PERCENTILE_INVESTORS = ("외국인", "기관계")
+
+
+async def _read_flow_percentile(session: AsyncSession, code: str) -> dict | None:
+    """이 종목의 수급 유니버스 상대순위(PLAN.md §5.38, quant/flow_percentile.py).
+
+    이 종목의 최신 value_rank 스냅샷(날짜+시장)을 찾고, **같은 날 같은 시장**의
+    value_rank 전체(ETF 제외 — collectors/live_refresh.py::_run_stock_flow_scan이
+    애초에 ETF를 스윕 대상에서 뺘서 stock_flow에 ETF 데이터가 사실상 없다, 모듈
+    docstring 참고)를 시가총액 tier로 나눠 이 종목이 그 tier 안에서 오늘 수급
+    (외국인+기관계 순매수)이 몇 퍼센타일인지 계산한다. 새 DB 테이블/외부 호출
+    없음 — value_rank+stock_flow 조인만 한다.
+
+    value_rank에 이 종목이 아예 없으면(거래대금 상위 top100 밖 — 이 지표의
+    스코프 한계, 모듈 docstring 참고) None을 반환한다 — `_read_turnover`와
+    동일한 "억지로 채우지 않는다" 원칙. 있어도 `market_value_million`이
+    없으면(§5.38-1 마이그레이션 이전 과거 행) 마찬가지로 None.
+
+    표본 부족/이 종목의 수급 데이터 없음이면 크래시하지 않고 ``reason``이
+    채워진 dict를 반환한다(quant/flow_percentile.py의 "표본 부족은 정직하게
+    표시" house rule을 그대로 노출 — 프런트가 이 필드로 "계산 불가" 문구를
+    표시한다).
+    """
+    latest_stmt = (
+        select(ValueRank.date, ValueRank.market, ValueRank.market_value_million)
+        .where(ValueRank.code == code)
+        .order_by(ValueRank.date.desc())
+        .limit(1)
+    )
+    latest = (await session.execute(latest_stmt)).first()
+    if latest is None or latest.market_value_million is None:
+        return None
+
+    date, market = latest.date, latest.market
+
+    peers_stmt = select(ValueRank.code, ValueRank.market_value_million).where(
+        ValueRank.date == date,
+        ValueRank.market == market,
+        ValueRank.is_etf.is_(False),
+        ValueRank.market_value_million.isnot(None),
+    )
+    peers = (await session.execute(peers_stmt)).all()
+    if not peers:
+        return {"date": date.strftime("%Y%m%d"), "market": market, "reason": "동일 날짜 시가총액 데이터가 없음"}
+
+    peer_codes = [p.code for p in peers]
+    # scalp.py::_stock_flow_lookup와 동일한 조회 패턴(재사용 아님, 이 라우터는
+    # 이미 그쪽 파일을 참조하지 않는 독립 모듈이라 동일 로직만 반복).
+    flow_stmt = select(StockFlow.code, StockFlow.net_value).where(
+        StockFlow.code.in_(peer_codes),
+        StockFlow.date == date,
+        StockFlow.investor.in_(_FLOW_PERCENTILE_INVESTORS),
+        StockFlow.net_value.isnot(None),
+    )
+    flow_rows = (await session.execute(flow_stmt)).all()
+    flow_totals: dict[str, int] = {}
+    for flow_code, net_value in flow_rows:
+        flow_totals[flow_code] = flow_totals.get(flow_code, 0) + net_value
+
+    rows = [
+        {
+            "code": p.code,
+            "market": market,
+            "market_value_million": p.market_value_million,
+            "flow_net_value": flow_totals.get(p.code),
+        }
+        for p in peers
+    ]
+    computed = compute_flow_percentiles(rows)
+    market_result = computed.get(market)
+    if market_result is None or market_result["reason"] is not None:
+        reason = market_result["reason"] if market_result else "계산 불가"
+        return {"date": date.strftime("%Y%m%d"), "market": market, "reason": reason}
+
+    own = next((r for r in market_result["results"] if r["code"] == code), None)
+    if own is None:
+        return {
+            "date": date.strftime("%Y%m%d"),
+            "market": market,
+            "reason": "오늘 이 종목의 수급(외국인+기관계) 데이터가 아직 없음",
+        }
+
+    return {
+        "date": date.strftime("%Y%m%d"),
+        "market": market,
+        "reason": None,
+        "tier": own["tier"],
+        "tier_count": market_result["tier_count"],
+        "tier_size": own["tier_size"],
+        "sample_size": market_result["sample_size"],
+        "percentile": own["percentile"],
+        "flow_net_value": own["flow_net_value"],
+    }
+
+
 # -- 엔드포인트 -----------------------------------------------------------------
 
 
@@ -657,6 +804,16 @@ async def stock_series(
             "PLAN.md §5.34)을 추가한다. 기본 false — 일반 시세 조회마다 계산 "
             "비용을 붙이지 않기 위해 옵트인으로 둔다(quant/volume_profile.py "
             "모듈 docstring 참고, 예측/매매 신호 아님)."
+        ),
+    ),
+    include_flow_percentile: bool = Query(
+        False,
+        description=(
+            "true면 응답에 flow_percentile(동일 시가총액 tier 내 수급 순매수 "
+            "percentile, PLAN.md §5.38)을 추가한다. 기본 false — value_rank+"
+            "stock_flow 조인·tier 계산 비용을 일반 조회마다 붙이지 않기 위해 "
+            "옵트인으로 둔다(quant/flow_percentile.py 모듈 docstring 참고, "
+            "관찰 지표일 뿐 매매 신호 아님)."
         ),
     ),
     session: AsyncSession = Depends(get_session),
@@ -734,6 +891,14 @@ async def stock_series(
     flows = await _read_flows(session, code, days)
     turnover = await _read_turnover(session, code)
 
+    # 수급 유니버스 상대순위(PLAN.md §5.38) — 옵트인일 때만 계산한다. peer 종목들의
+    # stock_flow는 이미 collectors/live_refresh.py::_run_stock_flow_scan(10분
+    # 티어)이 채워 둔 값을 읽기만 한다(이 요청이 peer들에 대해 새로 키움을 호출하지
+    # 않음 — 위 _ensure_flows_cached는 code 자기 자신만 온디맨드 갱신한다).
+    flow_percentile_result: dict | None = None
+    if include_flow_percentile:
+        flow_percentile_result = await _read_flow_percentile(session, code)
+
     try:
         await _ensure_program_trade_cached(session, code)
         await session.commit()
@@ -758,6 +923,8 @@ async def stock_series(
 
     short_selling = await _read_short_selling(session, code, days)
 
+    investor_warning = await _read_investor_warning_status(session, code)
+
     return {
         "code": code,
         "name": stock_name,
@@ -770,7 +937,9 @@ async def stock_series(
         "turnover": turnover,
         "program_trade": program_trade,
         "short_selling": short_selling,
+        "investor_warning": investor_warning,
         **({"volume_profile": volume_profile_result} if include_volume_profile else {}),
+        **({"flow_percentile": flow_percentile_result} if include_flow_percentile else {}),
     }
 
 

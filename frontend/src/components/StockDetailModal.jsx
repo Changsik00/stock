@@ -34,6 +34,17 @@ function rateLabel(rate) {
   return `${sign}${rate.toFixed(2)}%`
 }
 
+// 투자주의/경고/위험 배지 tooltip — 사실만 서술하고 매매 신호로 읽히지 않게
+// 한다(PLAN.md §5.39, quant/investor_warning_status.py 모듈 docstring
+// "정직성 원칙"과 동일한 house rule). "이 종목은 현재 {tier}으로 지정되어
+// 있음"처럼 KRX가 실제로 공표한 사실을 그대로 서술한다.
+function investorWarningTitle(w) {
+  if (!w?.active_tier) return undefined
+  const since = w.designated_date ? `${formatDate(w.designated_date)} 지정` : '지정'
+  const type = w.warning_type ? ` (${w.warning_type})` : ''
+  return `이 종목은 현재 ${w.label}으로 지정되어 있음 — ${since}${type}. KRX 공식 제도이며, 향후 주가 방향을 암시하지 않는 사실 정보입니다.`
+}
+
 // net_value/cum_net_value는 market_flow와 동일하게 백만원 단위로 내려온다
 // (FlowChart.jsx eok() 관례 그대로) — 백만원 ÷ 100 = 억원. 소액(|1억원| 미만) 표시는
 // format.js의 formatEok 공용 유틸에 위임한다(사용자 피드백: 중소형주 기관 순매수가
@@ -673,6 +684,11 @@ export default function StockDetailModal({ code, initial }) {
   const flowsError = series?.meta?.flows_error
   const hasFlows = !flowsError && series?.flows && Object.keys(series.flows).length > 0
   const vwapCurve = useMemo(() => computeVwapCurve(intradayBars), [intradayBars])
+  // 투자주의/경고/위험종목 지정 배지(PLAN.md §5.39) — KRX가 실제로 공표한 사실을
+  // 그대로 서술할 뿐, 매매 신호가 아니다(app/quant/investor_warning_status.py
+  // 모듈 docstring "정직성 원칙" 참고). §5.36 위험 배너(시장 전체 지수 단위)와
+  // 별개로 종목 상세에 배지로만 표시하기로 한 설계 판단도 같은 문서에 있다.
+  const investorWarning = series?.investor_warning
 
   return (
     <div className="stock-detail">
@@ -681,6 +697,14 @@ export default function StockDetailModal({ code, initial }) {
         <span className="stock-detail-code">{code}</span>
         {market && <Badge kind={market.toLowerCase()} />}
         {isEtf && <Badge kind="etf" />}
+        {investorWarning?.active_tier && (
+          <Badge
+            kind={`investor-${investorWarning.active_tier}`}
+            title={investorWarningTitle(investorWarning)}
+          >
+            {investorWarning.label}
+          </Badge>
+        )}
         {latestPrice && (
           <span className="stock-detail-price">
             {numFmt.format(latestPrice.close)}

@@ -10,12 +10,20 @@
 // 이름+방향점을 나열하는 별개 UI라 대상에서 제외한다(FlowPathTable.jsx 주석 참고).
 // live(장중 잠정, PLAN.md §6 3.7-3)는 분류 배지가 아니라 상태 배지지만 같은 pill
 // 스타일을 재사용한다 — DashboardPage.jsx의 투자자별 수급 요약 타일 참고.
+// investor-caution/warning/risk(PLAN.md §5.39) — KRX 투자주의/경고/위험종목
+// 지정 배지. 분류 배지(코스피/코스닥/ETF)와 달리 "지금 이 순간의 공식 상태"를
+// 나타내는 심각도 배지라, 색도 index.css의 --risk-info/warn/danger-*(§5.36
+// 위험 배너와 동일한 심각도 색 언어)를 재사용한다 — 새 팔레트를 만들지 않고
+// "주의<경고<위험" escalation을 기존 info<warn<danger 톤에 그대로 맞춘다.
 const LABEL = {
   kospi: '코스피',
   kosdaq: '코스닥',
   etf: 'ETF',
   futures: '선물',
   live: '장중 잠정',
+  'investor-caution': '투자주의종목',
+  'investor-warning': '투자경고종목',
+  'investor-risk': '투자위험종목',
 }
 
 export default function Badge({ kind, children, title }) {
