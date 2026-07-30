@@ -880,11 +880,18 @@ async def test_series_includes_turnover_when_value_rank_row_exists(monkeypatch, 
     )
 
     async with async_session_factory() as session:
+        # rank는 101(수집기의 TOP_N=100 밖 — collectors/value_rank.py 참고)을 쓴다.
+        # target_end가 "오늘"이라 rank=1처럼 실제 수집기가 쓰는 범위(1..100)를
+        # 그대로 쓰면, 그 사이 실 배치(18:00 KST) 또는 관리자 수동 트리거가 오늘치를
+        # 이미 적재했을 때 진짜 종목이 같은 PK를 선점해 이 insert가 UniqueViolation
+        # 으로 죽는다(PLAN.md §5.38 작업 중 공유 dev DB에서 실측). 101은 수집기가
+        # 절대 쓰지 않는 값이라 실데이터와 충돌할 수 없고, 응답 검증(turnover 값)에도
+        # rank 자체는 관여하지 않는다.
         session.add(
             ValueRank(
                 date=target_end,
                 market="kospi",
-                rank=1,
+                rank=101,
                 code=TEST_CODE,
                 name=TEST_NAME,
                 value=123456,

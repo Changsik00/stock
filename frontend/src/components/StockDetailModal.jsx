@@ -144,6 +144,26 @@ function FlowLineChart({ flows }) {
   )
 }
 
+// 동일 시가총액 그룹 내 수급 percentile(PLAN.md §5.38) — 관찰용 참고 수치일
+// 뿐 매매 신호가 아님을 항상 병기한다(§5 house tone). 표본 부족/이 종목이
+// value_rank 유니버스 밖(reason 있음, 또는 data 자체가 null)이면 아무것도
+// 그리지 않는다 — turnover 배지(`series?.turnover &&`)와 동일하게 "데이터
+// 없으면 조용히 생략"하는 이 파일의 기존 관례를 그대로 따른다(억지로 "계산
+// 불가" 문구를 매번 노출하지 않음).
+function FlowPercentileNote({ data }) {
+  if (!data || data.reason) return null
+  return (
+    <div className="stock-detail-flow-percentile">
+      동일 시총 tier({data.tier}/{data.tier_count}, {data.tier_size}종목) 내 오늘 수급 순위{' '}
+      <strong className={eokClass(data.flow_net_value)}>{data.percentile.toFixed(1)}%ile</strong>
+      <span className="stock-detail-flow-percentile-hint">
+        {' '}
+        · 100에 가까울수록 비슷한 시총 종목들 대비 순매수 쏠림(참고용, 매매 신호 아님)
+      </span>
+    </div>
+  )
+}
+
 function FlowStatTiles({ flows }) {
   return (
     <div className="stock-detail-flow-tiles">
@@ -542,7 +562,8 @@ export default function StockDetailModal({ code, initial }) {
       code,
       days,
       { name: initial?.name, market: initial?.market, is_etf: initial?.is_etf },
-      true // includeVolumeProfile — 일봉 캔들에 지지/저항 후보 참조선(PLAN.md §5.34)을 그리기 위함
+      true, // includeVolumeProfile — 일봉 캔들에 지지/저항 후보 참조선(PLAN.md §5.34)을 그리기 위함
+      true // includeFlowPercentile — 동일 시총 tier 내 수급 percentile(PLAN.md §5.38)
     )
       .then((body) => {
         if (!cancelled) setSeries(body)
@@ -742,6 +763,7 @@ export default function StockDetailModal({ code, initial }) {
       {!loading && !error && !flowsError && hasFlows && (
         <div className="stock-detail-flow">
           <FlowStatTiles flows={series.flows} />
+          <FlowPercentileNote data={series?.flow_percentile} />
           <FlowLineChart flows={series.flows} />
         </div>
       )}

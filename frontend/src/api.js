@@ -268,19 +268,25 @@ export async function fetchStockSearch(q, limit = 15) {
   return getJson(`/api/stocks/search?q=${encodeURIComponent(q)}&limit=${limit}`)
 }
 
-// GET /api/stocks/{code}/series?days=N[&include_volume_profile=true] -> {code, name,
-// market, is_etf, days, prices, flows, meta, volume_profile?} — 마찬가지로
-// 온디맨드 전용(정적 스냅샷 없음).
+// GET /api/stocks/{code}/series?days=N[&include_volume_profile=true][&include_flow_percentile=true]
+// -> {code, name, market, is_etf, days, prices, flows, meta, volume_profile?, flow_percentile?} —
+// 마찬가지로 온디맨드 전용(정적 스냅샷 없음).
 // hints({name, market, is_etf})는 PLAN.md §5.28 — stocks 마스터 EOD 배치가
 // 아직 못 따라잡은 신규/이형 코드(실사례: "에이치엘지노믹스" 0156T0)로 종목상세를
 // 열면 백엔드가 stock_ohlcv/stock_flow INSERT 전에 FK를 만족시킬 stub을 만드는데,
 // 그 stub의 name/market/is_etf를 대충 넣지 않고 호출부(StockDetailModal)가 이미
 // 알고 있는 initial 값으로 정확히 채우기 위한 선택적 힌트다 — 값이 없으면
 // 아예 쿼리파라미터를 안 보내 백엔드의 기본 fallback을 그대로 쓴다.
-// includeVolumeProfile(PLAN.md §5.34)은 옵트인 — 백엔드가 기본값 false로 두어
-// 이 계산을 매번 하지 않는 정책(routers/stocks.py::stock_series docstring
-// 참고)과 대칭을 맞춘다.
-export async function fetchStockSeries(code, days = 180, hints = {}, includeVolumeProfile = false) {
+// includeVolumeProfile(PLAN.md §5.34)/includeFlowPercentile(PLAN.md §5.38)은
+// 둘 다 옵트인 — 백엔드가 기본값 false로 두어 이 계산을 매번 하지 않는 정책
+// (routers/stocks.py::stock_series docstring 참고)과 대칭을 맞춘다.
+export async function fetchStockSeries(
+  code,
+  days = 180,
+  hints = {},
+  includeVolumeProfile = false,
+  includeFlowPercentile = false
+) {
   const params = new URLSearchParams({ days: String(days) })
   if (hints.name) params.set('name', hints.name)
   if (hints.market) params.set('market', hints.market)
@@ -288,6 +294,7 @@ export async function fetchStockSeries(code, days = 180, hints = {}, includeVolu
     params.set('is_etf', hints.is_etf ? 'true' : 'false')
   }
   if (includeVolumeProfile) params.set('include_volume_profile', 'true')
+  if (includeFlowPercentile) params.set('include_flow_percentile', 'true')
   return getJson(`/api/stocks/${code}/series?${params.toString()}`)
 }
 

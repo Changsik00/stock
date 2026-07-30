@@ -259,6 +259,12 @@ class ValueRank(Base):
 
     value(거래대금)는 백만 원, change_rate는 % (등락률 — 돈이 몰린 종목이
     올랐는지/내렸는지), turnover는 회전율 %(flow_rank와 동일 정의, 선택 적재).
+    market_value_million(시가총액/AUM, 백만 원, PLAN.md §5.38-1)은 소스
+    (clients/naver_value_rank.py의 marketValueRaw)가 turnover 계산용으로 이미
+    주던 값을 그대로 저장한 것 — collectors/value_rank.py가 지금까지 이 값을
+    받아서 turnover만 계산하고 버리고 있었다(§5.38 설계 절 "이미 받아오고
+    있었는데 저장 안 했다" 패턴). quant/flow_percentile.py가 이 컬럼을 시장별
+    시총 tier 분류에 쓴다.
     """
 
     __tablename__ = "value_rank"
@@ -272,6 +278,7 @@ class ValueRank(Base):
     change_rate: Mapped[float | None] = mapped_column(Numeric(8, 4))
     is_etf: Mapped[bool] = mapped_column(nullable=False, default=False)
     turnover: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    market_value_million: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class GroupSnapshot(Base):

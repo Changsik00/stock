@@ -113,6 +113,10 @@ async def _upsert_market_rows(
             change_rate=row.get("change_rate"),
             is_etf=row["code"] in etf_codes,
             turnover=turnover,
+            # PLAN.md §5.38-1 — market_value는 turnover 계산에만 쓰고 버리던
+            # 값(위 market_value 지역변수)을 이제 컬럼으로도 저장한다(신규 호출
+            # 없음, 모듈 docstring 3번 항목 참고).
+            market_value_million=market_value,
         )
         stmt = stmt.on_conflict_do_update(
             index_elements=[ValueRank.date, ValueRank.market, ValueRank.rank],
@@ -123,6 +127,7 @@ async def _upsert_market_rows(
                 "change_rate": stmt.excluded.change_rate,
                 "is_etf": stmt.excluded.is_etf,
                 "turnover": stmt.excluded.turnover,
+                "market_value_million": stmt.excluded.market_value_million,
             },
         )
         await session.execute(stmt)

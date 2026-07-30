@@ -2474,6 +2474,51 @@ top100×2(코스피/코스닥)만 대상 — "그날 거래대금 상위권 안�
 | 5.38-3 | API 반영 | 종목상세(`stock_series`) 또는 신규 엔드포인트에 반영(구현 시 판단) | curl로 실데이터 확인 |
 | 5.38-4 | 프런트 반영 | 종목상세에 "동일 시총 그룹 내 수급 상위 N%" 표시, 관찰형 문구 | vite build 클린 + 코드리뷰 |
 
+**완료(2026-07-30)**. `models.py::ValueRank.market_value_million`(BigInteger,
+nullable — 과거 행은 backfill 불가) 추가 + 마이그레이션
+`bb39bbfc5f0c_value_rank_market_value_million.py`, `collectors/value_rank.py`가
+이미 계산해 두던 `market_value` 지역변수를 upsert values/on_conflict set_에
+그대로 얹었다(신규 호출 없음). `quant/flow_percentile.py::
+compute_flow_percentiles(rows, tier_count=4)` — **tier는 시총 "값" 사분위가
+아니라 "순위" 기준 4등분**(초대형주 1~2개가 값 분포를 왜곡해 tier별 표본
+수가 극단적으로 불균등해지는 것을 방지, §5.19와 같은 클래스의 판단),
+percentile은 동점 평균 처리하는 표준 percentile-rank 공식
+`(미만 개수 + 0.5×동점 개수) / tier_size × 100`. 표본 부족 기준은
+`tier_count × 2`(tier당 최소 2개) — 미달이면 `reason`을 채워 정직하게 실패
+(quant/sector_rotation.py 관례). flow_net_value 조합은 기존 관례(외국인+
+기관계 합, `routers/scalp.py::_stock_flow_lookup`/`quant/screener.py`와 동일)를
+그대로 재사용, 새 조합 발명 안 함. 단위테스트 8개(합성 데이터: tier 분리,
+percentile 손계산 검증, 시장별 완전 분리 — KOSDAQ 종목이 KOSPI 종목과 섞여
+tier 분류되지 않음을 확인, 결측치 무시, 표본 부족 경계값). **API는
+`stock_series`에 `include_flow_percentile`(옵트인, `include_volume_profile`과
+동일한 패턴) 확장으로 결정** — 종목 하나 조회에도 그 시장 전체 peer(최대
+100개)를 다시 조인해야 해서 turnover 단일행 조회보다는 무겁지만, 인덱스된
+PK 조회 2번(value_rank 100행 + stock_flow IN절)뿐이라 캐싱 없이 매 요청
+계산해도 충분히 가볍다고 판단(별도 60초 캐시 안 씀 — `_warm_regime`류의
+무거운 시계열 집계와는 체급이 다름). `_read_flow_percentile`이 종목의 최신
+value_rank 스냅샷(날짜+시장)을 찾고, 그 peer 전체(ETF 제외 — 애초에
+`_run_stock_flow_scan`도 ETF는 스윕 대상에서 뺀다)에 대해 stock_flow를 조회해
+`compute_flow_percentiles`로 넘긴다 — 새 외부 호출 없음. 종목이 value_rank
+밖(top100 밖)이면 `null`, 있어도 그날 수급 데이터가 아직 없으면
+`reason`이 채워진 dict를 반환(프런트가 `reason` 있으면 렌더 생략).
+실 DB 검증(2026-07-30): 관리자 트리거로 오늘치 수집 후 SK하이닉스(000660,
+코스피)로 curl 확인 — `{"tier": 1, "tier_count": 4, "tier_size": 14,
+"sample_size": 56, "percentile": 96.4, "flow_net_value": 57591}` (동일 시총
+tier 14종목 중 오늘 수급이 최상위권). 코스닥 종목(036930 주성엔지니어링)도
+`percentile: 85.4` 정상 산출, 유니버스 밖 종목(466930)은 `null` 확인. 프런트는
+`StockDetailModal.jsx`에 `FlowPercentileNote` 추가 — "동일 시총 tier(1/4,
+14종목) 내 오늘 수급 순위 96.4%ile · 100에 가까울수록 비슷한 시총 종목들
+대비 순매수 쏠림(참고용, 매매 신호 아님)"처럼 표시, `reason` 있거나 데이터
+자체가 없으면 아무것도 렌더하지 않음(turnover 배지와 동일한 "조용히 생략"
+관례, 새 "표본 부족" 문구 UI 패턴을 억지로 추가하지 않음). 사이드이펙트:
+검증용으로 관리자 API를 수동 트리거해 오늘치 value_rank를 미리 적재했더니
+`test_stocks_router.py`의 기존 테스트 하나가 실제 프로덕션 데이터와 PK
+(date, market, rank=1)가 충돌해 실패 — 수집기가 실제로 쓰는 범위(rank
+1~100) 밖인 rank=101로 테스트 픽스처를 바꿔 근본 수정(공유 dev DB에 실
+데이터가 계속 쌓이는 환경에서 이 클래스의 테스트가 원래 취약했다는 점을
+실측으로 발견). pytest 639 passed(§5.39 등 병행 작업 포함, 이 작업만의
+증분은 8개 신규), `npx vite build` 클린.
+
 ### Phase 5.39 — KRX 공식 경보 등급 확장 (2026-07-30, §5.37 B-3)
 
 투자주의/투자경고/투자위험 종목 지정, 단기과열 완화장치(단일가매매 전환)
