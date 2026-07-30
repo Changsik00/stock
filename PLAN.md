@@ -2629,6 +2629,46 @@ UI 문구에 명시한다.
 | 5.42-4 ✅ | 프런트 반영 | "다음 만기" 타일 클릭 시 `ExpiryPatternModal`로 D-day별 베이시스 평균/중앙값 그래프(`ExpiryPatternChart.jsx`, MacroChart 컨벤션 재사용) 표시, 표본수·기간 항상 노출 | vite build 클린 확인 — **완료(2026-07-30)**. pytest 674→685(11개 신규). STATIC_DATA 정적 배포에서는 타일 클릭 시 기존 foreignPosition 모달로 폴백 — 브라우저 자동화 도구가 이번 세션엔 없어 실제 클릭 스크린샷 검증은 못 함(코드리뷰+curl+빌드로 대체, 정직하게 명시) |
 | 5.42-5 ✅ | 베이시스 %(지수 대비 비율) 추가 | 사용자 지적(2026-07-30): "포인트를 지수로 환산하면 어떻게 되지?" — 3년 구간 동안 지수 수준 자체가 크게 바뀌어 절대 pt만으로는 사이클 간 비교가 왜곡될 수 있음. `quant/expiry_pattern.py`에 `basis_pct = (선물종가-현물종가)/현물종가*100`을 각 사이클 D-day별로 함께 계산해 `mean_basis_pct`/`median_basis_pct`로 point에 추가(기존 pt 필드는 유지, 추가 필드) | 단위테스트 + 실 DB 값 검증 — **완료(2026-07-30)**. pytest 685→686(1개 신규, 손으로 검산 가능한 spot=200 고정 케이스로 나눗셈 로직 자체를 검증). D-day 워크 루프는 (basis, basis_pct) 튜플로 한 번만 돌게 리팩터(병렬 dict 대신 — 두 값이 항상 같은 (사이클,k) 쌍에서 나고 죽으므로 튜플이 그 불변식을 구조적으로 보장). 반올림은 기존 `routers/basis.py`의 `basis_pct` 필드 관례를 따라 `round(x, 4)`. 실 API 확인: D-0 mean_basis=0.35pt/mean_basis_pct=0.0662%, D-14 mean_basis=1.22pt/mean_basis_pct=0.2071% — 최근 K200 지수가 700대까지 오른 반면 수집 초기(2023)엔 300대였던 걸 감안하면 pt 대비 % 쪽이 훨씬 작아 보이는 게 정상(사이클 간 지수 수준 차이가 pt에 그대로 실리던 문제가 %로 정규화됨). 프런트 `ExpiryPatternChart.jsx`에 pt/% 토글 추가(§5.41 외국인/기관계 토글과 동일 toggle-row/toggle-chip 패턴, `ExpiryPatternModal` 기본값은 '%' — 이 기능 자체가 나온 이유가 pt 비교 왜곡 문제라 처음 여는 화면이 그걸 이미 해결한 뷰를 보여주는 게 자연스러움). vite build 클린. 브라우저 자동화 도구가 이번 세션에도 없어(§5.42-4와 동일 상황) 실제 토글 클릭 스크린샷 검증은 못 함 — 코드리뷰+curl+빌드로 대체 |
 
+### Phase 5.43 — 매수세/매도세 게이지 flow 요소 라이브화 + 선물 요소 추가 (2026-07-30 사용자 지적)
+
+사용자: "여기를 보니 단순히 코스피, 코스닥을 개인외인 이렇게 이야기 하는데
+선물, 현물이 없어.. 반쪽 정보였어" — 앞서 지적한 "수급이 전일 날짜로
+나온다"는 문제(§4.6/§5.5-4가 breadth만 라이브화하고 flow/etf는 미룸)를
+조사하는 과정에서 함께 드러남: 지금 flow 요소(`app/sentiment.py::
+flow_score`, `routers/flow_rank.py::_load_flow_component`)는 코스피/코스닥
+현물의 "거래대금 상위 랭킹"(`FlowRank`, 하루 1회 배치) 종목들 매수/매도
+합만 볼 뿐 선물은 전혀 반영 안 됨.
+
+**설계 전 확인**: breadth가 이미 §5.5-4에서 "라이브 우선, 실패시 EOD
+폴백" 패턴으로 업그레이드됐고, 그 패턴에 그대로 재사용 가능한 라이브
+소스가 flow/선물 둘 다 이미 존재한다 — `routers/markets.py::
+_warm_flow_live`(코스피/코스닥 전체 외국인/기관계 순매수, 장중 키움
+실시간+장마감 DB 폴백, §5.36 flow_slope 등에서 이미 검증돼 재사용 중)와
+`_warm_futures_flow_live`(K200 선물 동일 구조, 네이버 소스, §4.7). ETF는
+라이브 소스가 확인되지 않음(순유입/AUM은 펀드 보고 특성상 일단위로
+추정) — 이번 스코프에서는 EOD 유지, 4개 중 1개만 그렇다는 걸 명시.
+
+**설계**: `flow_score`/신규 `futures_score` 둘 다 breadth_score와 같은
+"순방향/전체활동" 비율 산식을 쓴다 — 각 시장의 `_warm_flow_live`/
+`_warm_futures_flow_live` 응답의 investors(개인/외국인/기관계 net_value)로
+`(외국인+기관계) / (|개인|+|외국인|+|기관계|) * 100`을 계산(자연스럽게
+[-100,100] 근방에 들어옴, breadth_score와 동일한 구조라 일관성 있음).
+flow는 코스피+코스닥 두 시장의 investors를 합산한 뒤 계산. 기존
+"거래대금 상위 랭킹 근사치"(FlowRank 기반)보다 시장 전체를 보는 이 방식이
+더 정확해지는 방향이라 §4.6이 이미 밝힌 한계("상위 랭킹 기반 근사치")도
+해소됨.
+
+**가중치**: breadth/flow(현물)/futures(선물)/etf 4개로 재분배 필요 —
+기존 0.4/0.35/0.25(3개)와 마찬가지로 **검증된 값이 아니라 첫 배정**임을
+명시하고 구현 시 합리적으로 재배분(screener.py WEIGHTS 주석과 동일한
+정직성 원칙).
+
+| # | 작업 | 내용 | 완료 기준 |
+|---|---|---|---|
+| 5.43-1 | flow/futures 라이브 점수 함수 | `app/sentiment.py`에 순수 함수 추가(투자자별 net_value dict를 받아 순방향/전체활동 비율 계산) | 단위테스트(경계값·전부 0인 경우 등) |
+| 5.43-2 | API 반영 | `routers/flow_rank.py::market_sentiment`에 `_load_flow_component_live`(코스피+코스닥 합산, `_warm_flow_live` 재사용)와 `_load_futures_component_live`(`_warm_futures_flow_live` 재사용) 추가, breadth와 동일한 "라이브 우선 실패시 EOD 폴백" 게이트, 4요소 가중치 재정규화 | curl로 장중 실데이터 확인(오늘 날짜로 나오는지) |
+| 5.43-3 | 프런트 반영 | `SentimentGauge.jsx`에 4번째 요소(선물) 표시, etf만 EOD라는 점을 표시(다른 3개는 라이브) | 코드리뷰 + vite build 클린 |
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
