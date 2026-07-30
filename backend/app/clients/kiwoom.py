@@ -413,6 +413,31 @@ DEFAULT_TOKEN_CACHE_PATH = Path(__file__).resolve().parents[2] / ".kiwoom_token.
 _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 1.0
 
+# return_code==3은 키움 API의 범용 오류 코드다 — "인증 실패(8005 Token 무효)"뿐
+# 아니라 전혀 무관한 오류(예: 존재하지 않는 종목코드)에도 재사용된다(실측:
+# tests/test_kiwoom_client.py::test_return_code_error_raises_kiwoom_api_error가
+# return_code=3 + "존재하지 않는 종목코드입니다"로 이미 이 사실을 검증하고
+# 있었음). 따라서 return_code만으로 "토큰 무효"를 판정하면 안 되고, 실제
+# 관측된 에러 메시지(`[3] 인증에 실패했습니다[8005:Token이 유효하지
+# 않습니다]`)의 서브코드/키워드까지 함께 확인해야 한다 — PLAN.md §5.46
+# "버그 1" 참고.
+_TOKEN_INVALID_RETURN_CODE = 3
+
+
+def _is_token_invalid_error(return_code: Any, return_msg: str | None) -> bool:
+    """return_code==3이 "8005 Token 무효" 류의 인증 실패인지 판정.
+
+    강제 토큰 재발급은 다른 프로세스(backend/worker)의 캐시까지 건드릴 수 있는
+    비용이 있으므로(모듈 docstring/PLAN.md §5.46 근거: 한쪽의 재발급이 다른 쪽
+    토큰을 서버에서 무효화시키는 것으로 추정), return_code==3인 모든 경우가
+    아니라 메시지에 8005 또는 "인증...실패" 패턴이 실제로 있을 때만 재발급을
+    시도한다.
+    """
+    if return_code != _TOKEN_INVALID_RETURN_CODE:
+        return False
+    msg = return_msg or ""
+    return "8005" in msg or ("인증" in msg and "실패" in msg)
+
 
 class KiwoomAuthError(Exception):
     """앱키/시크릿이 없거나 토큰 발급 자체가 실패했을 때."""
@@ -632,6 +657,19 @@ class KiwoomClient:
             self._token = await self._issue_token()
             return self._token.access_token
 
+    async def _refresh_token(self) -> str:
+        """로컬 캐시(메모리+파일)를 모두 무시하고 서버에서 새 토큰을 강제 발급.
+
+        `_get_token()`과 달리 `self._token`/`_load_cached_token()`을 절대
+        신뢰하지 않고 항상 실제 `/oauth2/token`을 호출한다 — call_tr이
+        return_code==3(8005 Token 무효)을 감지했을 때 사용(PLAN.md §5.46).
+        발급 결과를 `self._token`에 반영해 두므로, 호출 직후 `_get_token()`을
+        다시 불러도 방금 받은 새 토큰을 그대로 돌려준다(재발급 이중 호출 방지).
+        """
+        async with self._token_lock:
+            self._token = await self._issue_token()
+            return self._token.access_token
+
     # -- TR 호출 ----------------------------------------------------------
 
     async def call_tr(
@@ -699,6 +737,22 @@ class KiwoomClient:
             if return_code == 5 and attempt < self.max_retries:
                 last_exc = KiwoomAPIError(return_code, data.get("return_msg", ""), data)
                 await self._backoff(attempt)
+                continue
+            # return_code == 3 + "8005 Token 무효"류: 로컬 만료 계산과 무관하게
+            # 서버가 토큰을 이미 무효화한 경우(PLAN.md §5.46 "버그 1" — backend/
+            # worker 두 프로세스가 독립적으로 토큰을 재발급할 수 있어 한쪽 재발급이
+            # 다른 쪽의 로컬 캐시를 서버 쪽에서 무효화시키는 것으로 추정). rate
+            # limit과 달리 같은(무효) 토큰으로 그냥 기다렸다 재시도해봐야 똑같이
+            # 실패하므로, 백오프 대신 캐시를 무시한 강제 재발급 후 즉시 재시도한다.
+            if _is_token_invalid_error(return_code, data.get("return_msg")) and attempt < self.max_retries:
+                last_exc = KiwoomAPIError(return_code, data.get("return_msg", ""), data)
+                logger.warning(
+                    "키움 토큰 인증 실패 감지(return_code=3, %r) — 캐시 무시하고 강제 재발급 후 재시도 (attempt %d/%d)",
+                    data.get("return_msg", ""),
+                    attempt + 1,
+                    self.max_retries,
+                )
+                await self._refresh_token()
                 continue
             if return_code not in (0, None):
                 raise KiwoomAPIError(return_code, data.get("return_msg", "Unknown error"), data)

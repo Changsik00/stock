@@ -485,9 +485,16 @@ def test_parse_minute_chart_rows_handles_missing_array():
 
 
 async def test_return_code_error_raises_kiwoom_api_error(make_client):
+    """return_code==3이지만 8005/인증 실패가 아닌 무관한 오류(존재하지 않는
+    종목코드)는 토큰 재발급을 시도하지 않고 바로 예외를 던져야 한다 —
+    PLAN.md §5.46 "버그 1"에서 확인된 return_code==3의 범용성 근거."""
+    calls = {"token": 0, "stkinfo": 0}
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/oauth2/token":
+            calls["token"] += 1
             return _token_response(request)
+        calls["stkinfo"] += 1
         return httpx.Response(
             200,
             json={"return_code": 3, "return_msg": "존재하지 않는 종목코드입니다"},
@@ -501,3 +508,111 @@ async def test_return_code_error_raises_kiwoom_api_error(make_client):
         await client.aclose()
 
     assert exc_info.value.code == 3
+    # 인증과 무관한 return_code==3이므로 재시도/재발급 없이 1콜만 나가야 한다.
+    assert calls["stkinfo"] == 1
+    assert calls["token"] == 1
+
+
+async def test_token_invalid_8005_forces_refresh_then_succeeds(make_client, monkeypatch):
+    """PLAN.md §5.46 "버그 1" 재현: 실측 에러 텍스트
+    `[3] 인증에 실패했습니다[8005:Token이 유효하지 않습니다]` 그대로 첫 시도에서
+    받으면, 로컬 캐시를 무시하고 강제 재발급한 뒤 같은 요청을 재시도해서
+    성공해야 한다."""
+    calls = {"token": 0, "stkinfo": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            calls["token"] += 1
+            return _token_response(request)
+        calls["stkinfo"] += 1
+        if calls["stkinfo"] == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "return_code": 3,
+                    "return_msg": "인증에 실패했습니다[8005:Token이 유효하지 않습니다]",
+                },
+            )
+        return _stkinfo_response(request)
+
+    client = make_client(handler)
+    # 토큰 재발급 경로에는 백오프가 없어야 하지만(즉시 재시도), 혹시라도 다른
+    # 경로에서 sleep이 걸리는 회귀가 생기면 테스트가 느려지지 않도록 방어적으로 몽키패치.
+    monkeypatch.setattr(client, "_backoff", lambda attempt: _noop())
+
+    try:
+        data = await client.stock_info("005930")
+    finally:
+        await client.aclose()
+
+    assert data["stk_nm"] == "삼성전자"
+    assert calls["stkinfo"] == 2
+    # 최초 발급 1회 + 강제 재발급 1회 = 토큰 엔드포인트 2콜.
+    assert calls["token"] == 2
+
+
+async def test_token_invalid_8005_exhausts_retries_and_raises(make_client, monkeypatch):
+    """재발급해도 계속 8005가 나는 경우(진짜 앱키/시크릿 문제 등) — 무한루프
+    없이 기존 max_retries 상한에서 정확히 멈추고 KiwoomAPIError를 던져야 한다."""
+    calls = {"token": 0, "stkinfo": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            calls["token"] += 1
+            return _token_response(request)
+        calls["stkinfo"] += 1
+        return httpx.Response(
+            200,
+            json={
+                "return_code": 3,
+                "return_msg": "인증에 실패했습니다[8005:Token이 유효하지 않습니다]",
+            },
+        )
+
+    client = make_client(handler)
+    monkeypatch.setattr(client, "_backoff", lambda attempt: _noop())
+
+    try:
+        with pytest.raises(KiwoomAPIError) as exc_info:
+            await client.stock_info("005930")
+    finally:
+        await client.aclose()
+
+    assert exc_info.value.code == 3
+    # 무한루프가 아니라 max_retries+1번(최초 시도 + 재시도들)에서 정확히 멈춤.
+    assert calls["stkinfo"] == client.max_retries + 1
+    # 토큰 엔드포인트도 무한 재발급이 아니라 최초 발급 1회 + 마지막 시도를
+    # 제외한 재시도 횟수(max_retries)만큼만 강제 재발급됨.
+    assert calls["token"] == client.max_retries + 1
+
+
+async def test_rate_limit_retry_does_not_force_token_refresh(make_client, monkeypatch):
+    """회귀 방지: return_code==5(rate limit) 경로는 이번 변경과 무관하게 그대로
+    "같은 토큰으로 백오프 후 재시도"여야 한다 — 8005 경로처럼 토큰을 강제
+    재발급하면 안 된다."""
+    calls = {"token": 0, "stkinfo": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            calls["token"] += 1
+            return _token_response(request)
+        calls["stkinfo"] += 1
+        if calls["stkinfo"] == 1:
+            return httpx.Response(
+                429,
+                json={"return_code": 5, "return_msg": "허용된 요청 개수를 초과하였습니다"},
+            )
+        return _stkinfo_response(request)
+
+    client = make_client(handler)
+    monkeypatch.setattr(client, "_backoff", lambda attempt: _noop())
+
+    try:
+        data = await client.stock_info("005930")
+    finally:
+        await client.aclose()
+
+    assert data["stk_nm"] == "삼성전자"
+    assert calls["stkinfo"] == 2
+    # rate limit 재시도는 토큰을 재사용해야 하므로 발급은 최초 1회뿐이어야 한다.
+    assert calls["token"] == 1
