@@ -58,11 +58,14 @@ export async function fetchSeries(market, days) {
   return body.series
 }
 
-// GET /api/markets/{market}/series?days=N[&include_volume_profile=true] -> { market,
-// days, prices, flows, volume_profile? }. includeVolumeProfile(PLAN.md §5.34)은
+// GET /api/markets/{market}/series?days=N[&include_volume_profile=true]
+// [&include_flow_profile=true] -> { market, days, prices, flows, volume_profile?,
+// flow_profile? }. includeVolumeProfile(PLAN.md §5.34)/includeFlowProfile
+// (PLAN.md §5.41, market=futures 전용 — 다른 market에 줘도 백엔드가 무시)은
 // 정적 스냅샷(STATIC_DATA)에는 애초에 없는 필드라 그 경로에서는 그냥 무시된다
-// (호출부가 body.volume_profile이 undefined여도 안전하게 다뤄야 함).
-export async function fetchMarketSeries(market, days, includeVolumeProfile = false) {
+// (호출부가 body.volume_profile/body.flow_profile이 undefined여도 안전하게
+// 다뤄야 함).
+export async function fetchMarketSeries(market, days, includeVolumeProfile = false, includeFlowProfile = false) {
   if (STATIC_DATA) {
     const snapshot = await fetchStaticJson(`data/markets-${market}.json`)
     return {
@@ -74,6 +77,7 @@ export async function fetchMarketSeries(market, days, includeVolumeProfile = fal
   }
   const params = new URLSearchParams({ days: String(days) })
   if (includeVolumeProfile) params.set('include_volume_profile', 'true')
+  if (includeFlowProfile) params.set('include_flow_profile', 'true')
   return getJson(`/api/markets/${market}/series?${params.toString()}`)
 }
 

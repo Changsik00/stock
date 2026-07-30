@@ -77,6 +77,19 @@
   --risk-info-bg: #eef1f6;
   --risk-info-fg: #3c4a5e;
   --risk-info-border: #c8d0dc;
+
+  /* 선물 순매매 가격대별 프로파일 방향성 레벨(PLAN.md §5.41, 2026-07-30) —
+     CandleChart.jsx의 flowLevels prop 전용. §5.34의 중립색 levels(--text-muted,
+     "관찰 사실이지만 방향 없음")와 달리 이건 진짜 방향이 있는 관찰 사실(순매수
+     집중 vs 순매도 집중)이라 한국 등락 관행(상승/매수=빨강 --up, 하락/매도=파랑
+     --down, memory chart-color-korean-convention)을 그대로 따른다 — 다만 캔들
+     몸통 색(--up/--down, 불투명)과 완전히 같은 색을 쓰면 점선 참조선이 마치
+     "오늘 캔들과 같은 강도의 확정 사실"처럼 보일 위험이 있어, 같은 hue의 반투명
+     (알파 0.55) 변형을 별도 변수로 둔다 — 형태(점선 수평선 vs 캔들 사각형/심지)로
+     이미 구분되지만 색까지 한 단계 낮춰 "이건 근사 오버레이"임을 시각적으로도
+     드러낸다. */
+  --flow-buy: rgba(208, 59, 59, 0.55);
+  --flow-sell: rgba(37, 106, 191, 0.55);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -138,6 +151,11 @@
     --risk-info-bg: #23272e;
     --risk-info-fg: #c9d3e0;
     --risk-info-border: #3a4150;
+
+    /* 라이트 :root 블록 "선물 순매매 가격대별 프로파일" 주석 참고 — 다크 테마의
+       --up/--down 값(e66767/3987e5)에 동일한 알파(0.55)를 적용. */
+    --flow-buy: rgba(230, 103, 103, 0.55);
+    --flow-sell: rgba(57, 135, 229, 0.55);
   }
 }
 
@@ -195,6 +213,10 @@
   --risk-info-bg: #23272e;
   --risk-info-fg: #c9d3e0;
   --risk-info-border: #3a4150;
+
+  /* 라이트 :root 블록 "선물 순매매 가격대별 프로파일" 주석 참고. */
+  --flow-buy: rgba(230, 103, 103, 0.55);
+  --flow-sell: rgba(57, 135, 229, 0.55);
 }
 
 * {

@@ -107,6 +107,7 @@ from ..models import (
     VolumeProfileDaily,
 )
 from ..quant import flow_acceleration, regime_backtest, risk_alert, sector_rotation, volume_surge
+from ..quant.futures_flow_profile import compute_flow_profile, detect_flow_levels
 from ..quant.volume_profile import compute_volume_profile, detect_levels
 from ..services import DB_MARKET, get_market_series_from_db
 from . import basis as basis_router
@@ -128,6 +129,14 @@ BREADTH_MARKETS = {"kospi", "kosdaq"}
 
 # short_selling_market도 코스피/코스닥만 있다 (선물은 공매도 개념이 다름, PLAN.md §5.32).
 SHORT_SELLING_MARKETS = {"kospi", "kosdaq"}
+
+# 순매매 가격대별 프로파일(PLAN.md §5.41)은 선물(K200)만 지원 — market_flow가
+# kospi/kosdaq에도 외국인/기관계 행을 갖고 있지만(kiwoom ka10051 13분류), 이번
+# 요청 범위는 선물 전용(PLAN.md §5.41 설계 절 "미결제약정 없음, 대신 선물 일봉+
+# market_flow로 근사") 이라 코스피/코스닥까지 확장하지 않는다 — 필요해지면 별도
+# Phase에서 재검토.
+FLOW_PROFILE_MARKETS = {"futures"}
+FLOW_PROFILE_INVESTORS = ("외국인", "기관계")
 
 # GET /api/markets/breadth/live 60초 메모리 캐시 — 프로세스 재기동 시 초기화되는
 # 단순 캐시로 충분하다(다중 워커 배포는 아직 없음, PLAN.md §5.1). 동시 요청이
@@ -192,8 +201,51 @@ async def _append_futures_provisional_row(data: list[dict]) -> None:
     )
 
 
+async def _build_flow_profile(data: list[dict], session: AsyncSession, days: int) -> dict:
+    """K200 선물 외국인/기관계 순매매 가격대별 프로파일(PLAN.md §5.41) — 이미
+    읽어 둔 `data`(가격 시리즈, `get_market_series_from_db`/`_append_futures_
+    provisional_row` 적용 후 그대로)와 market_flow(market='k200_futures',
+    collectors/futures_flow.py가 매일 수집, 새 외부 호출 없음)를 조인해
+    투자자 카테고리별(`FLOW_PROFILE_INVESTORS` = 외국인/기관계) 프로파일을
+    계산한다. 호출측(`_build_prices`)이 `market == "futures"`일 때만 부르므로
+    여기서는 market 분기를 다시 하지 않는다.
+
+    **정직하게 명시**: 이건 미결제약정 기반 "포지션"이 아니라, 하루 단위로
+    뭉뚱그린 순매매 금액을 그날의 저가~고가 구간에 균등분배한 근사치다 —
+    quant/futures_flow_profile.py 모듈 docstring 전체 참고. 예측도 매매 신호도
+    아니다.
+
+    Returns:
+        ``{"외국인": {..compute_flow_profile 결과.., "buy_levels", "sell_levels"},
+        "기관계": {...}}``.
+    """
+    since = dt.date.today() - dt.timedelta(days=days)
+    stmt = select(MarketFlow).where(
+        MarketFlow.market == "k200_futures",
+        MarketFlow.date >= since,
+        MarketFlow.investor.in_(FLOW_PROFILE_INVESTORS),
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+
+    flow_by_date: dict[str, dict[str, float]] = {investor: {} for investor in FLOW_PROFILE_INVESTORS}
+    for r in rows:
+        if r.net_value is None:
+            continue
+        flow_by_date[r.investor][r.date.strftime("%Y%m%d")] = float(r.net_value)
+
+    result: dict[str, dict] = {}
+    for investor in FLOW_PROFILE_INVESTORS:
+        profile = compute_flow_profile(data, flow_by_date[investor])
+        result[investor] = {**profile, **detect_flow_levels(profile)}
+    return result
+
+
 async def _build_prices(
-    market: str, days: int, session: AsyncSession, include_volume_profile: bool = False
+    market: str,
+    days: int,
+    session: AsyncSession,
+    include_volume_profile: bool = False,
+    include_flow_profile: bool = False,
 ) -> dict:
     """`/api/markets/{market}/series`·legacy `/api/series`가 공유하는 가격 시리즈
     빌더. DB 전용 조회(`get_market_series_from_db`)가 기본이지만, ``market ==
@@ -206,7 +258,13 @@ async def _build_prices(
     재사용해 거래량 프로파일(PLAN.md §5.34, 근사치 — 예측/매매 신호 아님,
     quant/volume_profile.py 모듈 docstring 참고)을 계산해 함께 반환한다 — 새
     DB 조회/외부 호출 없음. 기본 false로 두어(routers/stocks.py::stock_series와
-    동일한 옵트인 정책) 일반 시세 조회에는 계산 비용을 붙이지 않는다."""
+    동일한 옵트인 정책) 일반 시세 조회에는 계산 비용을 붙이지 않는다.
+
+    `include_flow_profile=True`이고 `market == "futures"`면 §5.41 순매매
+    가격대별 프로파일(`_build_flow_profile`)을 추가한다 — market이
+    `FLOW_PROFILE_MARKETS`(현재 futures만) 밖이면 파라미터가 true여도 **아무것도
+    계산하지 않는다**(코스피/코스닥은 이번 스코프 밖, PLAN.md §5.41 설계 절
+    참고 — market_flow에 데이터가 있어도 억지로 확장하지 않는다)."""
     if market not in MARKETS:
         raise HTTPException(400, f"market must be one of {sorted(MARKETS)}")
 
@@ -217,6 +275,8 @@ async def _build_prices(
     if include_volume_profile:
         profile = compute_volume_profile(data)
         result["volume_profile"] = {**profile, "levels": detect_levels(profile)}
+    if include_flow_profile and market in FLOW_PROFILE_MARKETS:
+        result["flow_profile"] = await _build_flow_profile(data, session, days)
     return result
 
 
@@ -261,9 +321,23 @@ async def market_series(
             "모듈 docstring 참고, 예측/매매 신호 아님."
         ),
     ),
+    include_flow_profile: bool = Query(
+        False,
+        description=(
+            "true이고 market=futures면 응답에 flow_profile(K200 선물 외국인/기관계 "
+            "순매매 가격대별 프로파일 근사, PLAN.md §5.41)을 "
+            "{'외국인': {...}, '기관계': {...}} 형태로 추가한다. 각 값은 "
+            "quant/futures_flow_profile.compute_flow_profile 결과 + "
+            "buy_levels/sell_levels(순매수/순매도 집중 구간 근사). 미결제약정 기반 "
+            "포지션이 아니고, 하루 단위 순매매 금액을 그날 저가~고가에 균등분배한 "
+            "근사이며 예측/매매 신호가 아니다(모듈 docstring 참고). market이 "
+            "futures가 아니면(코스피/코스닥) 이번 스코프 밖이라 true여도 아무 필드도 "
+            "추가되지 않는다."
+        ),
+    ),
     session: AsyncSession = Depends(get_session),
 ):
-    result = await _build_prices(market, days, session, include_volume_profile)
+    result = await _build_prices(market, days, session, include_volume_profile, include_flow_profile)
     result["prices"] = result.pop("series")
     result["flows"] = await _build_flows(market, days, session)
     return result

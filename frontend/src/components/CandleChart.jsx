@@ -46,6 +46,8 @@ const VAR_NAMES = [
   '--text-primary',
   '--border',
   '--series-value',
+  '--flow-buy',
+  '--flow-sell',
 ]
 
 // lightweight-charts 기반 캔들 + 거래량 히스토그램 (PLAN.md §5.1 CandleChart.jsx,
@@ -77,6 +79,23 @@ const VAR_NAMES = [
 // (--text-muted) 하나만 쓰고, 방향성 있는 스타일(빨강/파랑, 화살표 등)을
 // 절대 쓰지 않는다. label이 없으면 기본 문구("거래량 집중 구간(근사)" 또는
 // POC는 "거래량 최다 구간(POC, 근사)")를 쓴다.
+//
+// flowLevels: 선물(K200) 외국인/기관 순매매 가격대별 프로파일의 방향성 레벨
+// (PLAN.md §5.41) — [{ price, side: 'buy'|'sell', label }, ...]. levels prop과
+// 마찬가지로 createPriceLine()으로 그리는 "가로 상수선"이지만, 이건 levels(§5.34
+// 거래량 프로파일, 방향이 없는 중립 지표)와 달리 **방향이 있는 관찰 사실**이다 —
+// "이 가격대에서 과거 외국인/기관 순매수(또는 순매도)가 몰렸었다"는 사실이라
+// 한국 등락 관행(상승/매수=빨강, 하락/매도=파랑)을 그대로 적용해 side='buy'는
+// --flow-buy(빨강 계열), side='sell'은 --flow-sell(파랑 계열)로 그린다. 두
+// 변수는 캔들 몸통 색(--up/--down)과 같은 hue이지만 반투명 변형이라 "오늘
+// 캔들과 같은 확정 강도"로 오인되지 않게 한 단계 낮춘 톤이다(index.css의 두
+// 변수 선언부 주석 참고). levels(§5.34)와 flowLevels(§5.41)는 개념이 달라 함께
+// 켜질 수 있지만, 둘 다 켜면 선이 많아 복잡해질 수 있어 호출부가 필요에 따라
+// 하나만 넘기는 것도 가능하다(현재 futures 캔들 모달은 flowLevels만 사용 — §5.34
+// 중립 지지/저항선은 선물에는 아직 배선하지 않았다, DashboardPage.jsx 참고).
+// 문구는 반드시 관찰형("여기서 과거 순매수가 몰렸다")만 쓴다 — "매수해라" 같은
+// 지시형 문구는 절대 쓰지 않는다(quant/futures_flow_profile.py 모듈 docstring
+// 원칙과 동일).
 export default function CandleChart({
   data,
   height = 360,
@@ -86,6 +105,7 @@ export default function CandleChart({
   overlay = null,
   overlayLabel = 'VWAP',
   levels = null,
+  flowLevels = null,
 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
@@ -337,6 +357,35 @@ export default function CandleChart({
     }
   }, [levels])
 
+  // 선물 순매매 프로파일 방향성 레벨(PLAN.md §5.41) — levels(위)와 별도 effect로
+  // 그린다. 색만 다를 뿐 createPriceLine() 매커니즘은 동일. side별로
+  // --flow-buy/--flow-sell(캔들 몸통과 같은 hue의 반투명 변형, 컴포넌트 상단
+  // 주석 참고)을 쓴다.
+  useEffect(() => {
+    const candleSeries = candleSeriesRef.current
+    if (!candleSeries) return undefined
+
+    const vars = readCssVars(['--flow-buy', '--flow-sell'])
+
+    const priceLines = (flowLevels || [])
+      .filter((lv) => lv?.price != null)
+      .map((lv) => {
+        const isBuy = lv.side === 'buy'
+        return candleSeries.createPriceLine({
+          price: lv.price,
+          color: isBuy ? vars['--flow-buy'] : vars['--flow-sell'],
+          lineWidth: 2,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: lv.label || (isBuy ? '외국인 순매수 집중 구간(근사)' : '외국인 순매도 집중 구간(근사)'),
+        })
+      })
+
+    return () => {
+      for (const line of priceLines) candleSeries.removePriceLine(line)
+    }
+  }, [flowLevels])
+
   return (
     <div className="chart-card candle-chart-card">
       <div className="chart-title">
@@ -349,6 +398,15 @@ export default function CandleChart({
         {levels && levels.length > 0 && (
           <span className="candle-chart-overlay-legend" title="일봉 저가~고가 구간에 거래량을 균등분배한 근사치 — 실제 지지/저항을 보장하지 않음">
             <span className="dot" style={{ background: 'var(--text-muted)' }} /> 거래량 집중 구간(근사)
+          </span>
+        )}
+        {flowLevels && flowLevels.length > 0 && (
+          <span
+            className="candle-chart-overlay-legend"
+            title="하루 단위 외국인/기관 순매매 금액을 그날 저가~고가 구간에 균등분배한 근사치 — 틱 단위 체결가가 아니고 미결제약정(포지션) 기반도 아니며, 매매 신호가 아닌 관찰 참고선입니다"
+          >
+            <span className="dot" style={{ background: 'var(--flow-buy)' }} /> 순매수 집중(근사)
+            <span className="dot" style={{ background: 'var(--flow-sell)', marginLeft: 6 }} /> 순매도 집중(근사)
           </span>
         )}
       </div>

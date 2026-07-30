@@ -564,6 +564,12 @@ function CandleModal({ market }) {
   const [days, setDays] = useState(DEFAULT_CANDLE_DAYS)
   const [prices, setPrices] = useState(null)
   const [volumeProfile, setVolumeProfile] = useState(null)
+  const [flowProfile, setFlowProfile] = useState(null)
+  // 선물 순매매 프로파일(PLAN.md §5.41)은 외국인/기관계 둘 다 한 번에 그리면
+  // 레벨 선이 최대 16개(방향당 4개 x 2방향 x 2투자자)까지 늘어나 캔들 위가
+  // 지나치게 복잡해진다 — 기본은 외국인만 보여주고, 토글로 기관계를 볼 수
+  // 있게 한다(동시 렌더 대신 선택형, 사용자 판단으로 전환).
+  const [flowInvestor, setFlowInvestor] = useState('외국인')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
@@ -607,13 +613,16 @@ function CandleModal({ market }) {
     setLoading(true)
     setError(null)
     // includeVolumeProfile=true — 일봉 캔들에 지지/저항 후보 참조선(PLAN.md §5.34)을
-    // 그리기 위함. STATIC_DATA 경로는 이 필드를 애초에 안 주므로 body.volume_profile은
-    // undefined로 안전하게 떨어진다(api.js fetchMarketSeries 주석 참고).
-    fetchMarketSeries(market, days, true)
+    // 그리기 위함. includeFlowProfile은 market='futures'일 때만 의미가 있고(PLAN.md
+    // §5.41), 다른 market에 줘도 백엔드가 무시하므로 항상 넘겨도 안전하다. STATIC_DATA
+    // 경로는 이 필드들을 애초에 안 주므로 undefined로 안전하게 떨어진다(api.js
+    // fetchMarketSeries 주석 참고).
+    fetchMarketSeries(market, days, true, market === 'futures')
       .then((body) => {
         if (!cancelled) {
           setPrices(body.prices || [])
           setVolumeProfile(body.volume_profile || null)
+          setFlowProfile(body.flow_profile || null)
         }
       })
       .catch((e) => {
@@ -630,11 +639,36 @@ function CandleModal({ market }) {
   // CandleChart의 `levels` prop 형태({price, label, isPoc})로 변환(StockDetailModal.jsx와
   // 동일한 매핑). 표본 부족/데이터 없음이면 volumeProfile.levels가 빈 배열(quant/
   // volume_profile.py 참고) — 항상 배열만 만든다(undefined 방지).
-  const volumeProfileLevels = (volumeProfile?.levels || []).map((lv) => ({
-    price: lv.price_mid,
-    isPoc: lv.is_poc,
-    label: lv.is_poc ? '거래량 최다 구간(POC, 근사)' : '거래량 집중 구간(근사)',
-  }))
+  // §5.34(중립 지지/저항선)와 §5.41(방향성 순매매 레벨)은 개념이 달라 함께 켤 수도
+  // 있지만, 선물 캔들은 이미 §5.41 flowLevels가 방향성 있는 핵심 정보라 §5.34
+  // levels는 선물에는 배선하지 않는다(선이 너무 많아지는 것을 피하기 위한 판단 —
+  // 코스피/코스닥은 §5.41 대상이 아니므로 기존처럼 levels를 그대로 쓴다).
+  const volumeProfileLevels =
+    market === 'futures'
+      ? []
+      : (volumeProfile?.levels || []).map((lv) => ({
+          price: lv.price_mid,
+          isPoc: lv.is_poc,
+          label: lv.is_poc ? '거래량 최다 구간(POC, 근사)' : '거래량 집중 구간(근사)',
+        }))
+
+  // CandleChart의 `flowLevels` prop 형태({price, side, label})로 변환 — 선택된
+  // 투자자(flowInvestor)의 buy_levels/sell_levels만 그린다(컴포넌트 상단 state
+  // 주석 참고). 문구는 관찰형만("~순매수/순매도가 몰렸다", 근사 명시) — "매수/매도
+  // 신호"로 읽힐 수 있는 표현은 쓰지 않는다.
+  const selectedFlowProfile = flowProfile?.[flowInvestor]
+  const flowLevels = [
+    ...(selectedFlowProfile?.buy_levels || []).map((lv) => ({
+      price: lv.price_mid,
+      side: 'buy',
+      label: `${flowInvestor} 순매수 집중 구간(근사)`,
+    })),
+    ...(selectedFlowProfile?.sell_levels || []).map((lv) => ({
+      price: lv.price_mid,
+      side: 'sell',
+      label: `${flowInvestor} 순매도 집중 구간(근사)`,
+    })),
+  ]
 
   return (
     <div>
@@ -668,10 +702,31 @@ function CandleModal({ market }) {
       {intradayMode === 'daily' && (
         <>
           <PeriodPicker value={days} onChange={setDays} />
+          {/* 선물 순매매 프로파일(PLAN.md §5.41) 투자자 토글 — 외국인/기관계
+              동시 렌더는 선이 너무 많아져(방향당 최대 4개 x 2방향 x 2투자자)
+              하나씩만 보여주고 전환하게 한다(컴포넌트 상단 flowInvestor state
+              주석 참고). */}
+          {market === 'futures' && (
+            <div className="toggle-row">
+              {['외국인', '기관계'].map((inv) => (
+                <button
+                  key={inv}
+                  type="button"
+                  className={`toggle-chip ${flowInvestor === inv ? 'active' : ''}`}
+                  onClick={() => setFlowInvestor(inv)}
+                >
+                  {inv} 순매매 프로파일
+                </button>
+              ))}
+              <span className="toggle-hint">
+                하루 단위 순매매 금액을 그날 저가~고가에 균등분배한 근사 · 미결제약정(포지션) 아님 · 매매 신호 아님
+              </span>
+            </div>
+          )}
           {loading && <div className="state">불러오는 중…</div>}
           {error && <div className="state error">{error}</div>}
           {!loading && !error && prices && prices.length > 0 && (
-            <CandleChart data={prices} height={320} levels={volumeProfileLevels} />
+            <CandleChart data={prices} height={320} levels={volumeProfileLevels} flowLevels={flowLevels} />
           )}
           {/* PLAN.md §5.21-3 — 선물은 분봉이 없어 일봉이 유일한 뷰라, 마지막 봉이
               basis/live의 오늘 잠정치(provisional)로 채워졌을 때 확정치가 아님을
