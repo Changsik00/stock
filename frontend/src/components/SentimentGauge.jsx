@@ -27,6 +27,16 @@ import { formatDate } from '../format'
 // EOD 폴백일 때(옛 flow_rank 상위 랭킹 근사치)가 서로 다른 원재료 필드를 응답에
 // 담는다(individual/foreign/institution vs buy_sum/sell_sum) — 두 소스 자체가
 // 다르기 때문에 COMPONENT_META.flow.detail이 있는 필드로 조건 분기해 보여준다.
+//
+// **flow.by_market(§5.44)**: 사용자가 "코스피만 따로 보면 지금이 평소보다
+// 높은지 낮은지"를 물어서 추가됐다 — 종합 게이지 산식(코스피+코스닥 합산
+// flow.score)은 그대로 두고, 라이브일 때만 그 아래 코스피/코스닥 개별 점수 +
+// 과거 20거래일 대비 percentile(quant/flow_baseline.py, 관찰 지표일 뿐 예측
+// 아님)을 추가로 보여준다. EOD 폴백 응답에는 by_market 키가 아예 없으므로
+// (백엔드가 만들 수 있는 원재료 자체가 없음) 없으면 조용히 생략한다(이 파일의
+// "데이터 없으면 안 그린다" 기존 관례, 예: hasScore 분기와 동일 원칙). 시장별
+// baseline도 표본 부족이면 reason만 있고 percentile이 없으므로 그 시장 행의
+// baseline 텍스트만 생략한다(점수 자체는 계속 보여줌).
 
 const scoreFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 1, minimumFractionDigits: 1 })
 const countFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 0 })
@@ -56,6 +66,49 @@ function investorDetail(c) {
     `개인 ${eokFmt.format((c.individual ?? 0) / 100)}억 · ` +
     `외국인 ${eokFmt.format((c.foreign ?? 0) / 100)}억 · ` +
     `기관 ${eokFmt.format((c.institution ?? 0) / 100)}억`
+  )
+}
+
+const pctFmt = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 1, minimumFractionDigits: 1 })
+
+// flow.by_market의 시장 하나(코스피 또는 코스닥) 한 줄 — 점수 + 과거 대비
+// percentile(§5.44, StockDetailModal.jsx FlowPercentileNote와 동일한 "N%ile"
+// 표기·톤을 재사용). baseline.reason이 있으면(표본 부족) percentile 텍스트만
+// 생략하고 점수는 그대로 보여준다("조용히 생략" 관례, 억지로 사유 문구를
+// 노출하지 않음 — ComponentBar의 EOD/라이브 배지처럼 매번 설명하지 않는다).
+function FlowMarketRow({ label, data }) {
+  if (!data) return null
+  const baseline = data.baseline
+  const hasBaseline = baseline && !baseline.reason
+  return (
+    <div className="sentiment-gauge-flow-market-row">
+      <span className="sentiment-gauge-flow-market-label">{label}</span>
+      <span className={`sentiment-gauge-flow-market-score ${scoreClass(data.score)}`}>{scoreLabel(data.score)}</span>
+      {hasBaseline && (
+        <span
+          className="sentiment-gauge-flow-market-baseline"
+          title={`최근 ${baseline.lookback_days_used}거래일 평균 ${scoreLabel(baseline.mean_score)}`}
+        >
+          최근 {baseline.lookback_days_used}거래일 대비 {pctFmt.format(baseline.percentile)}%ile
+        </span>
+      )}
+    </div>
+  )
+}
+
+// flow가 라이브(by_market 있음)일 때만 코스피/코스닥 개별 행을 그린다(모듈
+// 상단 주석 "flow.by_market(§5.44)" 참고) — EOD 폴백이면 by_market 자체가
+// 없으므로 아무것도 렌더링하지 않는다.
+function FlowByMarket({ byMarket }) {
+  if (!byMarket) return null
+  return (
+    <div className="sentiment-gauge-flow-by-market">
+      <FlowMarketRow label="코스피" data={byMarket.kospi} />
+      <FlowMarketRow label="코스닥" data={byMarket.kosdaq} />
+      <span className="sentiment-gauge-flow-by-market-hint">
+        percentile은 100에 가까울수록 그 시장 자신의 최근 거래일 대비 매수 쏠림(참고용, 매매 신호 아님)
+      </span>
+    </div>
   )
 }
 
@@ -133,6 +186,7 @@ function ComponentBar({ id, component }) {
           {meta.detail(component)}
         </div>
       )}
+      {id === 'flow' && <FlowByMarket byMarket={component?.by_market} />}
     </div>
   )
 }
@@ -286,6 +340,40 @@ export default function SentimentGauge({ loading, error, score, approx: _approx,
           font-size: 10px;
           color: var(--text-muted);
           font-variant-numeric: tabular-nums;
+        }
+        .sentiment-gauge-flow-by-market {
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+          margin-top: 2px;
+          padding-left: 4px;
+          border-left: 2px solid var(--border);
+        }
+        .sentiment-gauge-flow-market-row {
+          display: flex;
+          align-items: baseline;
+          gap: 6px;
+          font-size: 10px;
+        }
+        .sentiment-gauge-flow-market-label {
+          color: var(--text-secondary);
+          font-weight: 600;
+          min-width: 32px;
+        }
+        .sentiment-gauge-flow-market-score {
+          font-variant-numeric: tabular-nums;
+          font-weight: 600;
+        }
+        .sentiment-gauge-flow-market-score.up { color: var(--up); }
+        .sentiment-gauge-flow-market-score.down { color: var(--down); }
+        .sentiment-gauge-flow-market-score.flat { color: var(--text-muted); }
+        .sentiment-gauge-flow-market-baseline {
+          color: var(--text-muted);
+          font-variant-numeric: tabular-nums;
+        }
+        .sentiment-gauge-flow-by-market-hint {
+          font-size: 9px;
+          color: var(--text-muted);
         }
       `}</style>
 

@@ -114,6 +114,7 @@ from ..db import get_session
 from ..market_hours import KST, is_nxt_closed
 from ..models import EtfStat, FlowPath, FlowRank, MarketBreadth, MarketFlow, Stock, ValueRank
 from ..quant import etf_weight_changes
+from ..quant.flow_baseline import compute_flow_market_baseline
 from ..sentiment import breadth_score, compute_sentiment, etf_score, flow_live_score, flow_score
 from .markets import _warm_breadth_live, _warm_flow_live, _warm_futures_flow_live
 
@@ -574,6 +575,24 @@ def _sum_investor_net_values(*investor_dicts: dict | None) -> tuple[float, float
     return individual, foreign, institution
 
 
+async def _flow_market_detail(session: AsyncSession, market: str, investors: dict | None) -> dict:
+    """단일 시장(코스피 또는 코스닥) investors dict 하나로 flow_live_score +
+    과거 대비 baseline을 함께 계산한다(PLAN.md §5.44-1/5.44-2) —
+    ``_load_flow_component_live``의 ``by_market.{kospi,kosdaq}`` 원소를 만드는
+    헬퍼. baseline은 quant/flow_baseline.py::compute_flow_market_baseline이
+    담당한다(그 모듈 docstring 참고 — 관찰 지표일 뿐 예측 아님)."""
+    individual, foreign, institution = _sum_investor_net_values(investors)
+    score = flow_live_score(individual, foreign, institution)
+    baseline = await compute_flow_market_baseline(session, market, score)
+    return {
+        "score": score,
+        "individual": individual,
+        "foreign": foreign,
+        "institution": institution,
+        "baseline": baseline,
+    }
+
+
 async def _load_flow_component_live(session: AsyncSession) -> dict | None:
     """flow/live(routers.markets._warm_flow_live, 코스피+코스닥 키움 라이브 +
     DB 확정치 내부 폴백)를 재사용해 코스피+코스닥 전체 투자자별(개인/외국인/
@@ -587,7 +606,18 @@ async def _load_flow_component_live(session: AsyncSession) -> dict | None:
     (장중 키움 라이브 -> 실패 시 DB 확정치) 폴백을 이미 갖고 있어 market_closed
     상황에서도 값을 채워 돌려줄 수 있지만, 이 게이트는 breadth와 동일하게
     "장 마감이면 옛 EOD 경로로" 원칙을 우선한다 — 두 폴백 소스가 다르다는
-    비일관성보다 게이트 동작 자체의 일관성(breadth/flow가 같은 규칙)을 택했다."""
+    비일관성보다 게이트 동작 자체의 일관성(breadth/flow가 같은 규칙)을 택했다.
+
+    **by_market(§5.44 신규)**: 종합 게이지에 들어가는 ``score``(코스피+코스닥
+    합산)는 그대로 두고, 그 옆에 시장별 개별 flow_live_score + 과거 20거래일
+    대비 percentile을 ``by_market: {"kospi": {...}, "kosdaq": {...}}``으로
+    추가 노출한다(§5.44 스코프 — 종합 산식 자체는 건드리지 않음, 상세 표시용
+    부가 정보). 라이브 경로에서만 계산 가능하다 — EOD 폴백(_load_flow_component)은
+    코스피/코스닥을 분리한 투자자별 원재료 자체가 없으므로(flow_rank 상위
+    랭킹 합계만 있음) by_market을 만들 수 없다. 그래서 by_market은 이 라이브
+    함수에만 있고, EOD 응답 dict에는 아예 키 자체가 없다 — market_sentiment가
+    ``flow.get("by_market")``로 안전하게 접근해 없으면 프런트도 조용히
+    생략한다(house "표본/소스 없음은 조용히 생략" 관례)."""
     live = await _warm_flow_live(session)
     if live.get("market_closed"):
         return None
@@ -600,6 +630,11 @@ async def _load_flow_component_live(session: AsyncSession) -> dict | None:
         (kospi or {}).get("investors"), (kosdaq or {}).get("investors")
     )
 
+    by_market = {
+        "kospi": await _flow_market_detail(session, "kospi", (kospi or {}).get("investors")),
+        "kosdaq": await _flow_market_detail(session, "kosdaq", (kosdaq or {}).get("investors")),
+    }
+
     return {
         "score": flow_live_score(individual, foreign, institution),
         "date": dt.datetime.now(KST).date().isoformat(),
@@ -607,6 +642,7 @@ async def _load_flow_component_live(session: AsyncSession) -> dict | None:
         "foreign": foreign,
         "institution": institution,
         "source": "live",
+        "by_market": by_market,
     }
 
 
@@ -773,6 +809,21 @@ async def market_sentiment(session: AsyncSession = Depends(get_session)) -> dict
     EOD 두 경로가 서로 다른 필드 셋을 노출하는 비대칭이 있다 — 두 소스의 원재료
     자체가 다르기 때문에(투자자별 net_value vs 랭킹 매수/매도 합) 억지로 통일하지
     않았다.
+
+    **flow.by_market은 2026-07-30(PLAN.md §5.44)부터 추가된다**: 사용자가
+    "코스피만 따로 보면 지금 수급이 평소보다 높은지 낮은지 알 수 있냐"고 물은
+    데서 나왔다 — 종합 게이지에 들어가는 ``components.flow.score``(코스피+코스닥
+    합산)는 그대로 두고(§5.44 스코프 — 종합 산식 변경 아님), flow가 라이브
+    경로일 때만 그 옆에 ``components.flow.by_market: {"kospi": {...},
+    "kosdaq": {...}}``을 추가로 채운다. 각 시장 원소는
+    ``{"score": flow_live_score, "individual"/"foreign"/"institution": 원재료,
+    "baseline": {"reason", "mean_score", "percentile", "lookback_days_requested",
+    "lookback_days_used"}}`` 형태다(baseline 산식은
+    quant/flow_baseline.py::compute_flow_market_baseline — 그 시장 자신의 과거
+    확정 거래일 대비 percentile, 관찰 지표일 뿐 예측 아님). flow가 EOD 폴백일
+    때는 코스피/코스닥을 분리한 투자자별 원재료 자체가 없으므로(flow_rank 상위
+    랭킹 합계만 있음) ``by_market`` 키가 응답에 아예 없다 — 프런트가
+    ``components.flow.by_market``의 존재 여부로 분기해 없으면 조용히 생략한다.
 
     **futures 요소는 2026-07-30(PLAN.md §5.43)부터 신규 추가된다**: 이 프로젝트가
     이미 "외인 양손"(현물+선물 동시 수급)을 중요한 신호로 다뤄왔는데(§4.7 외인 양손

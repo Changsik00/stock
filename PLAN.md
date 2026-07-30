@@ -2694,9 +2694,9 @@ flow는 코스피+코스닥 두 시장의 investors를 합산한 뒤 계산. 기
 
 | # | 작업 | 내용 | 완료 기준 |
 |---|---|---|---|
-| 5.44-1 | 시장별 분리 | `_load_flow_component_live`에 코스피/코스닥 개별 `flow_live_score` 추가 | 단위테스트 + curl 실데이터 |
-| 5.44-2 | 과거 대비 baseline 함수 | 신규 함수(세션 기반, `market_flow` 최근 N일 확정치로 일별 flow_live_score 재계산 후 percentile) | 단위테스트(표본 부족 처리 포함) + 실 DB 값 검증 |
-| 5.44-3 | API+프런트 반영 | `/api/markets/sentiment` 응답에 `components.flow.by_market` 추가, `SentimentGauge.jsx`에 코스피/코스닥 개별 점수 + "최근 N일 대비 상위/하위 X%" 표시 | curl 확인 + vite build 클린 |
+| 5.44-1 ✅ | 시장별 분리 | `routers/flow_rank.py::_load_flow_component_live`에 `_flow_market_detail` 헬퍼 추가 — 코스피/코스닥 investors 각각으로 `flow_live_score` 개별 계산(합산 계산은 그대로 유지, 종합 게이지 산식 불변) | 단위테스트 + curl 실데이터 — **완료(2026-07-30)** |
+| 5.44-2 ✅ | 과거 대비 baseline 함수 | `app/quant/flow_baseline.py` 신규 — 순수 함수 `aggregate_flow_baseline`(percentile 산식, quant/flow_percentile.py와 동일한 동점 평균 공식) + 세션 래퍼 `compute_flow_market_baseline`(`market_flow` 확정치, "오늘(as_of) 미만" 제외, 최근 20거래일, `MIN_BASELINE_DAYS=10` 미만이면 reason) | 단위테스트 11개(순수 4 + aggregate 4 + 세션 3, 실 dev Postgres) + 실 DB 값 수기 검산 일치 — **완료(2026-07-30)** |
+| 5.44-3 ✅ | API+프런트 반영 | `/api/markets/sentiment` 응답에 `components.flow.by_market.{kospi,kosdaq}.{score,individual,foreign,institution,baseline}` 추가(라이브일 때만, EOD 폴백이면 키 자체 없음). `SentimentGauge.jsx`에 `FlowByMarket`/`FlowMarketRow` 추가 — 코스피/코스닥 개별 점수 + "최근 N거래일 대비 X%ile" 표시(관찰 지표, 매매 신호 아님 문구 고정) | curl 확인 + vite build 클린 — **완료(2026-07-30)**. 13:51 KST 실측: 코스피 +49.7(최근 20거래일 대비 80.0%ile, 평균 -3.1), 코스닥 +20.2(60.0%ile, 평균 -9.6) — psql로 코스피 20일 원자료 직접 재계산해 mean/percentile 정확히 일치 확인. 브라우저 자동화 도구 이번 세션도 없음(§5.42-4/5.43-3과 동일) — 코드리뷰+curl+빌드로 대체. pytest 692→703(11개 신규) |
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
