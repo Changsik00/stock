@@ -17,7 +17,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import async_session_factory, engine
 from app.models import EtfStat, FlowPath, FlowRank, MarketBreadth, MarketFlow
-from app.routers import markets
+from app.routers import flow_rank, markets
 from app.routers.flow_rank import router
 
 TEST_DATE = dt.date(2099, 1, 1)
@@ -336,6 +336,78 @@ async def test_sentiment_prefers_live_breadth_flow_futures_when_market_open(
     # etf는 라이브 소스가 없다(§5.43 설계 노트) — 여전히 seeded EOD(TEST_DATE) 그대로.
     assert body["components"]["etf"]["date"] == TEST_DATE.isoformat()
     assert body["components"]["etf"]["source"] == "eod"
+
+
+async def test_sentiment_falls_back_to_flow_rank_when_flow_live_totally_fails(
+    seeded_sentiment_inputs, monkeypatch
+):
+    """실제 장애 재현(2026-07-31, CI export_static.py 크래시) — 장중인데 키움
+    라이브 호출도 실패하고(예: 8050 지정단말기 인증 실패, CI 러너처럼 키움에
+    등록 안 된 IP) market_flow DB에 kospi/kosdaq 확정치도 없으면(예: CI 빌드
+    DB가 아직 그 배치를 한 번도 못 돌린 경우), `_warm_flow_live`가
+    `HTTPException(502)`를 던진다. 이 실패가 `_load_flow_component_live`를
+    뚫고 `market_sentiment` 전체를 502로 죽이면 안 된다 — breadth/futures/etf
+    세 요소만으로도 정상 응답해야 하고, flow는 옛 flow_rank 랭킹 근사치
+    (seeded_sentiment_inputs) EOD 폴백으로 조용히 넘어가야 한다."""
+    monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: False)
+
+    live_kospi = {"adv": 900, "dec": 100, "flat": 50, "limit_up": 3, "limit_down": 0}
+    live_kosdaq = {"adv": 700, "dec": 200, "flat": 30, "limit_up": 1, "limit_down": 0}
+
+    def fake_fetch_breadth(market: str) -> dict:
+        return live_kospi if market == "kospi" else live_kosdaq
+
+    monkeypatch.setattr(markets, "_fetch_breadth_blocking", fake_fetch_breadth)
+
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    async def fake_warm_flow_live_raises(session):
+        raise HTTPException(502, "market flow live fetch failed: {'kospi': '...8050...', 'kosdaq': '...8050...'}")
+
+    # flow_rank.py가 `from .markets import _warm_flow_live`로 이름을 직접
+    # 가져다 쓰므로(재바인딩), markets 모듈의 속성만 바꿔선 flow_rank.py 안의
+    # 이름에는 영향이 없다 — flow_rank 자신의 네임스페이스를 patch해야 한다.
+    monkeypatch.setattr(flow_rank, "_warm_flow_live", fake_warm_flow_live_raises)
+
+    fake_futures_flows = [
+        {"investor": "개인", "net_value": 300, "net_volume": None},
+        {"investor": "외국인", "net_value": -1200, "net_volume": None},
+        {"investor": "기관계", "net_value": 900, "net_volume": None},
+    ]
+
+    def fake_fetch_futures_flow_blocking(target_date):
+        return {"flows": fake_futures_flows, "date": target_date}
+
+    monkeypatch.setattr(markets, "_fetch_futures_flow_blocking", fake_fetch_futures_flow_blocking)
+
+    markets._live_cache["data"] = None
+    markets._live_cache["ts"] = 0.0
+    markets._flow_live_cache["data"] = None
+    markets._flow_live_cache["ts"] = 0.0
+    markets._futures_flow_live_cache["data"] = None
+    markets._futures_flow_live_cache["ts"] = 0.0
+
+    app = _make_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/markets/sentiment")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    breadth = body["components"]["breadth"]
+    flow = body["components"]["flow"]
+    futures = body["components"]["futures"]
+
+    assert breadth["source"] == "live"
+    assert futures["source"] == "live"
+
+    # flow만 live가 예외로 실패 -> None -> 옛 flow_rank 랭킹 근사치 EOD로 폴백.
+    # buy_sum=1500, sell_sum=500 -> (1500-500)/2000*100 = 50.0 (market_closed 테스트와 동일 시드값)
+    assert flow["source"] == "eod"
+    assert flow["buy_sum"] == 1500
+    assert flow["sell_sum"] == 500
+    assert flow["score"] == 50.0
+    assert "by_market" not in flow
 
 
 # 참고: "세 요소 전부 데이터 없음 -> score None" 케이스는 이 파일에서 통합테스트로

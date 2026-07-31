@@ -617,8 +617,23 @@ async def _load_flow_component_live(session: AsyncSession) -> dict | None:
     랭킹 합계만 있음) by_market을 만들 수 없다. 그래서 by_market은 이 라이브
     함수에만 있고, EOD 응답 dict에는 아예 키 자체가 없다 — market_sentiment가
     ``flow.get("by_market")``로 안전하게 접근해 없으면 프런트도 조용히
-    생략한다(house "표본/소스 없음은 조용히 생략" 관례)."""
-    live = await _warm_flow_live(session)
+    생략한다(house "표본/소스 없음은 조용히 생략" 관례).
+
+    **2026-07-31 버그 수정 — 라이브+DB 폴백이 둘 다 실패하면 예외가 아니라
+    None**: ``_warm_flow_live``는 장중인데 키움 라이브 호출도 실패하고
+    (예: 8050 지정단말기 인증 실패 — CI 러너처럼 키움에 등록 안 된 IP에서
+    호출할 때 항상 발생) ``market_flow`` DB 확정치도 없으면(예: export_static.py가
+    쓰는 CI 빌드 DB에 kospi/kosdaq market_flow가 아직 한 번도 안 쌓인 경우)
+    ``HTTPException(502)``를 던진다 — `/api/markets/flow/live`처럼 "진짜 실패를
+    호출자에게 그대로 보여줘야 하는" 엔드포인트에는 맞는 동작이지만, 여기서는
+    한 요소 실패가 종합 게이지 전체를 죽이면 안 된다(다른 세 요소만으로도
+    ``compute_sentiment``가 정상적으로 재정규화한다). market_closed 게이트와
+    똑같이 "이 요소를 쓸 수 없으면 호출자가 옛 EOD 근사치 경로로 넘어가게"
+    처리하기 위해 이 예외를 잡아 None으로 변환한다."""
+    try:
+        live = await _warm_flow_live(session)
+    except HTTPException:
+        return None
     if live.get("market_closed"):
         return None
     kospi = live.get("kospi")
