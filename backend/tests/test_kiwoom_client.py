@@ -15,6 +15,7 @@ import httpx
 import pytest
 
 from app.clients.kiwoom import (
+    MAX_ORDER_NOTIONAL_KRW,
     KiwoomAPIError,
     KiwoomAuthError,
     KiwoomClient,
@@ -616,3 +617,197 @@ async def test_rate_limit_retry_does_not_force_token_refresh(make_client, monkey
     assert calls["stkinfo"] == 2
     # rate limit 재시도는 토큰을 재사용해야 하므로 발급은 최초 1회뿐이어야 한다.
     assert calls["token"] == 1
+
+
+# -- 주문 (PLAN.md §5.48, 실호출 미확정 — 전부 mock, 실제 HTTP 호출 절대 없음) ------
+
+
+def _order_response(request: httpx.Request, api_id: str) -> httpx.Response:
+    assert request.headers["api-id"] == api_id
+    return httpx.Response(
+        200,
+        json={"return_code": 0, "return_msg": "", "ord_no": "0000001"},
+        headers={"cont-yn": "N", "next-key": "", "api-id": api_id},
+    )
+
+
+async def test_place_buy_order_sends_correct_body(make_client):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return _token_response(request)
+        assert request.url.path == "/api/dostk/ordr"
+        captured["body"] = json.loads(request.content)
+        return _order_response(request, "kt10000")
+
+    client = make_client(handler)
+    try:
+        data = await client.place_buy_order("007980", 1, 1928)
+    finally:
+        await client.aclose()
+
+    assert captured["body"] == {
+        "dmst_stex_tp": "KRX",
+        "stk_cd": "007980",
+        "ord_qty": 1,
+        "ord_uv": 1928,
+        "trde_tp": "0",
+    }
+    assert data["ord_no"] == "0000001"
+
+
+async def test_place_buy_order_over_cap_raises_without_any_http_call(make_client):
+    """이 테스트가 이 작업 전체의 핵심 안전장치다: notional이 캡을 넘으면
+    ValueError만 던지는 게 아니라, 실제로 HTTP 계층에 단 1건도 요청이 나가지
+    않아야 한다(토큰 발급조차 포함) — 그래야 "버그로 인한 의도치 않은 실주문"을
+    막는다는 목적을 충족한다."""
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        raise AssertionError("notional 캡 초과 시에는 어떤 HTTP 요청도 나가면 안 된다")
+
+    client = make_client(handler)
+    try:
+        with pytest.raises(ValueError):
+            await client.place_buy_order("007980", 10, 6000)  # 60,000 > 50,000
+    finally:
+        await client.aclose()
+
+    assert calls["count"] == 0
+
+
+async def test_place_sell_order_over_cap_raises_without_any_http_call(make_client):
+    """매도도 동일한 캡을 적용하며, 마찬가지로 HTTP 호출이 전혀 없어야 한다."""
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        raise AssertionError("notional 캡 초과 시에는 어떤 HTTP 요청도 나가면 안 된다")
+
+    client = make_client(handler)
+    try:
+        with pytest.raises(ValueError):
+            await client.place_sell_order("007980", 100, 1000)  # 100,000 > 50,000
+    finally:
+        await client.aclose()
+
+    assert calls["count"] == 0
+
+
+async def test_place_buy_order_at_exact_cap_boundary_is_allowed(make_client):
+    """정확히 5만원(경계값)은 거부되면 안 된다 — 캡이 `>`이지 `>=`가 아님을 확인."""
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return _token_response(request)
+        captured["body"] = json.loads(request.content)
+        return _order_response(request, "kt10000")
+
+    client = make_client(handler)
+    try:
+        quantity, price = 10, 5000
+        assert quantity * price == MAX_ORDER_NOTIONAL_KRW
+        data = await client.place_buy_order("007980", quantity, price)
+    finally:
+        await client.aclose()
+
+    assert captured["body"]["ord_qty"] == 10
+    assert data["ord_no"] == "0000001"
+
+
+async def test_place_sell_order_sends_correct_body(make_client):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return _token_response(request)
+        assert request.url.path == "/api/dostk/ordr"
+        captured["body"] = json.loads(request.content)
+        return _order_response(request, "kt10001")
+
+    client = make_client(handler)
+    try:
+        data = await client.place_sell_order("007980", 1, 1928)
+    finally:
+        await client.aclose()
+
+    assert captured["body"] == {
+        "dmst_stex_tp": "KRX",
+        "stk_cd": "007980",
+        "ord_qty": 1,
+        "ord_uv": 1928,
+        "trde_tp": "0",
+    }
+    assert data["ord_no"] == "0000001"
+
+
+async def test_cancel_order_sends_correct_body(make_client):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return _token_response(request)
+        assert request.url.path == "/api/dostk/ordr"
+        captured["body"] = json.loads(request.content)
+        return _order_response(request, "kt10003")
+
+    client = make_client(handler)
+    try:
+        data = await client.cancel_order("007980", "0000001", 1)
+    finally:
+        await client.aclose()
+
+    assert captured["body"] == {
+        "dmst_stex_tp": "KRX",
+        "stk_cd": "007980",
+        "orig_ord_no": "0000001",
+        "ord_qty": 1,
+    }
+    assert data["ord_no"] == "0000001"
+
+
+async def test_get_deposit_detail_request_shape(make_client):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return _token_response(request)
+        assert request.url.path == "/api/dostk/acnt"
+        assert request.headers["api-id"] == "kt00001"
+        assert json.loads(request.content) == {}
+        return httpx.Response(
+            200,
+            json={"return_code": 0, "return_msg": "", "entr": "100000"},
+            headers={"cont-yn": "N", "next-key": "", "api-id": "kt00001"},
+        )
+
+    client = make_client(handler)
+    try:
+        data = await client.get_deposit_detail()
+    finally:
+        await client.aclose()
+
+    assert data["entr"] == "100000"
+
+
+async def test_get_unfilled_orders_request_shape(make_client):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return _token_response(request)
+        assert request.url.path == "/api/dostk/acnt"
+        assert request.headers["api-id"] == "ka10075"
+        assert json.loads(request.content) == {}
+        return httpx.Response(
+            200,
+            json={"return_code": 0, "return_msg": "", "oso": []},
+            headers={"cont-yn": "N", "next-key": "", "api-id": "ka10075"},
+        )
+
+    client = make_client(handler)
+    try:
+        data = await client.get_unfilled_orders()
+    finally:
+        await client.aclose()
+
+    assert data["oso"] == []

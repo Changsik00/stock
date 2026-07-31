@@ -351,6 +351,55 @@ ka90013용으로 스키마만 미리 만들어 둔 채 수집기/라우터/프�
   "하나라도 '-'가 있으면 음수"로 판정한 뒤 나머지 숫자에 부호를 적용하는
   방식으로 전담 처리한다(`_parse_minute_price`가 절대값만 반환하는 것과
   달리, 여기는 부호 자체가 의미 있는 값이라 보존해야 한다).
+
+## 주문 TR(kt10000~kt10003)/계좌 TR(kt00001, ka10075) 조사 — 실호출로 미확정
+(2026-07-31, PLAN.md §5.48, 실전 매매 최초 도입)
+
+이 프로젝트가 지금까지 다룬 모든 TR은 읽기 전용 시세/수급 조회였다. 이번에
+처음으로 실제 돈이 오가는 주문 제출 기능을 추가한다 — 사용자가 합의한 총
+예산은 5만원이고, 최초 검증은 실거래가 아니라 체결 불가능한 지정가
+주문(시세보다 훨씬 낮게 걸어 절대 체결될 수 없게 한 뒤 취소)으로 한다는
+방침이다. 아래 TR 스펙은 이번 작업에서 웹서치·GitHub 조사로만 확보했고
+아직 한 번도 실호출로 검증하지 않았다 — 이 파일의 다른 TR들(예:
+ka90013)이 "실호출로 확정"되기 전까지 거쳐온 것과 같은 미확정 상태다. 실제
+주문 전에 반드시 실호출로 재확인해야 한다.
+
+- **TR id/URL**: 주문 4종은 `/api/dostk/ordr` 아래 `kt10000`(매수주문),
+  `kt10001`(매도주문), `kt10002`(정정주문), `kt10003`(취소주문). 계좌 조회
+  2종은 `/api/dostk/acnt` 아래 `kt00001`(예수금상세현황요청, 읽기전용),
+  `ka10075`(미체결요청, 읽기전용 — 주문이 실제로 걸렸는지 취소 전에 확인하는
+  용도). 두 URL 다 웹서치로만 확인했고 이 클라이언트로 실호출한 적 없다.
+- **요청 body 필드(매수/매도)**: 서로 독립인 두 소스(실제 요청 JSON 예시가
+  실린 한국어 블로그 글 하나, openapi.kiwoom.com 공식 파라미터 문서 웹서치
+  하나)가 다음 형태에 동의했다:
+  ```json
+  {"dmst_stex_tp": "KRX", "stk_cd": "007980", "ord_qty": 1, "ord_uv": 1928, "trde_tp": "0"}
+  ```
+  `dmst_stex_tp`(거래소구분, "KRX"/"NXT"/"SOR" 중 안전한 기본값 "KRX"),
+  `stk_cd`(종목코드), `ord_qty`(주문수량, 정수), `ord_uv`(주문단가, 정수 —
+  지정가일 때만 의미), `trde_tp`(매매구분). `trde_tp` 값 자체는 두 소스
+  사이에서도 완전히 일치하지 않는다 — "0"=보통(지정가)이라는 근거와
+  "00"=지정가라는 근거가 둘 다 있었다(`ORDER_TRADE_TYPE_LIMIT` 상수로 빼
+  둔 이유). 세 번째 소스(커뮤니티 GitHub 래퍼의 예제 스크립트, 독립 검증
+  없음, 아마도 틀렸거나 희망사항)는 `acnt_no`/`acnt_prdt_cd`/`ord_dv`/
+  `orig_ord_no` 같은 전혀 다른 필드명을 썼다 — 위 두 소스가 서로 독립적으로
+  일치하므로 이쪽을 신뢰했지만, 실호출로 완전히 틀렸다고 확정된 것은 아니라는
+  점은 남겨 둔다.
+- **취소주문(kt10003)**: 원주문번호가 필요한데 정확한 JSON 키는 미확정이다
+  (후보: `orig_ord_no`). `cancel_order` 메서드의 `orig_order_no` 파라미터로
+  분리해 뒀으니, 실호출로 실제 키가 확인되면 메서드 본문 한 곳만 고치면 된다.
+- **계좌번호 필드 미확정**: 지금까지 이 클라이언트의 어떤 TR도 요청 body나
+  헤더에 계좌번호를 넣은 적이 없다(앱키/토큰으로 계좌가 암묵적으로
+  결정되는 것으로 추정). 주문 TR은 다를 수도 있다(계좌번호 필드가 필수일
+  가능성) — 이번 조사로는 확인하지 못했고, 이 프로젝트 `.env`에는 계좌번호를
+  담는 설정 키 자체가 아직 없다. 확인되지 않은 필드를 추측해서 넣지
+  않았다 — 실제 테스트에서 계좌번호가 필요하다고 드러나면 그건 이번 작업이
+  아니라 후속 수정 사항이다.
+- **안전장치**: `MAX_ORDER_NOTIONAL_KRW`(5만원) — 주문 1건의 notional(수량 x
+  단가)이 사용자가 합의한 이 기능의 총 예산을 넘지 못하게 막는 방어선.
+  `place_buy_order`/`place_sell_order`가 HTTP 호출 전에 반드시 검사한다.
+  자세한 설계 의도와 알려진 한계(누적 노출은 이 체크로 못 막음)는 상수
+  정의부 주석 참고.
 """
 
 from __future__ import annotations
@@ -391,6 +440,12 @@ TR_RESOURCE_URL: dict[str, str] = {
     "ka10065": "/api/dostk/rkinfo",  # 장중투자자별매매상위요청 (수급 상위 카드 라이브화 probe, 2026-07-21)
     "ka90009": "/api/dostk/rkinfo",  # 외국인기관매매상위요청 (수급 상위 카드 라이브화 probe, 2026-07-21)
     "ka90013": "/api/dostk/mrkcond",  # 종목일별프로그램매매추이요청 (PLAN.md §5.29, 2026-07-26 실호출 확정)
+    "kt10000": "/api/dostk/ordr",  # 매수주문 (PLAN.md §5.48, 미확정 — 실호출로 확정 필요)
+    "kt10001": "/api/dostk/ordr",  # 매도주문 (PLAN.md §5.48, 미확정 — 실호출로 확정 필요)
+    "kt10002": "/api/dostk/ordr",  # 정정주문 (PLAN.md §5.48, 미확정 — 실호출로 확정 필요, 편의 메서드 미구현)
+    "kt10003": "/api/dostk/ordr",  # 취소주문 (PLAN.md §5.48, 미확정 — 실호출로 확정 필요)
+    "kt00001": "/api/dostk/acnt",  # 예수금상세현황요청 (PLAN.md §5.48, 미확정 — 실호출로 확정 필요, 읽기전용)
+    "ka10075": "/api/dostk/acnt",  # 미체결요청 (PLAN.md §5.48, 미확정 — 실호출로 확정 필요, 읽기전용)
 }
 
 # ka10080/ka20005 tic_scope 허용값 — 2026-07-21 실호출로 8개 전부 확인(모듈
@@ -402,6 +457,28 @@ MINUTE_CHART_INTERVALS: frozenset[int] = frozenset(int(v) for v in MINUTE_CHART_
 # README 실측치: TR별 지속 1 req/s(거부 0), 버스트 약 2건.
 DEFAULT_RATE_LIMIT = 1.0
 DEFAULT_RATE_BURST = 2
+
+# 주문 매매구분(trde_tp) 기본값 — kt10000/kt10001 요청 body 필드. 두 독립 소스(한
+# 블로그의 실제 요청 body 예시, openapi.kiwoom.com 공식 파라미터 문서 웹서치)가
+# "0"=보통(지정가)에 동의했으나, 다른 자료에서는 "00"=지정가로 표기된 경우도 봤다
+# (모듈 docstring "주문 TR(kt10000~kt10003) 조사" 절 참고) — 실호출로 미확정.
+# 상수로 분리해 실제 응답을 본 뒤 한 곳만 고치면 되도록 해 둠.
+ORDER_TRADE_TYPE_LIMIT = "0"
+
+# 이 프로젝트에서 실제 돈이 오가는 첫 기능(PLAN.md §5.48) — 사용자가 명시적으로
+# 합의한 이 기능 전체의 총 예산(5만원)을 "주문 1건"에 대한 방어선으로 그대로
+# 채택한다. 목적은 버그(수량/가격 자릿수 실수, 원 단위/천원 단위 혼동, 재시도
+# 루프로 인한 중복 제출 등)로 의도치 않은 실거래가 나가는 것을 막는 것 — 정상
+# 시나리오를 제한하려는 게 아니라 "이 값을 넘으면 뭔가 잘못됐다"는 안전핀이다.
+#
+# **알려진 한계(이번 작업 범위 밖)**: 이건 "주문 1건"의 notional(ord_qty * ord_uv)만
+# 검사한다. 나중에 자동매매(auto-execution)를 만들 때는 이 사람이 합의한 5만원이
+# "총" 예산이라는 점을 지켜야 하므로, 그 계층은 이 주문 하나짜리 체크와는 별개로
+# **누적** 노출(이미 낸 주문들의 합)을 따로 추적해야 한다 — 예를 들어 4.9만원짜리
+# 주문을 10번 내면 이 체크는 매번 통과하지만 합계는 49만원이 되어 총 예산을 크게
+# 넘는다. 이 상수/체크는 그 문제를 풀지 않는다 — 자동매매 설계 시 별도로 다뤄야
+# 할 후속 작업으로 남겨 둔다.
+MAX_ORDER_NOTIONAL_KRW = 50_000
 
 # 토큰 만료 30분 전에 선제 재발급 (PLAN.md §5.4).
 TOKEN_REFRESH_MARGIN = dt.timedelta(minutes=30)
@@ -1214,6 +1291,171 @@ class KiwoomClient:
             "stex_tp": stex_tp,
         }
         return await self.call_tr("ka90009", body, cont_yn=cont_yn, next_key=next_key)
+
+    # -- 주문 (실거래, PLAN.md §5.48 — 실호출로 미확정) ----------------------------
+
+    async def place_buy_order(
+        self,
+        stock_code: str,
+        quantity: int,
+        price: int,
+        exchange: str = "KRX",
+        order_type: str = ORDER_TRADE_TYPE_LIMIT,
+    ) -> dict[str, Any]:
+        """매수주문 (kt10000) — **실호출로 미확정**(모듈 docstring "주문 TR
+        (kt10000~kt10003)/계좌 TR 조사" 절 참고). 이 클라이언트가 처음으로
+        실제 돈이 오가는 주문을 내는 메서드다.
+
+        **안전장치(우회 불가)**: HTTP 호출 전에 `quantity * price`(notional)를
+        계산해 `MAX_ORDER_NOTIONAL_KRW`(5만원, 사용자가 합의한 이 기능 전체의
+        총 예산)를 넘으면 `call_tr`을 아예 부르지 않고 `ValueError`를 던진다.
+        이 검사는 메서드 내부에 있으므로, 같은 TR을 `call_tr("kt10000", ...)`
+        으로 밖에서 직접 호출해 우회하는 경우에만 뚫린다 — 즉 주문은 항상 이
+        메서드(또는 `place_sell_order`)를 거쳐야 하고, 새로운 호출 경로를
+        추가할 때도 이 캡을 다시 구현하지 말고 반드시 이 메서드를 재사용할 것.
+
+        매도(`place_sell_order`)에는 원래 "의도치 않은 지출"이라는 이유가
+        적용되지 않지만(자산을 팔 뿐 돈을 쓰는 게 아님), 이번 최초 버전에서는
+        단순함과 대칭성을 위해 매도에도 동일한 캡을 건다 — 큰 수량을 잘못
+        입력하는 버그를 막는 효과는 있고, 성숙 단계에서 완화할 수 있다.
+
+        Args:
+            stock_code: 종목코드(예: "005930").
+            quantity: 주문수량(`ord_qty`, 정수).
+            price: 주문단가(`ord_uv`, 정수, 원). 지정가일 때만 의미가 있다.
+            exchange: 거래소구분(`dmst_stex_tp`) — "KRX"/"NXT"/"SOR" 중
+                안전한 기본값 "KRX"(2026-07-31 조사 근거, 실호출 미확정).
+            order_type: 매매구분(`trde_tp`) — 기본값 `ORDER_TRADE_TYPE_LIMIT`
+                ("0", 보통/지정가로 추정). 실호출로 값이 다르다고 밝혀지면
+                이 상수 하나만 고치면 된다(모듈 docstring 참고).
+
+        Returns:
+            `call_tr`이 반환한 응답 body dict(주문번호 등 — 실제 필드는
+            실호출 전까지 미확정).
+
+        Raises:
+            ValueError: notional이 `MAX_ORDER_NOTIONAL_KRW`를 초과할 때
+                (HTTP 호출 전에 발생 — 실제 주문이 나가지 않았음이 보장됨).
+        """
+        notional = quantity * price
+        if notional > MAX_ORDER_NOTIONAL_KRW:
+            raise ValueError(
+                f"매수 주문 notional {notional:,}원(수량 {quantity} x 단가 "
+                f"{price:,}원)이 안전 한도 {MAX_ORDER_NOTIONAL_KRW:,}원을 "
+                "초과합니다 — 이 프로젝트가 실거래에 배정한 총 예산을 지키기 "
+                "위한 하드 캡입니다(모듈 상수 MAX_ORDER_NOTIONAL_KRW 정의부 "
+                "주석 참고). 수량/단가 단위를 다시 확인하세요."
+            )
+        body = {
+            "dmst_stex_tp": exchange,
+            "stk_cd": stock_code,
+            "ord_qty": quantity,
+            "ord_uv": price,
+            "trde_tp": order_type,
+        }
+        data, _ = await self.call_tr("kt10000", body)
+        return data
+
+    async def place_sell_order(
+        self,
+        stock_code: str,
+        quantity: int,
+        price: int,
+        exchange: str = "KRX",
+        order_type: str = ORDER_TRADE_TYPE_LIMIT,
+    ) -> dict[str, Any]:
+        """매도주문 (kt10001) — **실호출로 미확정**(요청 body 형태는
+        `place_buy_order`와 동일, 모듈 docstring "주문 TR" 절 참고).
+
+        `place_buy_order`와 동일한 `MAX_ORDER_NOTIONAL_KRW` notional 캡을
+        건다 — 매도는 원래 "돈을 쓴다"는 의미의 캡이 필요 없지만(자산을 팔 뿐),
+        이번 최초 버전은 단순함/대칭성을 위해 매수와 동일한 방어선을 그대로
+        적용하는 의도적 단순화다(잘못된 대량 수량 매도를 막는 부수 효과는
+        있음). 기능이 성숙하면 완화될 수 있다.
+
+        Args/Returns/Raises: `place_buy_order` 참고(캡 초과 시 HTTP 호출 전에
+        `ValueError`).
+        """
+        notional = quantity * price
+        if notional > MAX_ORDER_NOTIONAL_KRW:
+            raise ValueError(
+                f"매도 주문 notional {notional:,}원(수량 {quantity} x 단가 "
+                f"{price:,}원)이 안전 한도 {MAX_ORDER_NOTIONAL_KRW:,}원을 "
+                "초과합니다 — 매수와 동일한 하드 캡을 매도에도 적용한다(모듈 "
+                "상수 MAX_ORDER_NOTIONAL_KRW 정의부 주석 참고). 수량/단가 "
+                "단위를 다시 확인하세요."
+            )
+        body = {
+            "dmst_stex_tp": exchange,
+            "stk_cd": stock_code,
+            "ord_qty": quantity,
+            "ord_uv": price,
+            "trde_tp": order_type,
+        }
+        data, _ = await self.call_tr("kt10001", body)
+        return data
+
+    async def cancel_order(
+        self,
+        stock_code: str,
+        orig_order_no: str,
+        quantity: int,
+        exchange: str = "KRX",
+    ) -> dict[str, Any]:
+        """취소주문 (kt10003) — **실호출로 미확정**. 자금 노출을 새로 만들지
+        않는(오히려 없애는) 동작이라 `MAX_ORDER_NOTIONAL_KRW` 캡은 걸지 않는다.
+
+        원주문번호의 정확한 요청 JSON 키는 미확정이다(후보: `orig_ord_no` —
+        모듈 docstring "주문 TR" 절 참고). 실호출로 실제 키가 다르다고
+        밝혀지면 아래 `body` dict 한 곳만 고치면 되도록 `orig_order_no`를
+        별도 named parameter로 분리해 뒀다.
+
+        Args:
+            stock_code: 종목코드.
+            orig_order_no: 취소 대상 원주문번호(주문 시 응답으로 받은 값).
+            quantity: 취소수량.
+            exchange: 거래소구분 — 기본값 "KRX"(주문 메서드들과 동일 관례).
+
+        Returns:
+            `call_tr`이 반환한 응답 body dict.
+        """
+        body = {
+            "dmst_stex_tp": exchange,
+            "stk_cd": stock_code,
+            "orig_ord_no": orig_order_no,
+            "ord_qty": quantity,
+        }
+        data, _ = await self.call_tr("kt10003", body)
+        return data
+
+    async def get_deposit_detail(self) -> dict[str, Any]:
+        """예수금상세현황요청 (kt00001) — **읽기전용**, 실호출로 미확정.
+
+        주문을 전혀 내지 않는 조회 TR이라 완전히 안전하다 — 실제 첫 주문
+        전에 잔고/증거금을 확인하는 용도로 쓴다. 요청 파라미터가 정확히
+        무엇을 요구하는지 실호출로 확인하지 못해 일단 빈 body로 호출한다
+        (다른 TR 중 파라미터 없이 호출하는 기존 선례가 없어, 실호출 결과
+        400/파라미터 누락 오류가 나면 이 메서드를 조정해야 한다).
+
+        Returns:
+            `call_tr`이 반환한 응답 body dict.
+        """
+        data, _ = await self.call_tr("kt00001", {})
+        return data
+
+    async def get_unfilled_orders(self) -> dict[str, Any]:
+        """미체결요청 (ka10075) — **읽기전용**, 실호출로 미확정.
+
+        `place_buy_order`/`place_sell_order`로 낸 주문이 실제로 서버에
+        걸렸는지 취소 전에 확인하는 용도(비체결 지정가 주문 검증 절차).
+        `get_deposit_detail`과 마찬가지로 파라미터 요구사항이 미확정이라
+        일단 빈 body로 호출한다.
+
+        Returns:
+            `call_tr`이 반환한 응답 body dict.
+        """
+        data, _ = await self.call_tr("ka10075", {})
+        return data
 
 
 # -- ka10080/ka20005 공통 분봉 응답 파싱 -------------------------------------------
