@@ -791,6 +791,38 @@ async def test_get_deposit_detail_request_shape(make_client):
     assert data["entr"] == "100000"
 
 
+async def test_stock_quote_request_shape(make_client):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return _token_response(request)
+        assert request.url.path == "/api/dostk/mrkcond"
+        assert request.headers["api-id"] == "ka10004"
+        assert json.loads(request.content) == {"stk_cd": "005930"}
+        return httpx.Response(
+            200,
+            json={
+                "return_code": 0,
+                "return_msg": "",
+                "sel_fpr_bid": "+71100",
+                "buy_fpr_bid": "+71000",
+                "tot_sel_req": "1000",
+                "tot_buy_req": "2000",
+            },
+            headers={"cont-yn": "N", "next-key": "", "api-id": "ka10004"},
+        )
+
+    client = make_client(handler)
+    try:
+        data = await client.stock_quote("005930")
+    finally:
+        await client.aclose()
+
+    assert data["sel_fpr_bid"] == "+71100"
+    assert data["buy_fpr_bid"] == "+71000"
+    assert data["tot_sel_req"] == "1000"
+    assert data["tot_buy_req"] == "2000"
+
+
 async def test_get_unfilled_orders_request_shape(make_client):
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/oauth2/token":

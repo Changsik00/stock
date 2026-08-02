@@ -400,6 +400,37 @@ ka90013)이 "실호출로 확정"되기 전까지 거쳐온 것과 같은 미확
   `place_buy_order`/`place_sell_order`가 HTTP 호출 전에 반드시 검사한다.
   자세한 설계 의도와 알려진 한계(누적 노출은 이 체크로 못 막음)는 상수
   정의부 주석 참고.
+
+## 주식호가요청(ka10004) 조사 — 실호출로 미확정
+
+(2026-08-02) 매수/매도 주문 전에 현재가 근처 매물대(호가 잔량)를 확인하고
+싶다는 요청에 따라 추가. 출처는 GitHub `Kiwoom-Securities/Kiwoom-REST-API`
+(homepage가 openapi.kiwoom.com과 일치해 공식으로 보이는 조직) 저장소의
+`kiwoom_docs/시세.md`, commit `69642586f7d84ba9fd8a6faf1f1537c7fda6568b` —
+이 클라이언트가 지금까지 실호출로 확정해 온 다른 TR들과 달리, 이번 것도
+kt10000류와 마찬가지로 웹서치/GitHub 조사만으로 확보했고 아직 실호출로
+검증하지 않았다.
+
+- **URL**: `/api/dostk/mrkcond` — 기존 `TR_RESOURCE_URL`의 `ka10063`/
+  `ka10066`/`ka90013`과 같은 카테고리라 URL 자체의 신뢰도는 상대적으로
+  높다고 판단했다.
+- **요청 body**: `{"stk_cd": "005930"}` — 종목코드 하나만.
+- **응답 body**: 전부 String 타입. 매도/매수 각 10단계 호가·잔량·직전대비가
+  대칭 구조로 온다 — 단, 1단계만 접두사가 다르다(최우선호가라 실제 응답
+  예시에 그렇게 나와 있음): 매도 1단계는 `sel_fpr_bid`/`sel_fpr_req`/
+  `sel_1th_pre_req_pre`, 매수 1단계는 `buy_fpr_bid`/`buy_fpr_req`/
+  `buy_1th_pre_req_pre`. 2~10단계는 `sel_{N}th_pre_bid`/`sel_{N}th_pre_req`/
+  `sel_{N}th_pre_req_pre`(매도), `buy_{N}th_pre_bid`/`buy_{N}th_pre_req`/
+  `buy_{N}th_pre_req_pre`(매수)로 규칙적이다. 그 외 `bid_req_base_tm`(호가
+  시간), 총잔량(`tot_sel_req`/`tot_sel_req_jub_pre`/`tot_buy_req`/
+  `tot_buy_req_jub_pre`), 시간외 잔량(`ovt_sel_req`/`ovt_sel_req_pre`/
+  `ovt_buy_req`/`ovt_buy_req_pre`)이 있다. 이 파일의 다른 TR들처럼 값에
+  부호가 두 번 겹치는 케이스가 있을 수 있으나, 이번 작업에서는 파싱하지
+  않고 `call_tr` 응답을 원본 그대로 반환한다(`get_deposit_detail`/
+  `get_unfilled_orders`/`stock_info`와 동일한 관례) — 파싱/부호 처리는
+  호출측 책임.
+- **안전장치 불필요**: 읽기 전용 조회라 `place_buy_order`류의
+  `MAX_ORDER_NOTIONAL_KRW` 같은 방어선이 필요 없다.
 """
 
 from __future__ import annotations
@@ -446,6 +477,7 @@ TR_RESOURCE_URL: dict[str, str] = {
     "kt10003": "/api/dostk/ordr",  # 취소주문 (PLAN.md §5.48, 미확정 — 실호출로 확정 필요)
     "kt00001": "/api/dostk/acnt",  # 예수금상세현황요청 (PLAN.md §5.48, 미확정 — 실호출로 확정 필요, 읽기전용)
     "ka10075": "/api/dostk/acnt",  # 미체결요청 (PLAN.md §5.48, 미확정 — 실호출로 확정 필요, 읽기전용)
+    "ka10004": "/api/dostk/mrkcond",  # 주식호가요청 (매물대 확인, 미확정 — 실호출로 확정 필요)
 }
 
 # ka10080/ka20005 tic_scope 허용값 — 2026-07-21 실호출로 8개 전부 확인(모듈
@@ -856,6 +888,23 @@ class KiwoomClient:
     async def stock_info(self, code: str) -> dict[str, Any]:
         """종목기본정보요청 (ka10001). `code`: 거래소별 종목코드(예: "005930")."""
         data, _ = await self.call_tr("ka10001", {"stk_cd": code})
+        return data
+
+    async def stock_quote(self, code: str) -> dict[str, Any]:
+        """주식호가요청 (ka10004) — **실호출로 미확정**(모듈 docstring "주식호가요청(ka10004) 조사" 절 참고).
+
+        매수/매도 주문 전에 현재가 근처 매물대(호가 잔량)를 확인하는 용도.
+        읽기 전용 조회라 place_buy_order류의 notional 캡은 필요 없다.
+
+        Args:
+            code: 종목코드(예: "005930").
+
+        Returns:
+            `call_tr`이 반환한 응답 body dict 그대로(매도/매수 각 10단계 호가·잔량,
+            총잔량, 시간외 잔량 등 — 필드 상세는 모듈 docstring 참고). 부호/파싱은
+            호출측 책임(이 파일의 다른 조회 메서드와 동일한 관례).
+        """
+        data, _ = await self.call_tr("ka10004", {"stk_cd": code})
         return data
 
     async def stock_investor_daily(
