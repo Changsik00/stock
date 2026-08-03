@@ -2918,8 +2918,38 @@ ETF/ETN 18종(ETF 16 + ETN 2, KODEX/TIGER/ACE/RISE/PLUS/KIWOOM/1Q/SOL 8개 운�
 | 5.50-5 ✅ | 나스닥선물 참고 타일 | 5.50-1에서 확정한 yfinance `NQ=F` 인트라데이로 최신값 + 갱신 시각 표시(판단 문구 없이 숫자만). SOX는 기존 EOD 타일 그대로 재사용 | ✅ 완료(2026-08-03) — `GET /api/markets/nasdaq-futures/live`(5분 캐시), `HynixPositioningModal` ②구획의 자리표시자 문구를 실데이터로 교체. 실데이터 확인(5분봉 44개, latest_change_pct -0.03%) |
 | 5.50-4 | 개별주식선물 표시 | **보류** — 5.50-1에서 무료 시세 소스를 못 찾음. 소스가 확정되기 전까지 이 작업은 시작하지 않는다 | (보류) |
 
-**후속(이번 범위 밖)**: 가상 매매 기록(진입가/수량/청산가 → 손익 추적)은 이 통합 뷰가 자리잡은
-뒤 별도 Phase로 설계한다.
+### Phase 5.51 — 가상 매매 기록(paper trade 장부) 설계 (2026-08-03)
+
+§5.50 통합 뷰(호가·괴리율·선물·SOX)가 자리잡았으니, 사용자가 그 재료를 보고 스스로
+내린 진입/청산 판단을 **기록**하는 장부를 추가한다. **이 장부는 매매 실행이 아니다** —
+`place_buy_order`/`place_sell_order`(§5.48, kt10000/kt10001, 여전히 실호출 미검증)를
+전혀 호출하지 않는다. 사용자가 이미 내린 결정을 진입가/수량/청산가로 기록해 손익만
+계산해 주는 순수 로컬 장부이며, 여기서도 "판단/추천"은 만들지 않는다(house rule) —
+이미 벌어진 사실(기록된 가격)만 다룬다.
+
+**대상 종목**: §5.50 `PAIR_SETS`의 6개 코드(005930/000660/0193W0/0193T0/0193L0/0197X0)로
+한정한다 — 이 프로젝트에 라이브 가격을 안정적으로 가져올 수 있는 종목이 지금은 이
+6개뿐이라, 범용 "아무 종목이나 기록" 장부로 확장하지 않는다(필요해지면 후속 확장).
+
+**설계**:
+- 신규 테이블 `paper_trade`(id, code, name, side("buy"=롱/"sell"=숏), entry_price,
+  entry_qty, entry_at, exit_price, exit_at, status("open"/"closed"), note, created_at).
+- `POST /api/paper-trades` — 진입 기록(entry_at=서버 now). `POST /api/paper-trades/{id}/close`
+  — 청산가 기록(exit_at=서버 now, status→closed). `DELETE /api/paper-trades/{id}` — 오기록
+  삭제(사람이 손으로 입력하는 장부라 오타 정정 수단 필요). `GET /api/paper-trades?status=`
+  — 목록, open 포지션은 `_get_live_price(code)`(§5.50-2의 `_warm_stock_intraday`/
+  `_warm_etf_nav` 재사용, 신규 TR 없음)로 현재가·미실현 손익까지 계산해 붙인다.
+- pnl 공식: side="buy"(롱) → `(기준가-entry_price)*qty`, side="sell"(숏) →
+  `(entry_price-기준가)*qty` (기준가=청산가 또는 현재가). `%`는 `pnl/(entry_price*qty)*100`.
+- 프런트: "가상 매매 기록" 진입 타일 → 진입 폼(종목 선택/방향/가격/수량/메모) + 포지션
+  목록(열린 포지션엔 현재가·미실현손익, 닫힌 포지션엔 실현손익) 모달. 고정 안내 문구
+  "이 기록은 참고용 장부이며 매매 신호가 아닙니다."
+
+| # | 작업 | 내용 | 완료 기준 |
+|---|---|---|---|
+| 5.51-1 | `paper_trade` 테이블 + 마이그레이션 | `models.py`에 모델 추가, alembic revision 작성·적용 | `alembic upgrade head` 성공 |
+| 5.51-2 | CRUD 라우터 | `routers/paper_trades.py` 신규 — POST(생성)/POST .../close(청산)/DELETE/GET(목록+손익 계산) | 단위테스트(pnl 계산 롱/숏 각각, 404/409 케이스) |
+| 5.51-3 | 프런트 진입 폼 + 목록 모달 | 진입 타일 + 폼 + 열린/닫힌 포지션 목록, 손익 색상(rateClass 재사용) | 실 컨테이너에서 기록→조회→청산 전체 흐름 확인, vite build 클린 |
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
