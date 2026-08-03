@@ -2947,9 +2947,9 @@ ETF/ETN 18종(ETF 16 + ETN 2, KODEX/TIGER/ACE/RISE/PLUS/KIWOOM/1Q/SOL 8개 운�
 
 | # | 작업 | 내용 | 완료 기준 |
 |---|---|---|---|
-| 5.51-1 | `paper_trade` 테이블 + 마이그레이션 | `models.py`에 모델 추가, alembic revision 작성·적용 | `alembic upgrade head` 성공 |
-| 5.51-2 | CRUD 라우터 | `routers/paper_trades.py` 신규 — POST(생성)/POST .../close(청산)/DELETE/GET(목록+손익 계산) | 단위테스트(pnl 계산 롱/숏 각각, 404/409 케이스) |
-| 5.51-3 | 프런트 진입 폼 + 목록 모달 | 진입 타일 + 폼 + 열린/닫힌 포지션 목록, 손익 색상(rateClass 재사용) | 실 컨테이너에서 기록→조회→청산 전체 흐름 확인, vite build 클린 |
+| 5.51-1 ✅ | `paper_trade` 테이블 + 마이그레이션 | `models.py`에 모델 추가, alembic revision 작성·적용 | ✅ 완료(2026-08-03) — `alembic upgrade head` 성공, 컨테이너 DB에 테이블 생성 확인 |
+| 5.51-2 ✅ | CRUD 라우터 | `routers/paper_trades.py` 신규 — POST(생성)/POST .../close(청산)/DELETE/GET(목록+손익 계산) | ✅ 완료(2026-08-03) — 단위테스트 15개(롱/숏 pnl 부호, 404/409/400 케이스, ETF NAV 경로), `place_buy_order`/`place_sell_order` 미참조 확인, pytest 748개 통과 |
+| 5.51-3 ✅ | 프런트 진입 폼 + 목록 모달 | 진입 타일 + 폼 + 열린/닫힌 포지션 목록, 손익 색상(rateClass 재사용) | ✅ 완료(2026-08-03) — `PaperTradeModal`. 실 컨테이너 curl로 생성→목록(현재가 포함)→청산(실현손익 부호 확인)→중복청산 409→삭제 204→삭제후청산 404 전체 흐름 확인, vite build 클린 |
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 

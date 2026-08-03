@@ -8,6 +8,40 @@ async function getJson(url) {
   return body
 }
 
+// getJson과 대칭되는 POST/DELETE 헬퍼(PLAN.md §5.51에서 처음 필요해진 패턴 — 이
+// 프로젝트 대부분의 엔드포인트는 조회 전용이라 지금까지 getJson만으로 충분했다).
+// POST는 응답 바디가 있는 라우터(생성/청산 기록)에, DELETE는 204(바디 없음)에 맞춰
+// 응답이 비어 있으면 파싱하지 않는다.
+async function postJson(url, body) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const text = await res.text()
+  const parsed = text ? JSON.parse(text) : null
+  if (!res.ok) {
+    const detail = typeof parsed?.detail === 'string' ? parsed.detail : JSON.stringify(parsed?.detail)
+    throw new Error(detail || `요청 실패 (${res.status})`)
+  }
+  return parsed
+}
+
+async function deleteJson(url) {
+  const res = await fetch(url, { method: 'DELETE' })
+  if (!res.ok) {
+    const text = await res.text()
+    let detail = text
+    try {
+      const parsed = JSON.parse(text)
+      detail = typeof parsed?.detail === 'string' ? parsed.detail : JSON.stringify(parsed?.detail)
+    } catch {
+      // 응답이 JSON이 아니면(빈 바디 등) 원문 텍스트를 그대로 쓴다.
+    }
+    throw new Error(detail || `요청 실패 (${res.status})`)
+  }
+}
+
 // GitHub Pages 정적 배포 모드 — VITE_STATIC_DATA=1로 빌드하면 /api/* 대신
 // public/data/*.json 스냅샷을 fetch해서 클라이언트에서 슬라이싱한다. 스냅샷은
 // 항상 최대 1095일 창을 담고 있으므로 (수집 스크립트, PLAN.md 참고) 요청받은
@@ -556,4 +590,39 @@ export async function fetchMacroSeries(ids, days) {
     return { days, series }
   }
   return getJson(`/api/macro/series?ids=${idParam}&days=${days}`)
+}
+
+// -- 가상 매매 기록(paper trade) 장부 (PLAN.md §5.51) — §5.50 통합 뷰(호가·ETF
+// 괴리율·나스닥선물)를 보고 사용자가 직접 내린 진입/청산 판단을 기록만 하는 순수
+// 로컬 장부. **실제 주문을 내지 않는다** — 백엔드가 kt10000/kt10001을 호출하지
+// 않는다. 대상 종목은 §5.50 PAIR_SETS 6개 코드로 한정(백엔드가 그 외는 400).
+// 로컬 전용 기능, STATIC_DATA 대상 아님.
+
+// POST /api/paper-trades { code, side, entry_price, entry_qty, note? } -> 생성된 행
+// { id, code, name, side, entry_price, entry_qty, entry_at, exit_price: null,
+// exit_at: null, status: "open", note, current_price: null, unrealized_pnl: null,
+// unrealized_pnl_pct: null, realized_pnl: null, realized_pnl_pct: null }.
+export async function createPaperTrade(payload) {
+  return postJson('/api/paper-trades', payload)
+}
+
+// POST /api/paper-trades/{id}/close { exit_price } -> 갱신된 행(status: "closed",
+// exit_price/exit_at 채워짐, realized_pnl/realized_pnl_pct 계산됨). id 없으면 404,
+// 이미 closed면 409(호출부에서 에러 메시지로 노출).
+export async function closePaperTrade(id, exitPrice) {
+  return postJson(`/api/paper-trades/${id}/close`, { exit_price: exitPrice })
+}
+
+// DELETE /api/paper-trades/{id} -> 204(바디 없음). 오기록 정정용 — id 없으면 404.
+export async function deletePaperTrade(id) {
+  return deleteJson(`/api/paper-trades/${id}`)
+}
+
+// GET /api/paper-trades?status=open|closed|all(기본 all) -> { status, rows: [{id,
+// code, name, side, entry_price, entry_qty, entry_at, exit_price, exit_at, status,
+// note, current_price, unrealized_pnl, unrealized_pnl_pct, realized_pnl,
+// realized_pnl_pct}, ...] } — entry_at 내림차순. open 행은 현재가/미실현손익이
+// 채워지고(가격 조회 실패 시 셋 다 null), closed 행은 실현손익이 채워진다.
+export async function fetchPaperTrades(status = 'all') {
+  return getJson(`/api/paper-trades?status=${status}`)
 }

@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .routers import admin, basis, etf, flow_rank, groups, macro, markets, scalp, stocks
+from .routers import admin, basis, etf, flow_rank, groups, macro, markets, paper_trades, scalp, stocks
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -61,6 +61,7 @@ app.include_router(flow_rank.router)
 app.include_router(groups.router)
 app.include_router(admin.router)
 app.include_router(scalp.router)
+app.include_router(paper_trades.router)
 
 
 @app.get("/api/health")
