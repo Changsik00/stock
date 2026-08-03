@@ -173,17 +173,27 @@ def _clear_overrides():
     app.dependency_overrides.clear()
 
 
-def _fake_confirmed(prev_close_by_market: dict):
+def _fake_confirmed(prev_close_by_market: dict, date: str = "20260718"):
     """get_market_series_from_db monkeypatch — 장 마감/실패 폴백(`_index_tile_confirmed`)
-    전용. 라이브 경로의 prev_close(`_index_tile_prev_close`)는 이걸 거치지 않는다."""
+    전용. 라이브 경로의 prev_close(`_index_tile_prev_close`)는 이걸 거치지 않는다.
+
+    `date`(기본 "20260718", 항상 "오늘"이 아닌 옛날 날짜) — 2026-08-03 버그 수정
+    (`_warm_index_tiles_live` 주석 참고)으로 장 마감 시에도 확정치 날짜가 오늘이
+    아니면 라이브를 한 번 더 시도하므로, "장 마감이면 라이브를 절대 안 부른다"를
+    검증하려는 테스트는 반드시 이 값을 오늘 날짜로 넘겨야 한다(그래야 확정치가
+    이미 신선하다고 판단해 라이브 재시도 분기를 타지 않는다)."""
 
     async def fake_get_market_series_from_db(session, market, days):
         prev = prev_close_by_market.get(market)
         if prev is None:
             return []
-        return [{"date": "20260718", "close": prev, "changeRate": -0.5}]
+        return [{"date": date, "close": prev, "changeRate": -0.5}]
 
     return fake_get_market_series_from_db
+
+
+def _today_kst_str() -> str:
+    return dt.datetime.now(markets.KST).strftime("%Y%m%d")
 
 
 async def test_index_tiles_live_returns_three_markets(monkeypatch):
@@ -304,15 +314,90 @@ async def test_index_tiles_live_falls_back_to_confirmed_on_intraday_failure(monk
 
 
 async def test_index_tiles_live_market_closed_skips_external_calls(monkeypatch):
+    """장 마감 + 확정치가 이미 오늘 날짜면(그날 배치가 이미 돌았음) 라이브를
+    다시 시도하지 않는다 — 2026-08-03 버그 수정으로 "확정치가 오늘 날짜가
+    아닐 때만" 라이브를 재시도하므로, 이 케이스(확정치=오늘)는 여전히 라이브를
+    안 불러야 한다(`_warm_index_tiles_live` 주석 참고)."""
     monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: True)
 
     def _raise(*args, **kwargs):  # pragma: no cover - 불리면 안 됨
-        raise AssertionError("KiwoomClient should not be constructed when market is closed")
+        raise AssertionError("KiwoomClient should not be constructed when confirmed data is already today's")
 
     markets.KiwoomClient = _raise
 
     def _raise_futures(*args, **kwargs):  # pragma: no cover - 불리면 안 됨
-        raise AssertionError("naver_index should not be called when market is closed")
+        raise AssertionError("naver_index should not be called when confirmed data is already today's")
+
+    monkeypatch.setattr(markets, "_fetch_futures_today_blocking", _raise_futures)
+    monkeypatch.setattr(
+        markets,
+        "get_market_series_from_db",
+        _fake_confirmed({"kospi": 3000.0, "kosdaq": 800.0, "futures": 400.0}, date=_today_kst_str()),
+    )
+    app.dependency_overrides[get_session] = _unused_session
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/index-tiles/live")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["market_closed"] is True
+    assert body["kospi"]["source"] == "index_ohlcv_confirmed"
+    assert body["kospi"]["close"] == 3000.0
+    assert body["futures"]["close"] == 400.0
+
+
+async def test_index_tiles_live_market_closed_retries_live_when_confirmed_is_stale(monkeypatch):
+    """2026-08-03 버그 수정 — 사용자 지적("장 마감 이후인데 며칠 전(31일) 정보가
+    나온다"). 장 마감 + 확정치가 오늘 날짜가 아니면(그날 18:00 배치가 아직 안
+    돎) 곧바로 옛 확정치로 폴백하지 않고 라이브를 한 번 더 시도해야 한다 —
+    라이브가 성공하면 응답의 날짜가 "오늘"이어야 한다(옛 확정치의 close/date를
+    그대로 보여주면 회귀)."""
+    monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: True)
+    markets.KiwoomClient = _make_fake_kiwoom_client(_sector_response("+305000"))
+
+    def fake_futures_fetch(start, end):
+        return [
+            {"date": dt.date(2026, 7, 21), "open": 402.0, "high": 410.0, "low": 400.0, "close": 408.0, "volume": 12},
+        ]
+
+    monkeypatch.setattr(markets, "_fetch_futures_today_blocking", fake_futures_fetch)
+    # 확정치는 옛날 날짜(기본값 "20260718")로 남겨 둔다 — 배치가 아직 안 돈 상태를
+    # 재현. 라이브가 성공하면 이 확정치는 아예 쓰이지 않아야 한다.
+    monkeypatch.setattr(
+        markets,
+        "get_market_series_from_db",
+        _fake_confirmed({"kospi": 3000.0, "kosdaq": 800.0, "futures": 400.0}),
+    )
+    app.dependency_overrides[get_session] = _prev_close_session(3000.0, 800.0, 400.0)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/index-tiles/live")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["market_closed"] is True
+    # 라이브 경로로 채워졌어야 한다 — 옛 확정치("index_ohlcv_confirmed", close=3000.0)가
+    # 아니라 오늘 라이브 값(스케일 보정 3050.0)이어야 한다.
+    assert body["kospi"]["source"] == "kiwoom_ka20005_1m"
+    assert body["kospi"]["close"] == 3050.0
+    assert body["futures"]["source"] == "naver_fchart_today_bar"
+    assert body["futures"]["close"] == 408.0
+
+
+async def test_index_tiles_live_market_closed_stale_confirmed_falls_back_when_live_also_fails(monkeypatch):
+    """확정치도 옛날 날짜고 라이브 재시도도 실패하면(예: 정말 휴장일이라 오늘치
+    데이터가 아예 없음) 마지막 안전망으로 옛 확정치를 그대로 보여준다 — 502가
+    아니라 최선의 근사치."""
+    monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: True)
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("kiwoom boom")
+
+    markets.KiwoomClient = _raise
+
+    def _raise_futures(*args, **kwargs):
+        raise RuntimeError("naver boom")
 
     monkeypatch.setattr(markets, "_fetch_futures_today_blocking", _raise_futures)
     monkeypatch.setattr(
@@ -327,10 +412,8 @@ async def test_index_tiles_live_market_closed_skips_external_calls(monkeypatch):
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["market_closed"] is True
     assert body["kospi"]["source"] == "index_ohlcv_confirmed"
     assert body["kospi"]["close"] == 3000.0
-    assert body["futures"]["close"] == 400.0
 
 
 async def test_index_tiles_live_no_db_data_returns_none_not_error(monkeypatch):
@@ -397,13 +480,13 @@ async def test_index_tiles_live_risk_is_null_when_market_closed(monkeypatch):
     monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: True)
 
     def _raise(*args, **kwargs):  # pragma: no cover
-        raise AssertionError("KiwoomClient should not be constructed when market is closed")
+        raise AssertionError("KiwoomClient should not be constructed when confirmed data is already today's")
 
     markets.KiwoomClient = _raise
     monkeypatch.setattr(
         markets,
         "get_market_series_from_db",
-        _fake_confirmed({"kospi": 3000.0, "kosdaq": 800.0, "futures": 400.0}),
+        _fake_confirmed({"kospi": 3000.0, "kosdaq": 800.0, "futures": 400.0}, date=_today_kst_str()),
     )
     app.dependency_overrides[get_session] = _unused_session
 

@@ -1708,8 +1708,35 @@ async def _warm_index_tiles_live(session: AsyncSession) -> dict:
                     flow_accelerations[market][investor] = await flow_acceleration.compute_flow_acceleration(
                         session, series_key, now_kst
                     )
+        else:
+            # 2026-08-03 버그 수정(사용자 지적 — "장 마감 이후인데 며칠 전(31일)
+            # 정보가 나온다"): 정규장(15:30)은 끝났지만 그날 18:00 배치가 아직
+            # 안 돌았으면 index_ohlcv 확정치는 여전히 그 이전 거래일이다(주말이
+            # 끼면 최대 사흘 전 데이터로 보임). 라이브 소스(ka20005 분봉/
+            # naver_index 일봉)는 정규장 마감 뒤에도 그날 마지막 봉을 그대로
+            # 갖고 있음을 실측 확인했다(16:08 KST 재호출해도 15:30 종가 봉이
+            # 그대로 마지막 — NXT 연장 데이터가 섞여 들어오지 않는다는 뜻이기도
+            # 해 지수 타일의 "정규장 종가" 의미도 그대로 유지된다). 그래서 DB
+            # 확정치가 아직 오늘 날짜가 아닌 시장에 한해 라이브를 한 번 더
+            # 시도한다 — 확정치가 이미 오늘 날짜면(배치가 이미 돌았음) 라이브를
+            # 다시 부르지 않는다. 이 분기는 scheduler의 nxt_closed 게이트(밤/
+            # 주말엔 이 함수 자체가 호출되지 않음, collectors/live_refresh.py
+            # 참고) 안에서만 실행되므로 새벽에 쓸데없이 반복 호출될 걱정은 없다.
+            today_str = now_kst.strftime("%Y%m%d")
+            for market in ("kospi", "kosdaq", "futures"):
+                confirmed_now = await _index_tile_confirmed(session, market)
+                if confirmed_now and confirmed_now["date"] == today_str:
+                    result[market] = confirmed_now
 
-        # 장 마감이거나 라이브 호출이 실패한 시장만 DB 확정치로 채운다.
+            if result["kospi"] is None:
+                result["kospi"] = await _index_tile_from_intraday(session, "kospi")
+            if result["kosdaq"] is None:
+                result["kosdaq"] = await _index_tile_from_intraday(session, "kosdaq")
+            if result["futures"] is None:
+                result["futures"] = await _index_tile_futures_live(session)
+
+        # 장 마감 중 라이브 재시도가 없었거나(위 분기 밖) 재시도도 실패한 시장만
+        # (오늘 날짜가 아니어도) DB 확정치로 최종 폴백한다.
         for market in ("kospi", "kosdaq", "futures"):
             if result.get(market) is None:
                 result[market] = await _index_tile_confirmed(session, market)
