@@ -18,6 +18,11 @@
    후보 추적 기록(신규 진입 + 호라이즌/EOD change_rate 채우기)을 DB(scalp_pick
    테이블)에 남긴다 — 새 외부 호출 없이 이미 워밍된 attention/value-rank
    캐시만 재사용한다(collectors/scalp_tracker.py 모듈 docstring 참고).
+   **2026-08-03 추가(PLAN.md §5.52)**: 바로 이어서 `collectors/positioning_
+   snapshot.track_positioning_snapshot`도 호출해 §5.50 포지셔닝 프레임(하이닉스
+   중심)의 하루 1회 사후 검증 스냅샷을 DB(positioning_snapshot 테이블)에
+   남긴다 — 마찬가지로 새 외부 호출 없이 이미 워밍된 §5.50/§5.15 warm 함수만
+   재사용한다(collectors/positioning_snapshot.py 모듈 docstring 참고).
 2. ``live_refresh_extra``(7분, PLAN.md §4.7 3단 갱신 주기): value-rank/live
    1개만 채운다 — 코스피+코스닥 전 종목 페이지네이션(~44콜, 15~30초 소요)이라
    진짜로 비싼 유일한 소스다(수급 상위/flow-rank는 장중 실측 결과 소스 자체가
@@ -144,7 +149,7 @@ async def _run_live_refresh() -> None:
     from ..routers import basis as basis_router
     from ..routers import groups as groups_router
     from ..routers import markets
-    from . import intraday_snapshot, scalp_tracker
+    from . import intraday_snapshot, positioning_snapshot, scalp_tracker
 
     if nxt_closed:
         logger.debug(
@@ -235,6 +240,18 @@ async def _run_live_refresh() -> None:
             logger.debug("live-refresh: scalp-tracker %s", tracker_result)
         except Exception as e:  # noqa: BLE001
             logger.warning("live-refresh: scalp-tracker 실패: %s", e)
+
+        # PLAN.md §5.52 — §5.50 포지셔닝 프레임 사후 검증 스냅샷(하루 1회 기록 +
+        # same_day/next_day 2단계 채우기). 위 scalp-tracker와 완전히 동일한 이유로
+        # nxt_closed 분기 밖에서 호출한다 — 새 외부 API 호출이 전혀 없고(이미
+        # 워밍된 §5.50/§5.15 warm 함수만 재사용), "NXT 마감 직후 첫 폴링에
+        # same_day를 채운다"는 요구가 오히려 이 게이트 밖에서 실행돼야 충족된다
+        # (collectors/positioning_snapshot.py 모듈 docstring "스케줄링 배선" 참고).
+        try:
+            positioning_result = await positioning_snapshot.track_positioning_snapshot(session, now_kst)
+            logger.debug("live-refresh: positioning-snapshot %s", positioning_result)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("live-refresh: positioning-snapshot 실패: %s", e)
 
 
 async def _run_live_refresh_extra() -> None:

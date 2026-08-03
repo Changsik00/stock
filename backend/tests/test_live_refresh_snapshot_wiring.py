@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.collectors import intraday_snapshot, live_refresh, scalp_tracker
+from app.collectors import intraday_snapshot, live_refresh, positioning_snapshot, scalp_tracker
 from app.routers import markets
 
 FLOW_PAYLOAD = {"kospi": None, "kosdaq": None, "market_closed": False, "cached_at": "x"}
@@ -36,10 +36,23 @@ def _force_market_open(monkeypatch):
     # test_scalp_tracker.py가 전담하므로, 여기서는 no-op으로 막아 이 파일의
     # 단언들이 scalp-tracker의 부수효과(추가 DB 쿼리 등)에 영향받지 않게 한다.
     monkeypatch.setattr(scalp_tracker, "track_scalp_picks", _async_return_dict)
+    # PLAN.md §5.52 — positioning-snapshot도 §5.7 scalp-tracker와 완전히 같은
+    # 이유로 no-op 처리한다: 실제 동작(스냅샷 기록/same_day/next_day 채우기)은
+    # test_positioning_snapshot.py가 전담하고, 이 파일은 "워밍 결과가
+    # intraday_snapshot recorder로 그대로 흘러가는지"만 본다 — 막지 않으면
+    # positioning_snapshot이 markets._warm_regime 등을 몰래 실호출/실쿼리해
+    # 이 파일의 단언과 무관한 부수효과가 섞인다.
+    monkeypatch.setattr(
+        positioning_snapshot, "track_positioning_snapshot", _async_return_positioning_dict
+    )
 
 
 async def _async_return_dict(*_args, **_kwargs):
     return {"entries": 0, "horizons": 0, "eod": 0}
+
+
+async def _async_return_positioning_dict(*_args, **_kwargs):
+    return {"created": False, "same_day_filled": False, "next_day_filled_count": 0}
 
 
 async def test_run_live_refresh_feeds_flow_payload_into_recorder(monkeypatch):

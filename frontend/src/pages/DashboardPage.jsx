@@ -32,6 +32,7 @@ import {
   fetchNasdaqFuturesLive,
   fetchPairView,
   fetchPaperTrades,
+  fetchPositioningHitrate,
   fetchRegime,
   fetchScalpCandidates,
   fetchScalpHitrate,
@@ -1780,6 +1781,7 @@ function HynixPositioningModal() {
       fetchHynixRelativeStrength(),
       fetchIndexTilesLive(),
       fetchNasdaqFuturesLive(),
+      fetchPositioningHitrate(),
     ]).then((r) => {
       if (!cancelled) setResults(r)
     })
@@ -1790,8 +1792,16 @@ function HynixPositioningModal() {
 
   if (!results) return <div className="state">불러오는 중…</div>
 
-  const [regimeResult, concentrationResult, macroResult, foreignResult, hynixResult, tilesResult, nasdaqResult] =
-    results
+  const [
+    regimeResult,
+    concentrationResult,
+    macroResult,
+    foreignResult,
+    hynixResult,
+    tilesResult,
+    nasdaqResult,
+    hitrateResult,
+  ] = results
 
   const regime = regimeResult.status === 'fulfilled' ? regimeResult.value : null
   const concentration = concentrationResult.status === 'fulfilled' ? concentrationResult.value : null
@@ -1800,6 +1810,7 @@ function HynixPositioningModal() {
   const hynix = hynixResult.status === 'fulfilled' ? hynixResult.value : null
   const tiles = tilesResult.status === 'fulfilled' ? tilesResult.value : null
   const nasdaq = nasdaqResult.status === 'fulfilled' ? nasdaqResult.value : null
+  const hitrate = hitrateResult.status === 'fulfilled' ? hitrateResult.value : null
   const nasdaqLatest = nasdaq?.bars?.length ? nasdaq.bars[nasdaq.bars.length - 1] : null
   const nasdaqTime = nasdaqLatest?.time ? new Date(nasdaqLatest.time).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' }) : null
 
@@ -1915,7 +1926,87 @@ function HynixPositioningModal() {
         {tiles && <RiskAlertBanner risk={tiles.risk} />}
         {tiles && !(tiles.risk?.alerts?.length > 0) && <div className="toggle-hint">현재 관찰된 경보가 없습니다.</div>}
       </div>
+
+      {/* ⑥ 사후 검증(PLAN.md §5.52) — ①~⑤가 실제로 다음날 수익률과 관계가 있는지
+          매일 쌓은 스냅샷(positioning_snapshot)을 그룹별로 집계한 표본수/평균/
+          상승확률만 보여준다. n<min_samples(20)인 그룹은 아예 표에 넣지 않는다
+          (표본 부족 은닉 금지 — 대신 total_days_collected로 "며칠째 수집 중인지"는
+          항상 보여준다). house rule: "유리하다"류 판단 문구 절대 금지, 숫자만. */}
+      <div className="section-title">⑥ 사후 검증</div>
+      <div>
+        {hitrateResult.status === 'rejected' && (
+          <div className="state error">{hitrateResult.reason?.message || '불러오지 못했습니다.'}</div>
+        )}
+        {hitrate && (
+          <div className="toggle-hint" style={{ marginBottom: 8 }}>
+            수집 {hitrate.total_days_collected}일째(최소 {hitrate.min_samples}일 필요) — 아래 표는 표본
+            {hitrate.min_samples}일 이상인 그룹만 표시합니다.
+          </div>
+        )}
+        {hitrate && <PositioningHitrateTable hitrate={hitrate} />}
+      </div>
     </div>
+  )
+}
+
+// ⑥ 사후 검증 표(PLAN.md §5.52) — GET /api/markets/positioning-hitrate 응답의
+// by_regime/by_relative_strength_sign/by_foreign_spot_sign/by_foreign_futures_sign/
+// by_nasdaq_futures_sign 5개 그룹핑을 한 표로 펼친다. 백엔드가 이미 n<min_samples인
+// 그룹은 avg_next_day_change_rate/positive_rate_pct를 null로 가려 보내므로, 이
+// 컴포넌트는 그 null 여부로 "표시 가능한 행"만 걸러낼 뿐 자체적으로 판단하지 않는다.
+const POSITIONING_HITRATE_GROUP_LABELS = {
+  by_regime: '코스피/코스닥 우세',
+  by_relative_strength_sign: '하이닉스 상대강도 부호',
+  by_foreign_spot_sign: '외인 현물 누적 부호',
+  by_foreign_futures_sign: '외인 선물 누적 부호',
+  by_nasdaq_futures_sign: '나스닥선물 등락 부호',
+}
+
+const POSITIONING_HITRATE_SIGN_LABELS = { positive: '양수', negative: '음수' }
+
+function PositioningHitrateTable({ hitrate }) {
+  const rows = []
+  for (const groupKey of Object.keys(POSITIONING_HITRATE_GROUP_LABELS)) {
+    const groups = hitrate[groupKey] || {}
+    for (const [label, stats] of Object.entries(groups)) {
+      if (stats.avg_next_day_change_rate == null) continue // 표본 부족 — 표에 넣지 않음
+      rows.push({
+        category: POSITIONING_HITRATE_GROUP_LABELS[groupKey],
+        label: POSITIONING_HITRATE_SIGN_LABELS[label] || label,
+        ...stats,
+      })
+    }
+  }
+
+  if (rows.length === 0) {
+    return <div className="state">표본 {hitrate.min_samples}일 이상 쌓인 그룹이 아직 없습니다.</div>
+  }
+
+  return (
+    <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+      <thead>
+        <tr style={{ borderBottom: '1px solid var(--border)' }}>
+          <th style={{ textAlign: 'left', padding: '4px 6px' }}>구분</th>
+          <th style={{ textAlign: 'left', padding: '4px 6px' }}>그룹</th>
+          <th style={{ textAlign: 'right', padding: '4px 6px' }}>표본(n)</th>
+          <th style={{ textAlign: 'right', padding: '4px 6px' }}>평균 다음날 수익률</th>
+          <th style={{ textAlign: 'right', padding: '4px 6px' }}>상승확률</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r, i) => (
+          <tr key={`${r.category}-${r.label}-${i}`} style={{ borderBottom: '1px solid var(--border)' }}>
+            <td style={{ padding: '4px 6px', color: 'var(--text-muted)' }}>{r.category}</td>
+            <td style={{ padding: '4px 6px' }}>{r.label}</td>
+            <td style={{ padding: '4px 6px', textAlign: 'right' }}>{r.n}</td>
+            <td className={rateClass(r.avg_next_day_change_rate)} style={{ padding: '4px 6px', textAlign: 'right' }}>
+              {rateLabel(r.avg_next_day_change_rate)}
+            </td>
+            <td style={{ padding: '4px 6px', textAlign: 'right' }}>{r.positive_rate_pct.toFixed(1)}%</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   )
 }
 

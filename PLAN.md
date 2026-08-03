@@ -2991,10 +2991,10 @@ ETF/ETN 18종(ETF 16 + ETN 2, KODEX/TIGER/ACE/RISE/PLUS/KIWOOM/1Q/SOL 8개 운�
 
 | # | 작업 | 내용 | 완료 기준 |
 |---|---|---|---|
-| 5.52-1 | `positioning_snapshot` 테이블 + 마이그레이션 | 15개 컬럼(date PK, snapshot_at, regime, concentration_pct, foreign_spot_cum, foreign_futures_cum, sox_change_rate, nasdaq_futures_change_pct, hynix_price_at_snapshot, hynix_change_rate_at_snapshot, kospi_change_rate_at_snapshot, relative_strength_pct, risk_alert_count, same_day_remaining_change_rate, next_day_change_rate) | `alembic upgrade head` 성공 |
-| 5.52-2 | 스냅샷 수집기 | `collectors/positioning_snapshot.py` 신규 — 1일 1회 기록 + same_day/next_day 2단계 채우기, `live_refresh.py`에 `scalp_tracker` 호출 바로 옆에 합류 | 실 컨테이너에서 오늘 행 기록 확인(수동 트리거), 새 외부 호출 없음(코드 리뷰로 확인) |
-| 5.52-3 | 사후 검증 엔드포인트 | `GET /api/markets/positioning-hitrate` — 그룹별 n/평균 다음날 수익률/상승확률, MIN_SAMPLES 미만은 "표본 부족" | 단위테스트(표본 부족 케이스, 정상 집계 케이스), 실데이터 확인(초기엔 전부 "표본 부족"이어야 정상) |
-| 5.52-4 | 프런트 표시 | `HynixPositioningModal`에 "사후 검증 — 수집 N일째(최소 20일 필요)" 섹션 추가, 표본 쌓이면 그룹별 표 표시 | vite build 클린, 실 컨테이너 확인 |
+| 5.52-1 ✅ | `positioning_snapshot` 테이블 + 마이그레이션 | 15개 컬럼(date PK, snapshot_at, regime, concentration_pct, foreign_spot_cum, foreign_futures_cum, sox_change_rate, nasdaq_futures_change_pct, hynix_price_at_snapshot, hynix_change_rate_at_snapshot, kospi_change_rate_at_snapshot, relative_strength_pct, risk_alert_count, same_day_remaining_change_rate, next_day_change_rate) | ✅ 완료(2026-08-03) — `alembic upgrade head` 성공, 컨테이너 DB에 테이블 생성 확인 |
+| 5.52-2 ✅ | 스냅샷 수집기 | `collectors/positioning_snapshot.py` 신규 — 1일 1회 기록 + same_day/next_day 2단계 채우기, `live_refresh.py`에 `scalp_tracker` 호출 바로 옆에 합류 | ✅ 완료(2026-08-03) — 실 컨테이너가 스케줄러로 오늘(2026-08-03) 행을 이미 자동 기록함을 확인(regime=코스닥우세, concentration_pct=60.30, relative_strength_pct=-2.97, risk_alert_count=1). 새 외부 호출 없음(코드 리뷰로 확인) |
+| 5.52-3 ✅ | 사후 검증 엔드포인트 | `GET /api/markets/positioning-hitrate` — 그룹별 n/평균 다음날 수익률/상승확률, MIN_SAMPLES 미만은 "표본 부족" | ✅ 완료(2026-08-03) — 단위테스트 9개(quant 순수함수 7 + 라우터 2), pytest 771개 통과(2회 연속 재실행으로 안정성 확인). 실데이터: `total_days_collected: 1`, 모든 그룹 `{}`(정상 — next_day_change_rate 채워진 행이 아직 0개) |
+| 5.52-4 ✅ | 프런트 표시 | `HynixPositioningModal`에 "사후 검증 — 수집 N일째(최소 20일 필요)" 섹션 추가, 표본 쌓이면 그룹별 표 표시 | ✅ 완료(2026-08-03) — `PositioningHitrateTable`(n<20 그룹은 표에서 제외, total_days_collected는 항상 표시). vite build 클린 |
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 

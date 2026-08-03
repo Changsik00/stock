@@ -107,11 +107,19 @@ from ..models import (
     MacroSeries,
     MarketBreadth,
     MarketFlow,
+    PositioningSnapshot,
     ShortSellingMarket,
     Stock,
     VolumeProfileDaily,
 )
-from ..quant import flow_acceleration, regime_backtest, risk_alert, sector_rotation, volume_surge
+from ..quant import (
+    flow_acceleration,
+    positioning_backtest,
+    regime_backtest,
+    risk_alert,
+    sector_rotation,
+    volume_surge,
+)
 from ..quant.futures_flow_profile import compute_flow_profile, detect_flow_levels
 from ..quant.volume_profile import compute_volume_profile, detect_levels
 from ..services import DB_MARKET, get_market_series_from_db, get_stock_series_from_db
@@ -2109,3 +2117,76 @@ async def nasdaq_futures_live():
     "latest_change_pct": float|None, "cached_at": iso8601}``.
     """
     return await _warm_nasdaq_futures_live()
+
+
+# -- 포지셔닝 프레임 사후 검증 (PLAN.md §5.52) — house rule(§5): 이 구획도 "이
+# 조합이 유리하다" 같은 결론을 절대 내지 않는다. `positioning_snapshot`(매일
+# 1회, `collectors/positioning_snapshot.py`)에 쌓인 관찰 기록을 그룹별
+# 표본수·평균 다음날 수익률·상승확률로 집계할 뿐이다(`quant/positioning_
+# backtest.py`, 계산 로직은 그 모듈로 분리 — `quant/regime_backtest.py`와
+# 동일한 "순수 계산은 quant/, 라우터는 얇게" 관례). 표본이 `MIN_SAMPLES`
+# 미만인 그룹은 평균/상승확률을 숨기고 표본수만 보여준다(위 모듈 docstring
+# "표본 부족" 원칙).
+
+
+@router.get("/api/markets/positioning-hitrate")
+async def positioning_hitrate(session: AsyncSession = Depends(get_session)):
+    """§5.50 포지셔닝 프레임(하이닉스 중심) 사후 검증(PLAN.md §5.52) — "이
+    프레임이 실제로 유용한지 어떻게 증명하냐"는 질문에 대해, AI가 하루치
+    데이터를 보고 임의로 매매를 "감지"해 판단하지 않는다는 house rule(§5)과
+    표본 1개로는 아무것도 증명되지 않는다는 원칙(§5.15/§5.19/§5.34)을 그대로
+    지키며, `collectors/scalp_tracker.py`(§5.7)·`quant/regime_backtest.py`
+    (§5.15)와 동일한 사후 검증 방법론을 적용한다.
+
+    `positioning_snapshot`에서 ``next_day_change_rate is not None``인 행만
+    집계 대상으로 삼는다 — 아직 결과가 안 채워진 오늘/최근 행은 자동 제외된다.
+    `total_days_collected`(전체 스냅샷 행 수, next_day 결과 유무 무관)를 함께
+    반환해 "지금까지 며칠 쌓였는지"를 프런트가 항상 보여줄 수 있게 한다.
+
+    **판단 문구를 절대 만들지 않는다** — 그룹별 평균/표본수 숫자만 반환하고
+    해석은 전적으로 사용자의 몫이다. **표본이 `MIN_SAMPLES`(20거래일) 미만인
+    그룹은 평균/상승확률을 아예 보여주지 않고 표본수만 정직하게 보여준다**
+    (`quant/positioning_backtest.py` 모듈 docstring 참고) — 이 값이 조금이라도
+    안정되려면 최소 한 달 가량의 매일 수집이 필요하다는 사실을 숨기지 않는다.
+
+    Returns ``{"total_days_collected": int, "by_regime": {label: {n,
+    avg_next_day_change_rate, positive_rate_pct}}, "by_relative_strength_sign":
+    {"positive"|"negative": {...}}, "by_foreign_spot_sign": {...},
+    "by_foreign_futures_sign": {...}, "by_nasdaq_futures_sign": {...},
+    "min_samples": 20, "computed_at": iso8601}`` — 그룹이 한 번도 관측되지
+    않았으면(예: "중립" regime이 아직 한 번도 안 나왔으면) 그 라벨은 결과
+    dict에 키 자체가 없다(n=0을 지어내지 않는다).
+    """
+    total_days_collected = await session.scalar(
+        select(func.count()).select_from(PositioningSnapshot)
+    )
+
+    stmt = select(
+        PositioningSnapshot.regime,
+        PositioningSnapshot.relative_strength_pct,
+        PositioningSnapshot.foreign_spot_cum,
+        PositioningSnapshot.foreign_futures_cum,
+        PositioningSnapshot.nasdaq_futures_change_pct,
+        PositioningSnapshot.next_day_change_rate,
+    ).where(PositioningSnapshot.next_day_change_rate.is_not(None))
+    rows = (await session.execute(stmt)).all()
+
+    fed_rows = [
+        {
+            "regime": regime,
+            "relative_strength_pct": float(relative_strength_pct) if relative_strength_pct is not None else None,
+            "foreign_spot_cum": float(foreign_spot_cum) if foreign_spot_cum is not None else None,
+            "foreign_futures_cum": float(foreign_futures_cum) if foreign_futures_cum is not None else None,
+            "nasdaq_futures_change_pct": float(nasdaq_futures_change_pct) if nasdaq_futures_change_pct is not None else None,
+            "next_day_change_rate": float(next_day_change_rate),
+        }
+        for regime, relative_strength_pct, foreign_spot_cum, foreign_futures_cum, nasdaq_futures_change_pct, next_day_change_rate in rows
+    ]
+
+    hitrate = positioning_backtest.compute_positioning_hitrate(fed_rows)
+
+    return {
+        "total_days_collected": total_days_collected or 0,
+        **hitrate,
+        "computed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }

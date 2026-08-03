@@ -553,6 +553,20 @@ export async function fetchNasdaqFuturesLive() {
   return getJson('/api/markets/nasdaq-futures/live')
 }
 
+// GET /api/markets/positioning-hitrate -> { total_days_collected, by_regime: {label:
+// {n, avg_next_day_change_rate, positive_rate_pct}}, by_relative_strength_sign:
+// {"positive"|"negative": {...}}, by_foreign_spot_sign: {...}, by_foreign_futures_sign:
+// {...}, by_nasdaq_futures_sign: {...}, min_samples: 20, computed_at } (PLAN.md §5.52) —
+// §5.50 포지셔닝 프레임(하이닉스 중심)의 사후 검증 집계. `positioning_snapshot`(하루
+// 1회 스냅샷, collectors/positioning_snapshot.py)에서 next_day_change_rate가 채워진
+// 행만 그룹핑한다. n < min_samples(20)인 그룹은 avg_next_day_change_rate/
+// positive_rate_pct가 null — 표본이 없는 그룹은 키 자체가 없다. 판단 문구 없이
+// 숫자만 — "유리하다" 같은 텍스트로 절대 쓰지 말 것. 로컬 전용 기능, STATIC_DATA
+// 대상 아님.
+export async function fetchPositioningHitrate() {
+  return getJson('/api/markets/positioning-hitrate')
+}
+
 // GET /api/markets/scalp-candidates?limit=N -> { date, market_closed, cached_at,
 // rows: [{code, name, market, score, change_rate, turnover, in_attention_top,
 // value_rank_position}] } (PLAN.md §5.2) — 스켈핑 후보 스크리닝(참고용, 매매

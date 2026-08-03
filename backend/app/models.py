@@ -578,3 +578,52 @@ class PaperTrade(Base):
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class PositioningSnapshot(Base):
+    """§5.50 포지셔닝 프레임(하이닉스 중심 top-down 브리핑)의 하루 1회 스냅샷 +
+    사후 결과 기록 — 사후 검증(PLAN.md §5.52) 전용 관찰 로그다.
+
+    **배경**: "이 프레임이 실제로 유용한지 어떻게 증명하냐"는 질문에 대해, 이
+    프로젝트는 AI가 하루치 데이터를 보고 매매를 임의로 "감지"해 판단하지
+    않는다(house rule §5 — 판단은 사용자 몫)는 원칙과, 표본 1개로는 애초에
+    아무것도 증명되지 않는다는 원칙(§5.15/§5.19/§5.34)을 그대로 지킨다. 대신
+    `collectors/scalp_tracker.py`(§5.7)·`quant/regime_backtest.py`(§5.15)가 이미
+    적용한 것과 동일한 사후 검증 패턴 — 매일 스냅샷을 DB에 쌓고, 나중에 실제
+    결과와 짝지어 표본이 쌓이면 통계로 확인한다 — 를 §5.50 포지셔닝 프레임에도
+    적용한다.
+
+    ``date``가 자연 키인 진짜 시계열(하루 1행)이라, 파일 상단 docstring의 §5.2
+    복합 PK 관례를 예외 없이 그대로 따른다 — 단일 컬럼(``date``)이 이미
+    복합키의 역할을 하므로 별도로 두 컬럼을 묶을 필요가 없을 뿐이다
+    (``PaperTrade``의 autoincrement 정수 PK 예외와는 다른 케이스 — 그 모델은
+    "사람이 손으로 입력하는 장부"라 자연 키가 없어 예외를 둔 것이고, 이 모델은
+    자연 키(date)가 있어 예외가 아니다).
+
+    모든 값 컬럼이 nullable인 이유: 개별 소스(regime, flow-concentration, 외인
+    현물/선물, SOX, 나스닥선물, 하이닉스 상대강도, 리스크 경보) 중 하나가
+    실패해도 나머지는 기록되게 하기 위해서다 — `collectors/scalp_tracker.py`가
+    호라이즌 컬럼을 다루는 것과 동일한 관대함(부분 실패 허용).
+
+    ``same_day_remaining_change_rate``/``next_day_change_rate``는 스냅샷 시점엔
+    당연히 알 수 없어 처음엔 NULL로 남고, `collectors/positioning_snapshot.py`가
+    이후 폴링에서 2단계로 채운다(모듈 docstring 참고) — NULL은 "아직 안 채워짐"
+    이지 "0%"가 아니다(`ScalpPick`의 호라이즌 컬럼과 동일한 NULL 의미 관례)."""
+
+    __tablename__ = "positioning_snapshot"
+
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    snapshot_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    regime: Mapped[str | None] = mapped_column(String(20))
+    concentration_pct: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    foreign_spot_cum: Mapped[float | None] = mapped_column(Numeric(14, 4))
+    foreign_futures_cum: Mapped[float | None] = mapped_column(Numeric(14, 4))
+    sox_change_rate: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    nasdaq_futures_change_pct: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    hynix_price_at_snapshot: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    hynix_change_rate_at_snapshot: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    kospi_change_rate_at_snapshot: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    relative_strength_pct: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    risk_alert_count: Mapped[int | None] = mapped_column(SmallInteger)
+    same_day_remaining_change_rate: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    next_day_change_rate: Mapped[float | None] = mapped_column(Numeric(8, 4))
