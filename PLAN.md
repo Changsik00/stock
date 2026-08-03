@@ -2951,6 +2951,51 @@ ETF/ETN 18종(ETF 16 + ETN 2, KODEX/TIGER/ACE/RISE/PLUS/KIWOOM/1Q/SOL 8개 운�
 | 5.51-2 ✅ | CRUD 라우터 | `routers/paper_trades.py` 신규 — POST(생성)/POST .../close(청산)/DELETE/GET(목록+손익 계산) | ✅ 완료(2026-08-03) — 단위테스트 15개(롱/숏 pnl 부호, 404/409/400 케이스, ETF NAV 경로), `place_buy_order`/`place_sell_order` 미참조 확인, pytest 748개 통과 |
 | 5.51-3 ✅ | 프런트 진입 폼 + 목록 모달 | 진입 타일 + 폼 + 열린/닫힌 포지션 목록, 손익 색상(rateClass 재사용) | ✅ 완료(2026-08-03) — `PaperTradeModal`. 실 컨테이너 curl로 생성→목록(현재가 포함)→청산(실현손익 부호 확인)→중복청산 409→삭제 204→삭제후청산 404 전체 흐름 확인, vite build 클린 |
 
+### Phase 5.52 — 포지셔닝 프레임 사후 검증 (2026-08-03 사용자 요청)
+
+사용자: "이 로직이 유용하다는 걸 어떻게 증명할 수 있을까? 네가 감지해서 한번
+매수 매도 했다고 가정해서 모니터링 해봐." — 여기에 대해 (a) 이 시스템이 AI가
+스스로 판단해 매매를 "감지"하는 게 아니라 관찰 데이터만 제공하고 판단은
+사용자 몫이라는 이 프로젝트 house rule(§5)을 그대로 지켜야 한다는 점,
+(b) 가상매매 1건으로는 애초에 "유용성"을 증명할 수 없다는 점(§5.15/§5.19/
+§5.34가 이미 여러 번 명시한 원칙 — 표본 하나는 신호가 아니라 노이즈)을
+설명하고, 대신 이 프로젝트가 다른 지표에 이미 적용해 온 것과 동일한 사후
+검증(§5.7 ScalpPick, §5.40 스켈핑 적중률 집계, §5.15 regime_backtest의
+"버킷별 다음날 수익률" 방법론)을 §5.50 포지셔닝 프레임에도 적용하기로
+사용자와 합의했다.
+
+**설계**:
+- **하루 1회 스냅샷 기록**: `collectors/scalp_tracker.py`와 동일한 패턴 —
+  `live_refresh.py`의 60초 잡에 합류, 오늘 아직 기록이 없으면 §5.50이 이미
+  만든 warm 함수들(`_warm_regime`, flow-concentration 계산, foreign-position
+  누적, `hynix_relative_strength` 로직, `_warm_nasdaq_futures_live`,
+  `_warm_index_tiles_live`의 risk)을 그대로 재호출해 한 행을 INSERT한다.
+  **새 외부 API 호출 없음** — 전부 이미 있는 함수 재사용.
+- **결과는 나중에 채운다(2단계, non-circular)**:
+  - `same_day_remaining_change_rate` — "스냅샷 시점 가격" 대비 "그날 마감가"
+    등락률(스냅샷에 이미 포함된 relative_strength_pct와 순환참조 안 되게,
+    "스냅샷 이후 남은 하루 동안 실제로 어떻게 움직였는지"만 격리해서 잰다).
+    NXT 마감 후 첫 폴링에 채운다(ScalpPick의 EOD 채우기와 동일한 트리거).
+  - `next_day_change_rate` — 다음 거래일 종가의 등락률(전일 대비, 표준적인
+    "다음날 수익률"). 다음 거래일 확정 종가가 DB에 들어온 뒤(매일 EOD 배치
+    이후) 채운다.
+- **사후 검증 엔드포인트** `GET /api/markets/positioning-hitrate` — 채워진
+  행들을 regime/상대강도 부호/외인 현물·선물 부호/나스닥선물 부호별로
+  그룹핑해 표본수(n)·평균 다음날 수익률·상승확률을 계산한다
+  (`quant/regime_backtest.py::compute_streak_buckets`의 버킷 통계와 동일한
+  형태). **표본이 `MIN_SAMPLES`(예: 20거래일) 미만인 그룹은 통계를 아예
+  보여주지 않고 "표본 부족"만 반환** — 이 값이 조금이라도 안정되려면 최소
+  한 달 가량의 매일 수집이 필요하다는 걸 숨기지 않는다.
+- **판단 문구 없음**: 이 엔드포인트도 "이 조합이 유리하다" 같은 결론을 절대
+  내리지 않는다 — 그룹별 평균/표본수만 보여주고 해석은 사용자 몫이다.
+
+| # | 작업 | 내용 | 완료 기준 |
+|---|---|---|---|
+| 5.52-1 | `positioning_snapshot` 테이블 + 마이그레이션 | 15개 컬럼(date PK, snapshot_at, regime, concentration_pct, foreign_spot_cum, foreign_futures_cum, sox_change_rate, nasdaq_futures_change_pct, hynix_price_at_snapshot, hynix_change_rate_at_snapshot, kospi_change_rate_at_snapshot, relative_strength_pct, risk_alert_count, same_day_remaining_change_rate, next_day_change_rate) | `alembic upgrade head` 성공 |
+| 5.52-2 | 스냅샷 수집기 | `collectors/positioning_snapshot.py` 신규 — 1일 1회 기록 + same_day/next_day 2단계 채우기, `live_refresh.py`에 `scalp_tracker` 호출 바로 옆에 합류 | 실 컨테이너에서 오늘 행 기록 확인(수동 트리거), 새 외부 호출 없음(코드 리뷰로 확인) |
+| 5.52-3 | 사후 검증 엔드포인트 | `GET /api/markets/positioning-hitrate` — 그룹별 n/평균 다음날 수익률/상승확률, MIN_SAMPLES 미만은 "표본 부족" | 단위테스트(표본 부족 케이스, 정상 집계 케이스), 실데이터 확인(초기엔 전부 "표본 부족"이어야 정상) |
+| 5.52-4 | 프런트 표시 | `HynixPositioningModal`에 "사후 검증 — 수집 N일째(최소 20일 필요)" 섹션 추가, 표본 쌓이면 그룹별 표 표시 | vite build 클린, 실 컨테이너 확인 |
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
