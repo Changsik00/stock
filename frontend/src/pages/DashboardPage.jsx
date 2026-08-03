@@ -21,6 +21,7 @@ import {
   fetchGroups,
   fetchGroupsLive,
   fetchGroupTopStocks,
+  fetchHynixRelativeStrength,
   fetchIndexTilesLive,
   fetchMacroSeries,
   fetchMarketIntraday,
@@ -1746,6 +1747,150 @@ function ExpiryPatternModal() {
         ))}
       </div>
       <ExpiryPatternChart points={data.points ?? []} mode={unitMode} />
+    </div>
+  )
+}
+
+// "오늘의 포지셔닝 재료" 브리핑(하이닉스 중심) — Top-down 프레임(PLAN.md §5.50-6/
+// 5.50-7, 2026-08-03 사용자 확장: "①코스피/코스닥 수급이 어디로 쏠려있는가
+// ②미장 선행지표가 어떤가 ③오전에 외인·기관이 선물·현물을 매수/매도하는가
+// ④개별 종목이 어떻게 반응하는가 ⑤기타"). 5개 구획 모두 기존 엔드포인트
+// 재조합 + 신규는 ④ 하이닉스 상대강도(fetchHynixRelativeStrength) 하나뿐 —
+// 신규 TR 없음. AttentionFullModal/ExpiryPatternModal과 동일한 자기완결 패턴
+// (마운트 시 자기 데이터를 자기가 fetch)이지만, 5개 구획이 서로 독립된 API를
+// 쓰므로 Promise.allSettled로 병렬 호출해 하나가 실패해도 나머지 구획은 그대로
+// 표시한다. **house rule(§5): 숫자만 관찰 서술하고 "강함/약함"·매매 판단은
+// 이 컴포넌트의 어떤 텍스트에도 쓰지 않는다** — 종합 판단은 사용자 몫.
+function HynixPositioningModal() {
+  const [results, setResults] = useState(null) // Promise.allSettled 결과 배열 | null(로딩 중)
+
+  useEffect(() => {
+    let cancelled = false
+    Promise.allSettled([
+      fetchRegime(),
+      fetchFlowConcentrationIntradayAccumulated(1),
+      fetchMacroSeries(['us_sox'], 5),
+      fetchForeignPositionIntradayAccumulated(1),
+      fetchHynixRelativeStrength(),
+      fetchIndexTilesLive(),
+    ]).then((r) => {
+      if (!cancelled) setResults(r)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  if (!results) return <div className="state">불러오는 중…</div>
+
+  const [regimeResult, concentrationResult, macroResult, foreignResult, hynixResult, tilesResult] = results
+
+  const regime = regimeResult.status === 'fulfilled' ? regimeResult.value : null
+  const concentration = concentrationResult.status === 'fulfilled' ? concentrationResult.value : null
+  const macro = macroResult.status === 'fulfilled' ? macroResult.value : null
+  const foreign = foreignResult.status === 'fulfilled' ? foreignResult.value : null
+  const hynix = hynixResult.status === 'fulfilled' ? hynixResult.value : null
+  const tiles = tilesResult.status === 'fulfilled' ? tilesResult.value : null
+
+  const concentrationLatest = concentration?.series?.length
+    ? concentration.series[concentration.series.length - 1].value
+    : null
+
+  const soxSeries = macro?.series?.us_sox || []
+  const soxLatest = soxSeries.length ? soxSeries[soxSeries.length - 1] : null
+  const soxPrev = soxSeries.length > 1 ? soxSeries[soxSeries.length - 2] : null
+  const soxChangeRate =
+    soxLatest?.value != null && soxPrev?.value
+      ? ((soxLatest.value - soxPrev.value) / soxPrev.value) * 100
+      : null
+
+  const spotLatest = foreign?.spot?.length ? foreign.spot[foreign.spot.length - 1].value : null
+  const futuresLatest = foreign?.futures?.length ? foreign.futures[foreign.futures.length - 1].value : null
+
+  return (
+    <div>
+      <div className="toggle-hint" style={{ marginBottom: 12 }}>
+        아래 숫자는 모두 관찰치입니다. 매수/매도 신호가 아니며, 종합 판단은 직접 하시기 바랍니다.
+      </div>
+
+      {/* ① 코스피/코스닥 수급 쏠림 */}
+      <div className="section-title">① 코스피/코스닥 수급 쏠림</div>
+      <div style={{ marginBottom: 16 }}>
+        {regimeResult.status === 'rejected' && (
+          <div className="state error">{regimeResult.reason?.message || '불러오지 못했습니다.'}</div>
+        )}
+        {regimeResult.status === 'fulfilled' && !regime?.regime && <div className="state">표시할 데이터가 없습니다.</div>}
+        {regime?.regime && (
+          <div>
+            <div>{regime.regime}</div>
+            {regime.reason && <div className="toggle-hint">{regime.reason}</div>}
+          </div>
+        )}
+        <div className="toggle-hint">
+          현재 쏠림 {concentrationLatest != null ? `${concentrationLatest.toFixed(1)}%` : '-'} (코스피 기준)
+        </div>
+      </div>
+
+      {/* ② 미장 선행지표 */}
+      <div className="section-title">② 미장 선행지표</div>
+      <div style={{ marginBottom: 16 }}>
+        {macroResult.status === 'rejected' && (
+          <div className="state error">{macroResult.reason?.message || '불러오지 못했습니다.'}</div>
+        )}
+        {macroResult.status === 'fulfilled' && !soxLatest && <div className="state">표시할 데이터가 없습니다.</div>}
+        {soxLatest && (
+          <div>
+            필라델피아반도체지수(SOX, 전일 마감) {soxLatest.value.toFixed(2)}
+            {soxChangeRate != null && <span className={rateClass(soxChangeRate)}> ({rateLabel(soxChangeRate)})</span>}
+          </div>
+        )}
+        <div className="toggle-hint" style={{ marginTop: 4 }}>나스닥 선물은 추후 추가 예정입니다.</div>
+      </div>
+
+      {/* ③ 오전 외인·기관 현물·선물 */}
+      <div className="section-title">③ 오전 외인·기관 현물·선물</div>
+      <div style={{ marginBottom: 16 }}>
+        {foreignResult.status === 'rejected' && (
+          <div className="state error">{foreignResult.reason?.message || '불러오지 못했습니다.'}</div>
+        )}
+        {foreignResult.status === 'fulfilled' && spotLatest == null && futuresLatest == null && (
+          <div className="state">표시할 데이터가 없습니다.</div>
+        )}
+        {spotLatest != null && (
+          <div className={spotLatest >= 0 ? 'up' : 'down'}>외인 현물 오전~현재 누적 순매수 {signedEokLabel(spotLatest)}</div>
+        )}
+        {futuresLatest != null && (
+          <div className={futuresLatest >= 0 ? 'up' : 'down'}>외인 선물 오전~현재 누적 순매수 {signedEokLabel(futuresLatest)}</div>
+        )}
+      </div>
+
+      {/* ④ 하이닉스 개별 반응 */}
+      <div className="section-title">④ 하이닉스 개별 반응</div>
+      <div style={{ marginBottom: 16 }}>
+        {hynixResult.status === 'rejected' && (
+          <div className="state error">{hynixResult.reason?.message || '불러오지 못했습니다.'}</div>
+        )}
+        {hynix?.market_closed && <div className="state">장 마감 — 관찰치 없음.</div>}
+        {hynix && !hynix.market_closed && hynix.relative_strength_pct == null && (
+          <div className="state">표시할 데이터가 없습니다.</div>
+        )}
+        {hynix && !hynix.market_closed && hynix.relative_strength_pct != null && (
+          <div className={rateClass(hynix.relative_strength_pct)}>
+            하이닉스 등락률({rateLabel(hynix.hynix_change_rate)}) − 코스피 등락률({rateLabel(hynix.kospi_change_rate)}) ={' '}
+            {rateLabel(hynix.relative_strength_pct)}p
+          </div>
+        )}
+      </div>
+
+      {/* ⑤ 기타 — 리스크 경보 */}
+      <div className="section-title">⑤ 기타 — 리스크 경보</div>
+      <div>
+        {tilesResult.status === 'rejected' && (
+          <div className="state error">{tilesResult.reason?.message || '불러오지 못했습니다.'}</div>
+        )}
+        {tiles && <RiskAlertBanner risk={tiles.risk} />}
+        {tiles && !(tiles.risk?.alerts?.length > 0) && <div className="toggle-hint">현재 관찰된 경보가 없습니다.</div>}
+      </div>
     </div>
   )
 }
@@ -3549,6 +3694,24 @@ export default function DashboardPage() {
             )
           }
         />
+        {/* "오늘의 포지셔닝 재료" 브리핑 진입점(PLAN.md §5.50-6/5.50-7) — 이 타일
+            자체는 상시 실시간 값을 보여주는 카드가 아니라 모달을 여는 진입점일
+            뿐이라(위 다른 타일들과 달리 마운트 시 값을 미리 fetch하지 않는다),
+            클릭해서 HynixPositioningModal이 열릴 때 5개 API를 그때 가져온다.
+            로컬 전용 기능이라 정적 배포(STATIC_DATA)에서는 기존 foreignPosition
+            모달로 대신 연결한다(다음 만기 타일과 동일한 STATIC_DATA 분기 관례). */}
+        <KpiTile
+          label="오늘의 포지셔닝 재료"
+          value="자세히 보기"
+          sub={<span className="kpi-tile-sub">하이닉스 중심 · 관찰치 모음</span>}
+          onClick={() =>
+            setModal(
+              STATIC_DATA
+                ? { type: 'foreignPosition', title: '외인 현물 vs 선물 · 베이시스' }
+                : { type: 'hynixPositioning', title: '오늘의 포지셔닝 재료 (하이닉스 중심)' }
+            )
+          }
+        />
       </div>
 
       {/* 3. 시황 · 자금 */}
@@ -4042,6 +4205,7 @@ export default function DashboardPage() {
         {modal?.type === 'foreignPosition' && <ForeignPositionModal />}
         {modal?.type === 'derivativeEtf' && <DerivativeEtfModal />}
         {modal?.type === 'expiryPattern' && <ExpiryPatternModal />}
+        {modal?.type === 'hynixPositioning' && <HynixPositioningModal />}
         {/* 랭킹 3종 전체 보기 모달 — onRowClick을 STATIC_DATA일 때 undefined로 넘겨
             행 클릭 자체를 비활성화한다(TOP5 카드와 동일한 정적 모드 판단, 위
             Top5RowTile 주석 참고). */}

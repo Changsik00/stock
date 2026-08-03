@@ -492,6 +492,14 @@ export async function fetchIndexTilesLive() {
   return getJson('/api/markets/index-tiles/live')
 }
 
+// GET /api/markets/hynix-relative-strength -> { code, hynix_change_rate, kospi_change_rate,
+// relative_strength_pct, market_closed, computed_at } (PLAN.md §5.50-7) — SK하이닉스
+// 등락률 - 코스피 등락률(단순 초과수익률 관찰치, z-score 아님). 판정 아님 — "강함/약함"
+// 텍스트로 절대 쓰지 말 것. 로컬 전용 기능, STATIC_DATA 대상 아님.
+export async function fetchHynixRelativeStrength() {
+  return getJson('/api/markets/hynix-relative-strength')
+}
+
 // GET /api/markets/scalp-candidates?limit=N -> { date, market_closed, cached_at,
 // rows: [{code, name, market, score, change_rate, turnover, in_attention_top,
 // value_rank_position}] } (PLAN.md §5.2) — 스켈핑 후보 스크리닝(참고용, 매매

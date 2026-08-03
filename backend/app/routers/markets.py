@@ -109,8 +109,9 @@ from ..models import (
 from ..quant import flow_acceleration, regime_backtest, risk_alert, sector_rotation, volume_surge
 from ..quant.futures_flow_profile import compute_flow_profile, detect_flow_levels
 from ..quant.volume_profile import compute_volume_profile, detect_levels
-from ..services import DB_MARKET, get_market_series_from_db
+from ..services import DB_MARKET, get_market_series_from_db, get_stock_series_from_db
 from . import basis as basis_router
+from .stocks import _warm_stock_intraday
 
 logger = logging.getLogger(__name__)
 
@@ -1771,3 +1772,71 @@ async def index_tiles_live(session: AsyncSession = Depends(get_session)):
     has_data}|None, "cached_at": iso8601}``.
     """
     return await _warm_index_tiles_live(session)
+
+
+@router.get("/api/markets/hynix-relative-strength")
+async def hynix_relative_strength(session: AsyncSession = Depends(get_session)):
+    """SK하이닉스(000660) "지금" 등락률 − 코스피 "지금" 등락률 = 단순 초과수익률
+    관찰치(PLAN.md §5.50-7 "탑다운 프레임 ④ 개별 종목 반응"). z-score가 아니고,
+    이 값은 절대 "강함/약함" 같은 판정이 아니다 — 두 등락률의 차이(%p)를 그대로
+    보여줄 뿐, 종합 판단은 전적으로 사용자의 몫이다(house rule, PLAN.md §5).
+
+    새 TR/새 캐시 없이 기존 3개 소스를 재조합한다: 코스피 등락률과 장 마감 여부는
+    `_warm_index_tiles_live`(이미 60초 캐시)를 그대로 재사용하고, 하이닉스 "지금"
+    최신가는 `routers/stocks.py::_warm_stock_intraday("000660", 1)`(역시 자체
+    캐시)의 bars 마지막 종가, 하이닉스 "전일 종가"는 `get_stock_series_from_db`
+    (DB 확정치)의 마지막 종가를 쓴다 — 이 핸들러 자체는 캐시 없이 매번 가볍게
+    재계산한다.
+
+    **장 마감이면 하이닉스/코스피 조회 자체를 하지 않고** 세 필드 모두 `null`로
+    즉시 반환한다(`_warm_index_tiles_live`의 `if not market_closed:` 게이트와
+    동일한 관례). **하이닉스 인트라데이 조회가 실패해도(키움 502 등) 이
+    엔드포인트는 502를 전파하지 않는다** — `_warm_stock_intraday`는 실패 시
+    HTTPException(502)를 던지지만, 상대강도는 이 브리핑을 이루는 구획 중 하나일
+    뿐이라 그 하나 때문에 나머지 필드(코스피 등락률 등)까지 못 보게 하면 안 되므로
+    여기서 잡아 `hynix_change_rate`/`relative_strength_pct`만 `null` 처리한다.
+
+    Returns ``{"code": "000660", "hynix_change_rate": float|None,
+    "kospi_change_rate": float|None, "relative_strength_pct": float|None,
+    "market_closed": bool, "computed_at": iso8601}``.
+    """
+    tiles = await _warm_index_tiles_live(session)
+    market_closed = tiles["market_closed"]
+
+    hynix_change_rate: float | None = None
+    kospi_change_rate: float | None = None
+
+    if not market_closed:
+        kospi_tile = tiles.get("kospi")
+        kospi_change_rate = kospi_tile["change_rate"] if kospi_tile else None
+
+        try:
+            intraday = await _warm_stock_intraday("000660", 1)
+        except Exception as e:  # noqa: BLE001 - 하이닉스 조회 실패가 이 엔드포인트
+            # 전체를 502로 만들면 안 된다(위 docstring 참고) — 로그만 남기고 None 처리.
+            logger.warning("hynix-relative-strength: intraday fetch failed: %s", e)
+            intraday = None
+
+        bars = intraday.get("bars") if intraday else None
+        latest_close = bars[-1]["close"] if bars else None
+
+        prev_rows = await get_stock_series_from_db(session, "000660", days=5)
+        prev_close = prev_rows[-1]["close"] if prev_rows else None
+
+        if latest_close is not None and prev_close:
+            hynix_change_rate = round((latest_close - prev_close) / prev_close * 100, 4)
+
+    relative_strength_pct = (
+        round(hynix_change_rate - kospi_change_rate, 4)
+        if hynix_change_rate is not None and kospi_change_rate is not None
+        else None
+    )
+
+    return {
+        "code": "000660",
+        "hynix_change_rate": hynix_change_rate,
+        "kospi_change_rate": kospi_change_rate,
+        "relative_strength_pct": relative_strength_pct,
+        "market_closed": market_closed,
+        "computed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
