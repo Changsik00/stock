@@ -500,6 +500,25 @@ export async function fetchHynixRelativeStrength() {
   return getJson('/api/markets/hynix-relative-strength')
 }
 
+// GET /api/markets/positioning/pair-view?set=samsung|hynix -> { set, market_closed,
+// stock: {code, name, change_rate, quote: {asks, bids, total_ask_qty, total_bid_qty,
+// base_time}|None}, leverage: {code, name, now_value, nav, deviation_pct, quote}|같은 구조,
+// inverse: {...leverage와 동일 구조...}, computed_at } (PLAN.md §5.50-2/5.50-3) — 본주 +
+// 레버리지2X ETF + 인버스2X ETF 3열 통합 뷰(호가 10단계 + ETF NAV 괴리율). 관찰치만
+// 제공 — "강함/약함"/매매 판단 텍스트로 절대 쓰지 말 것. 로컬 전용 기능, STATIC_DATA
+// 대상 아님.
+export async function fetchPairView(set) {
+  return getJson(`/api/markets/positioning/pair-view?set=${set}`)
+}
+
+// GET /api/markets/nasdaq-futures/live -> { symbol: "NQ=F", bars: [{time, close}, ...],
+// latest_change_pct, cached_at } (PLAN.md §5.50-5) — 나스닥선물 준실시간 5분봉(CME
+// Globex가 KST 주간에도 열려 있어 "지금"에 가까운 값). latest_change_pct는 마지막 봉과
+// 그 직전 봉의 종가 차이(%). 로컬 전용 기능, STATIC_DATA 대상 아님.
+export async function fetchNasdaqFuturesLive() {
+  return getJson('/api/markets/nasdaq-futures/live')
+}
+
 // GET /api/markets/scalp-candidates?limit=N -> { date, market_closed, cached_at,
 // rows: [{code, name, market, score, change_rate, turnover, in_attention_top,
 // value_rank_position}] } (PLAN.md §5.2) — 스켈핑 후보 스크리닝(참고용, 매매

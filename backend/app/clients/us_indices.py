@@ -20,6 +20,8 @@ from __future__ import annotations
 import datetime as dt
 import logging
 
+import yfinance as yf
+
 from . import commodities
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,9 @@ SYMBOLS = {
     "us_dow": {"yfinance": "^DJI", "fred": None},
     "us_sox": {"yfinance": "^SOX", "fred": None},
 }
+
+# 나스닥선물(NQ=F) 심볼 — 준실시간 인트라데이 전용(아래 fetch_nasdaq_futures_intraday).
+NASDAQ_FUTURES_SYMBOL = "NQ=F"
 
 
 class UsIndicesError(Exception):
@@ -71,3 +76,34 @@ def fetch_us_index_series(series: str, start: dt.date, end: dt.date) -> list[dic
         row["source"] = "fred"
     rows.sort(key=lambda r: r["date"])
     return rows
+
+
+def fetch_nasdaq_futures_intraday(bars: int = 50) -> list[dict]:
+    """나스닥선물(``NQ=F``) 준실시간 5분봉 (PLAN.md §5.50-1/§5.50-5).
+
+    위의 다른 함수들(``fetch_us_index_series``)은 전부 EOD(일별)라 그대로
+    재사용할 수 없어, ``yfinance.Ticker("NQ=F").history(period="1d",
+    interval="5m")``를 직접 호출하는 인트라데이 전용 함수를 별도로 둔다
+    (2026-08-03 실측: 5분봉 정상 수신 확인 — CME Globex가 KST 주간에도 계속
+    열려 있어 "지금"에 가까운 값을 준다, PLAN.md §5.50-1 참고).
+
+    장중 나스닥선물은 FRED에 대체 시리즈가 없다 — ``fetch_us_index_series``와
+    달리 폴백이 없고, yfinance 실패는 그대로 예외로 전파한다(호출측 라우터가
+    502로 변환).
+
+    Returns 오름차순(과거→최신) ``[{"time": iso8601, "close": float}, ...]``
+    최근 ``bars``개(기본 50 — 5분봉 50개 ≈ 4시간). 빈 응답이면 빈 리스트.
+    """
+    ticker = yf.Ticker(NASDAQ_FUTURES_SYMBOL)
+    hist = ticker.history(period="1d", interval="5m")
+    if hist.empty:
+        return []
+
+    out: list[dict] = []
+    for ts, row in hist.iterrows():
+        close = row.get("Close")
+        if close is None or (isinstance(close, float) and close != close):  # NaN 체크
+            continue
+        out.append({"time": ts.isoformat(), "close": float(close)})
+
+    return out[-bars:]

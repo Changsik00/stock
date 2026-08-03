@@ -91,8 +91,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..clients import naver_breadth, naver_futures_flow, naver_fx, naver_index
-from ..clients.kiwoom import MINUTE_CHART_INTERVALS, KiwoomClient, parse_minute_chart_rows
+from ..clients import naver_breadth, naver_etf, naver_futures_flow, naver_fx, naver_index, us_indices
+from ..clients.kiwoom import (
+    MINUTE_CHART_INTERVALS,
+    KiwoomClient,
+    parse_minute_chart_rows,
+    parse_quote_levels,
+)
 from ..collectors import intraday_snapshot
 from ..collectors.market_flow import fetch_live_flow
 from ..db import get_session
@@ -1840,3 +1845,267 @@ async def hynix_relative_strength(session: AsyncSession = Depends(get_session)):
         "market_closed": market_closed,
         "computed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
     }
+
+
+# -- 종목 페어 통합 뷰 (PLAN.md §5.50-2/5.50-3) — 본주+레버리지2X+인버스2X, 호가·ETF
+# 괴리율. **house rule(§5): 관찰 데이터만 보여준다 — 이 구획의 어떤 응답 필드/문구도
+# "사라"/"지금이 기회"/"강하다"/"약하다"/"유리하다" 같은 매매 판단을 만들지 않는다.**
+# 본주 호가(`stock_quote`, ka10004)는 아직 실호출 미검증 TR이다(clients/kiwoom.py
+# 모듈 docstring "주식호가요청(ka10004) 조사" 절 참고) — 필드가 실제로 이 형태로
+# 오는지는 이번 작업으로 처음 실호출 확인한다.
+
+# 5.50 설계 절에서 확정한 대상 티커(PLAN.md §5.50, 2026-08-03) — 삼성전자/SK하이닉스
+# 각각 본주 + 레버리지2X ETF + 인버스2X ETF. 이름은 이 프로젝트에 ETF 이름을 DB에서
+# 매번 조인해 쓰는 기존 관례가 없어(naver_etf 응답 자체에도 이름이 있지만 4개뿐이라
+# 굳이 매 호출마다 조인할 필요가 없음) 여기 상수로 하드코딩한다.
+PAIR_SETS: dict[str, dict[str, dict[str, str]]] = {
+    "samsung": {
+        "stock": {"code": "005930", "name": "삼성전자"},
+        "leverage": {"code": "0193W0", "name": "KODEX 삼성전자레버리지"},
+        "inverse": {"code": "0193L0", "name": "PLUS 삼성전자선물인버스2X"},
+    },
+    "hynix": {
+        "stock": {"code": "000660", "name": "SK하이닉스"},
+        "leverage": {"code": "0193T0", "name": "KODEX SK하이닉스레버리지"},
+        "inverse": {"code": "0197X0", "name": "SOL SK하이닉스선물인버스2X"},
+    },
+}
+
+# PAIR_SETS 두 세트에 등장하는 ETF 코드 4개 전부 — naver_etf.fetch_etf_list()가
+# 1,155개 전체 ETF를 반환하는 무거운 호출이라, `set` 쿼리파라미터와 무관하게 이
+# 4개를 한 번에 캐시해 두 세트가 캐시를 공유하게 한다(아래 _warm_etf_nav).
+_PAIR_VIEW_ETF_CODES = {"0193W0", "0193L0", "0193T0", "0197X0"}
+
+# _attention_cache와 동일한 60초 메모리 캐시 패턴(모듈 상단 참고).
+_ETF_NAV_CACHE_TTL_SECONDS = 60
+_etf_nav_cache: dict[str, object] = {"ts": 0.0, "data": None}
+_etf_nav_cache_lock = asyncio.Lock()
+
+
+def _fetch_etf_nav_blocking() -> dict[str, dict]:
+    """naver_etf.fetch_etf_list()의 블로킹 호출 래퍼(asyncio.to_thread 대상 —
+    `_fetch_breadth_blocking`과 동일한 관례) — 전체 목록에서 pair-view 대상 4종
+    코드만 code -> row로 필터링해 반환한다."""
+    items = naver_etf.fetch_etf_list()
+    return {it["code"]: it for it in items if it.get("code") in _PAIR_VIEW_ETF_CODES}
+
+
+async def _warm_etf_nav() -> dict[str, dict]:
+    """pair-view 대상 ETF 4종(레버리지 2 + 인버스 2)의 NAV/현재가 60초 캐시.
+
+    `set` 파라미터와 무관하게 4개 코드 전부를 한 번에 캐시하므로 삼성전자/
+    하이닉스 두 세트를 번갈아 조회해도 naver_etf.fetch_etf_list()는 60초에 한
+    번만 호출된다(`_attention_cache`와 동일한 패턴)."""
+    now = time.monotonic()
+    async with _etf_nav_cache_lock:
+        cached = _etf_nav_cache["data"]
+        if cached is not None and (now - _etf_nav_cache["ts"]) < _ETF_NAV_CACHE_TTL_SECONDS:
+            return cached
+        data = await asyncio.to_thread(_fetch_etf_nav_blocking)
+        _etf_nav_cache["data"] = data
+        _etf_nav_cache["ts"] = now
+        return data
+
+
+async def _fetch_etf_nav_safe() -> dict[str, dict]:
+    """`_warm_etf_nav`가 실패해도(네이버 비공식 API) 호가/등락률 등 나머지 필드는
+    살아있게 여기서 잡는다 — 실패하면 빈 dict(모든 종목 nav/now_value가 없는
+    것으로 처리, deviation_pct는 None으로 자연히 떨어진다)."""
+    try:
+        return await _warm_etf_nav()
+    except Exception as e:  # noqa: BLE001 - 네이버 비공식 API, 실패해도 나머지 구획은 살려둔다
+        logger.warning("pair-view: etf nav fetch failed: %s", e)
+        return {}
+
+
+async def _fetch_pair_view_quote(code: str) -> dict | None:
+    """stock_quote(ka10004) + parse_quote_levels — 실패하면 None만 반환한다
+    (호가 하나 실패해도 등락률/NAV 등 나머지 필드는 살아있게, hynix_relative_strength가
+    인트라데이 실패를 처리하는 방식과 동일한 관례)."""
+    try:
+        async with KiwoomClient() as client:
+            data = await client.stock_quote(code)
+    except Exception as e:  # noqa: BLE001 - 호가 조회 실패가 이 종목 전체를 막지 않도록
+        logger.warning("pair-view: stock_quote(%s) failed: %s", code, e)
+        return None
+    return parse_quote_levels(data)
+
+
+async def _fetch_pair_view_change_rate(code: str, session: AsyncSession) -> float | None:
+    """등락률 계산 — hynix_relative_strength와 완전히 동일한 패턴
+    (`_warm_stock_intraday(code, 1)`의 마지막 bar close vs
+    `get_stock_series_from_db(session, code, days=5)`의 마지막 close), 종목코드만
+    바꿔서 재사용한다. 인트라데이 조회가 실패해도(키움 502 등) None만 반환하고
+    이 엔드포인트 전체를 502로 만들지 않는다."""
+    try:
+        intraday = await _warm_stock_intraday(code, 1)
+    except Exception as e:  # noqa: BLE001 - hynix_relative_strength와 동일한 이유
+        logger.warning("pair-view: intraday fetch failed for %s: %s", code, e)
+        intraday = None
+
+    bars = intraday.get("bars") if intraday else None
+    latest_close = bars[-1]["close"] if bars else None
+
+    prev_rows = await get_stock_series_from_db(session, code, days=5)
+    prev_close = prev_rows[-1]["close"] if prev_rows else None
+
+    if latest_close is not None and prev_close:
+        return round((latest_close - prev_close) / prev_close * 100, 4)
+    return None
+
+
+def _pair_view_etf_payload(meta: dict[str, str], quote: dict | None, nav_row: dict | None) -> dict:
+    now_value = nav_row.get("now_value") if nav_row else None
+    nav = nav_row.get("nav") if nav_row else None
+    deviation_pct = None
+    if now_value is not None and nav:
+        deviation_pct = round((now_value - nav) / nav * 100, 4)
+    return {
+        "code": meta["code"],
+        "name": meta["name"],
+        "now_value": now_value,
+        "nav": nav,
+        "deviation_pct": deviation_pct,
+        "quote": quote,
+    }
+
+
+@router.get("/api/markets/positioning/pair-view")
+async def positioning_pair_view(
+    set: str = Query(..., description="'samsung' 또는 'hynix'"),
+    session: AsyncSession = Depends(get_session),
+):
+    """본주 + 레버리지2X ETF + 인버스2X ETF 3열 통합 뷰(PLAN.md §5.50-2/5.50-3).
+    삼성전자(`set=samsung`) 또는 SK하이닉스(`set=hynix`) 세트를 골라 세 종목의
+    "지금" 호가 10단계(매물대)와 ETF 괴리율을 한 번에 반환한다.
+
+    **관찰 데이터만 제공한다(house rule, PLAN.md §5)** — 숫자와 사실만 보여줄
+    뿐 어떤 필드/문구도 매매 판단을 담지 않는다. 종합 판단은 전적으로 사용자
+    몫이다.
+
+    장 마감 판정은 `hynix_relative_strength`가 쓰는 `_warm_index_tiles_live`의
+    `market_closed`를 그대로 재사용한다(새 판정 로직 없음) — 장 마감이면
+    호가/등락률/NAV/괴리율 전부 `None`으로 즉시 응답한다.
+
+    **본주**: 호가는 `KiwoomClient.stock_quote()`(ka10004, 아직 실호출
+    미검증 — 모듈 docstring 참고) + `parse_quote_levels`로 정리. 등락률은
+    `hynix_relative_strength`와 동일한 패턴(`_warm_stock_intraday`/
+    `get_stock_series_from_db` 재조합) — 종목코드만 바꿔 재사용한다.
+
+    **레버리지/인버스 ETF**: 호가는 본주와 동일하게 `stock_quote` +
+    `parse_quote_levels`. NAV/현재가/괴리율은 `naver_etf.fetch_etf_list()`를
+    60초 캐시로 감싸 호출(`_warm_etf_nav` — 두 세트가 캐시를 공유, 4개
+    타깃 코드만 필터링)한 뒤 `deviation_pct = (now_value - nav) / nav * 100`으로
+    계산한다.
+
+    호가 조회/등락률 계산/NAV 조회는 서로 독립된 API 호출이라 하나가 실패해도
+    (`_fetch_pair_view_quote`/`_fetch_pair_view_change_rate`/`_fetch_etf_nav_safe`
+    각각 내부에서 예외를 잡는다) 나머지 필드는 그대로 채워진다 — 이 엔드포인트
+    전체가 502가 되는 경우는 없다.
+
+    Returns ``{"set": "samsung"|"hynix", "market_closed": bool,
+    "stock": {"code", "name", "change_rate": float|None,
+    "quote": {asks, bids, total_ask_qty, total_bid_qty, base_time}|None},
+    "leverage": {"code", "name", "now_value": float|None, "nav": float|None,
+    "deviation_pct": float|None, "quote": {...}|None},
+    "inverse": {...leverage와 동일 구조...}, "computed_at": iso8601}``.
+    """
+    if set not in PAIR_SETS:
+        raise HTTPException(400, f"set must be one of {sorted(PAIR_SETS)}")
+
+    targets = PAIR_SETS[set]
+    tiles = await _warm_index_tiles_live(session)
+    market_closed = tiles["market_closed"]
+    computed_at = dt.datetime.now(dt.timezone.utc).isoformat()
+
+    if market_closed:
+        return {
+            "set": set,
+            "market_closed": True,
+            "stock": {**targets["stock"], "change_rate": None, "quote": None},
+            "leverage": {**targets["leverage"], "now_value": None, "nav": None, "deviation_pct": None, "quote": None},
+            "inverse": {**targets["inverse"], "now_value": None, "nav": None, "deviation_pct": None, "quote": None},
+            "computed_at": computed_at,
+        }
+
+    stock_code = targets["stock"]["code"]
+    leverage_code = targets["leverage"]["code"]
+    inverse_code = targets["inverse"]["code"]
+
+    stock_change_rate, stock_quote, leverage_quote, inverse_quote, etf_nav = await asyncio.gather(
+        _fetch_pair_view_change_rate(stock_code, session),
+        _fetch_pair_view_quote(stock_code),
+        _fetch_pair_view_quote(leverage_code),
+        _fetch_pair_view_quote(inverse_code),
+        _fetch_etf_nav_safe(),
+    )
+
+    return {
+        "set": set,
+        "market_closed": False,
+        "stock": {**targets["stock"], "change_rate": stock_change_rate, "quote": stock_quote},
+        "leverage": _pair_view_etf_payload(targets["leverage"], leverage_quote, etf_nav.get(leverage_code)),
+        "inverse": _pair_view_etf_payload(targets["inverse"], inverse_quote, etf_nav.get(inverse_code)),
+        "computed_at": computed_at,
+    }
+
+
+# -- 나스닥선물(NQ=F) 인트라데이 (PLAN.md §5.50-1/5.50-5) — "미장 선행지표" 구획에
+# SOX(EOD)와 나란히 붙이는 준실시간 참고 타일. 판단 문구 없이 숫자만(house rule).
+
+# 5분봉 특성상 다른 라이브 엔드포인트들의 60초보다 길게 잡는다 — 5분봉을 60초마다
+# 다시 조회해봤자 같은 봉을 반복해서 받을 뿐이다(`_intraday_ttl_seconds`와 동일한
+# 판단 근거).
+_NASDAQ_FUTURES_CACHE_TTL_SECONDS = 300
+_nasdaq_futures_cache: dict[str, object] = {"ts": 0.0, "data": None}
+_nasdaq_futures_cache_lock = asyncio.Lock()
+
+
+async def _warm_nasdaq_futures_live() -> dict:
+    """나스닥선물 인트라데이 캐시를 채우고 payload를 반환한다. yfinance는 동기
+    라이브러리라 `asyncio.to_thread`로 감싼다(`_fetch_breadth_blocking`과 동일한
+    관례). 장중 나스닥선물은 FRED에 없어(clients/us_indices.py 참고) 실패 시
+    폴백이 없다 — 그대로 502로 변환한다(다른 라이브 엔드포인트들의 기존 관례)."""
+    now = time.monotonic()
+    async with _nasdaq_futures_cache_lock:
+        cached = _nasdaq_futures_cache["data"]
+        if cached is not None and (now - _nasdaq_futures_cache["ts"]) < _NASDAQ_FUTURES_CACHE_TTL_SECONDS:
+            return cached
+
+        try:
+            bars = await asyncio.to_thread(us_indices.fetch_nasdaq_futures_intraday, 50)
+        except Exception as e:  # noqa: BLE001 - yfinance 예외 전부 502로 변환
+            raise HTTPException(502, f"nasdaq futures live fetch failed: {str(e)[:200]}") from e
+
+        latest_change_pct = None
+        if len(bars) >= 2:
+            prev_close = bars[-2]["close"]
+            latest_close = bars[-1]["close"]
+            if prev_close:
+                latest_change_pct = round((latest_close - prev_close) / prev_close * 100, 4)
+
+        payload = {
+            "symbol": "NQ=F",
+            "bars": bars,
+            "latest_change_pct": latest_change_pct,
+            "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        _nasdaq_futures_cache["data"] = payload
+        _nasdaq_futures_cache["ts"] = now
+        return payload
+
+
+@router.get("/api/markets/nasdaq-futures/live")
+async def nasdaq_futures_live():
+    """나스닥선물(NQ=F) 준실시간 5분봉(PLAN.md §5.50-5) — SOX(전일 EOD)와 달리
+    CME Globex가 KST 주간에도 열려 있어 "지금"에 가까운 값을 준다(clients/
+    us_indices.py::fetch_nasdaq_futures_intraday 참고). 5분(300초) 메모리
+    캐시로 감싸 온다(DB 저장 없음, §3.5 원칙과 동일).
+
+    `latest_change_pct`는 마지막 bar와 그 직전 bar의 종가 차이(%) — 판단 문구
+    없이 숫자만 제공한다(house rule, PLAN.md §5).
+
+    Returns ``{"symbol": "NQ=F", "bars": [{"time", "close"}, ...],
+    "latest_change_pct": float|None, "cached_at": iso8601}``.
+    """
+    return await _warm_nasdaq_futures_live()

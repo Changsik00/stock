@@ -21,6 +21,7 @@ from app.clients.kiwoom import (
     KiwoomClient,
     _parse_minute_price,
     parse_minute_chart_rows,
+    parse_quote_levels,
 )
 
 FAKE_BASE_URL = "https://mockapi.kiwoom.com"
@@ -843,3 +844,85 @@ async def test_get_unfilled_orders_request_shape(make_client):
         await client.aclose()
 
     assert data["oso"] == []
+
+
+# -- parse_quote_levels (ka10004 응답 파싱, PLAN.md §5.50-2) -------------------------
+
+
+def _full_quote_response() -> dict:
+    """매도/매수 각 10단계가 모두 채워진 가짜 ka10004 응답 — 부호 접두 없음."""
+    data = {
+        "return_code": 0,
+        "return_msg": "",
+        "sel_fpr_bid": "71100",
+        "sel_fpr_req": "100",
+        "buy_fpr_bid": "71000",
+        "buy_fpr_req": "200",
+        "tot_sel_req": "5000",
+        "tot_buy_req": "6000",
+        "bid_req_base_tm": "153000",
+    }
+    for level in range(2, 11):
+        data[f"sel_{level}th_pre_bid"] = str(71100 + (level - 1) * 100)
+        data[f"sel_{level}th_pre_req"] = str(100 * level)
+        data[f"buy_{level}th_pre_bid"] = str(71000 - (level - 1) * 100)
+        data[f"buy_{level}th_pre_req"] = str(200 * level)
+    return data
+
+
+def test_parse_quote_levels_normal_case_fills_all_ten_levels():
+    result = parse_quote_levels(_full_quote_response())
+
+    assert len(result["asks"]) == 10
+    assert len(result["bids"]) == 10
+    assert [row["level"] for row in result["asks"]] == list(range(1, 11))
+    assert [row["level"] for row in result["bids"]] == list(range(1, 11))
+
+    assert result["asks"][0] == {"level": 1, "price": 71100.0, "qty": 100.0}
+    assert result["bids"][0] == {"level": 1, "price": 71000.0, "qty": 200.0}
+    assert result["asks"][9] == {"level": 10, "price": 71100.0 + 9 * 100, "qty": 100.0 * 10}
+    assert result["bids"][9] == {"level": 10, "price": 71000.0 - 9 * 100, "qty": 200.0 * 10}
+
+    assert result["total_ask_qty"] == 5000.0
+    assert result["total_bid_qty"] == 6000.0
+    assert result["base_time"] == "153000"
+
+
+def test_parse_quote_levels_sign_prefix_converted_to_absolute_value():
+    """실호출 미검증 TR이라 다른 키움 TR들처럼 부호(+/-) 접두가 붙을 가능성을
+    대비한다(PLAN.md §5.50-2 지시) — 붙어 있으면 방향 표시를 무시하고 절대값만
+    남긴다."""
+    data = {
+        "sel_fpr_bid": "+71100",
+        "sel_fpr_req": "-100",  # 잔량에 부호가 섞여 와도 절대값으로 처리.
+        "buy_fpr_bid": "-71000",
+        "buy_fpr_req": "+200",
+        "tot_sel_req": "+5000",
+        "tot_buy_req": "-6000",
+    }
+    result = parse_quote_levels(data)
+
+    assert result["asks"][0] == {"level": 1, "price": 71100.0, "qty": 100.0}
+    assert result["bids"][0] == {"level": 1, "price": 71000.0, "qty": 200.0}
+    assert result["total_ask_qty"] == 5000.0
+    assert result["total_bid_qty"] == 6000.0
+
+
+def test_parse_quote_levels_missing_fields_default_to_zero_without_crashing():
+    """필드 누락/빈 문자열/dict 자체가 텅 비어 있어도 크래시하지 않고 0으로
+    채운다(§5 방어적 처리 관례)."""
+    result = parse_quote_levels({})
+
+    assert len(result["asks"]) == 10
+    assert len(result["bids"]) == 10
+    assert all(row["price"] == 0.0 and row["qty"] == 0.0 for row in result["asks"])
+    assert all(row["price"] == 0.0 and row["qty"] == 0.0 for row in result["bids"])
+    assert result["total_ask_qty"] == 0.0
+    assert result["total_bid_qty"] == 0.0
+    assert result["base_time"] is None
+
+    # 빈 문자열도 0으로 처리 (일부 필드만 빈 문자열인 부분 누락 케이스).
+    partial = {"sel_fpr_bid": "", "sel_fpr_req": "   ", "tot_sel_req": None}
+    partial_result = parse_quote_levels(partial)
+    assert partial_result["asks"][0] == {"level": 1, "price": 0.0, "qty": 0.0}
+    assert partial_result["total_ask_qty"] == 0.0

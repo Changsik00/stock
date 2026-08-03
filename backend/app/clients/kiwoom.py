@@ -401,15 +401,27 @@ ka90013)이 "실호출로 확정"되기 전까지 거쳐온 것과 같은 미확
   자세한 설계 의도와 알려진 한계(누적 노출은 이 체크로 못 막음)는 상수
   정의부 주석 참고.
 
-## 주식호가요청(ka10004) 조사 — 실호출로 미확정
+## 주식호가요청(ka10004) 조사·실측 확정 (2026-08-02 조사, 2026-08-03 실호출 확정)
 
 (2026-08-02) 매수/매도 주문 전에 현재가 근처 매물대(호가 잔량)를 확인하고
 싶다는 요청에 따라 추가. 출처는 GitHub `Kiwoom-Securities/Kiwoom-REST-API`
 (homepage가 openapi.kiwoom.com과 일치해 공식으로 보이는 조직) 저장소의
-`kiwoom_docs/시세.md`, commit `69642586f7d84ba9fd8a6faf1f1537c7fda6568b` —
-이 클라이언트가 지금까지 실호출로 확정해 온 다른 TR들과 달리, 이번 것도
-kt10000류와 마찬가지로 웹서치/GitHub 조사만으로 확보했고 아직 실호출로
-검증하지 않았다.
+`kiwoom_docs/시세.md`, commit `69642586f7d84ba9fd8a6faf1f1537c7fda6568b`.
+
+**2026-08-03 실전 키로 실호출 확정**(PLAN.md §5.50-2, `GET /api/markets/
+positioning/pair-view` 구현 중 확인): 005930/000660/0193W0/0193T0/0193L0/
+0197X0 6개 코드 전부 200 + 정상 응답. 매도호가는 최우선(`sel_fpr_bid`)에서
+멀어질수록 오름차순(예: 000660 1,595,000 → 1,604,000), 매수호가는
+최우선(`buy_fpr_bid`)에서 멀어질수록 내림차순(1,594,000 → 1,585,000)으로
+가격이 합리적으로 이어짐을 확인했다. **부호 접두 실측**: 가격 필드
+(`sel_fpr_bid`/`buy_fpr_bid`/`sel_{N}th_pre_bid`/`buy_{N}th_pre_bid`)는
+실제로 `"-1597000"`처럼 `-` 접두가 항상 붙어 온다(000660 실측 — `ka10080`의
+"전일 대비 방향 부호" 관례와 비슷하게 보이지만, 매도/매수 양쪽 다 `-`만
+관측돼 실제로 "방향"을 의미하는지는 불명확하다). 잔량 필드(`sel_fpr_req`/
+`buy_fpr_req`/`tot_sel_req`/`tot_buy_req`)는 부호 없이 순수 양수 문자열로
+온다. `parse_quote_levels`(`_parse_quote_value`)가 두 경우 모두 절대값
+처리로 안전하게 커버한다 — 실측으로 이 방어적 처리가 실제로 필요했음이
+확인됐다.
 
 - **URL**: `/api/dostk/mrkcond` — 기존 `TR_RESOURCE_URL`의 `ka10063`/
   `ka10066`/`ka90013`과 같은 카테고리라 URL 자체의 신뢰도는 상대적으로
@@ -477,7 +489,7 @@ TR_RESOURCE_URL: dict[str, str] = {
     "kt10003": "/api/dostk/ordr",  # 취소주문 (PLAN.md §5.48, 미확정 — 실호출로 확정 필요)
     "kt00001": "/api/dostk/acnt",  # 예수금상세현황요청 (PLAN.md §5.48, 미확정 — 실호출로 확정 필요, 읽기전용)
     "ka10075": "/api/dostk/acnt",  # 미체결요청 (PLAN.md §5.48, 미확정 — 실호출로 확정 필요, 읽기전용)
-    "ka10004": "/api/dostk/mrkcond",  # 주식호가요청 (매물대 확인, 미확정 — 실호출로 확정 필요)
+    "ka10004": "/api/dostk/mrkcond",  # 주식호가요청 (매물대 확인, 2026-08-03 실호출 확정)
 }
 
 # ka10080/ka20005 tic_scope 허용값 — 2026-07-21 실호출로 8개 전부 확인(모듈
@@ -891,18 +903,23 @@ class KiwoomClient:
         return data
 
     async def stock_quote(self, code: str) -> dict[str, Any]:
-        """주식호가요청 (ka10004) — **실호출로 미확정**(모듈 docstring "주식호가요청(ka10004) 조사" 절 참고).
+        """주식호가요청 (ka10004) — **2026-08-03 실호출 확정**(모듈 docstring
+        "주식호가요청(ka10004) 조사·실측 확정" 절 참고).
 
         매수/매도 주문 전에 현재가 근처 매물대(호가 잔량)를 확인하는 용도.
         읽기 전용 조회라 place_buy_order류의 notional 캡은 필요 없다.
 
         Args:
-            code: 종목코드(예: "005930").
+            code: 종목코드(예: "005930"). ETF 코드도 그대로 동작함을 실측 확인
+                (레버리지/인버스 ETF 4종 포함, `routers/markets.py::
+                positioning_pair_view` 참고).
 
         Returns:
             `call_tr`이 반환한 응답 body dict 그대로(매도/매수 각 10단계 호가·잔량,
             총잔량, 시간외 잔량 등 — 필드 상세는 모듈 docstring 참고). 부호/파싱은
-            호출측 책임(이 파일의 다른 조회 메서드와 동일한 관례).
+            호출측 책임(이 파일의 다른 조회 메서드와 동일한 관례) — 매도/매수
+            10단계로 정리된 형태가 필요하면 이 파일의 `parse_quote_levels(data)`를
+            그대로 쓸 것(직접 파싱하지 말고 재사용).
         """
         data, _ = await self.call_tr("ka10004", {"stk_cd": code})
         return data
@@ -1600,3 +1617,74 @@ def parse_minute_chart_rows(data: dict[str, Any], api_id: str) -> list[dict[str,
             }
         )
     return out
+
+
+# -- ka10004(주식호가요청) 응답 파싱 (PLAN.md §5.50-2) --------------------------------
+
+
+def _parse_quote_value(raw: Any) -> float:
+    """ka10004 가격/잔량 필드 파싱. **2026-08-03 실호출로 확인**(모듈 docstring
+    "주식호가요청(ka10004) 조사·실측 확정" 절 참고) — 가격 필드는 실제로 `-`
+    부호가 항상 붙어 오고(예: `"-1597000"`), 잔량 필드는 부호 없이 순수
+    양수 문자열로 온다. 이 함수는 두 경우를 구분하지 않고 있으면 무시하고
+    절대값을 취해 둘 다 안전하게 커버한다. 파싱 불가/누락/빈 문자열은 조용히
+    0으로 처리한다(크래시 금지 — `quant/volume_profile.py` 모듈 docstring
+    "방어적 처리" 절과 동일한 태도, 호가 화면 하나가 필드 하나 때문에 500이
+    되면 안 된다)."""
+    if raw is None:
+        return 0.0
+    text = str(raw).strip()
+    if not text:
+        return 0.0
+    i = 0
+    while i < len(text) and text[i] in "+-":
+        i += 1
+    digits = text[i:]
+    if not digits:
+        return 0.0
+    try:
+        return abs(float(digits))
+    except ValueError:
+        return 0.0
+
+
+def parse_quote_levels(data: dict) -> dict:
+    """ka10004(주식호가요청) 원본 응답 dict를 매도/매수 각 10단계로 정리한다.
+
+    `KiwoomClient.stock_quote()`가 반환하는 raw dict를 그대로 받는 순수 함수 —
+    네트워크/DB 접근 없음(테스트하기 쉽게, `parse_minute_chart_rows`와 동일한
+    설계). 필드명은 모듈 docstring "주식호가요청(ka10004) 조사·실측 확정" 절 참고: 매도
+    1단계는 ``sel_fpr_bid``/``sel_fpr_req``, 2~10단계는
+    ``sel_{N}th_pre_bid``/``sel_{N}th_pre_req``. 매수도 동일 패턴
+    (``buy_fpr_bid``/``buy_fpr_req``, ``buy_{N}th_pre_bid``/``buy_{N}th_pre_req``).
+
+    Returns ``{"asks": [{"level": 1..10, "price": float, "qty": float}, ...],
+    "bids": [...동일 구조, level 1이 최우선호가...], "total_ask_qty": float,
+    "total_bid_qty": float, "base_time": str|None}`` — asks/bids 모두 level
+    오름차순(1→10) 리스트. 화면에 어떻게 뒤집어(매도는 10→1 위, 매수는 1→10
+    아래 사다리 순으로) 그릴지는 프런트 책임이다.
+    """
+
+    def _levels(side: str) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for level in range(1, 11):
+            if level == 1:
+                price_key, qty_key = f"{side}_fpr_bid", f"{side}_fpr_req"
+            else:
+                price_key, qty_key = f"{side}_{level}th_pre_bid", f"{side}_{level}th_pre_req"
+            out.append(
+                {
+                    "level": level,
+                    "price": _parse_quote_value(data.get(price_key)),
+                    "qty": _parse_quote_value(data.get(qty_key)),
+                }
+            )
+        return out
+
+    return {
+        "asks": _levels("sel"),
+        "bids": _levels("buy"),
+        "total_ask_qty": _parse_quote_value(data.get("tot_sel_req")),
+        "total_bid_qty": _parse_quote_value(data.get("tot_buy_req")),
+        "base_time": data.get("bid_req_base_tm") or None,
+    }
