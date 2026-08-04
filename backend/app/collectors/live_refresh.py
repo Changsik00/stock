@@ -23,6 +23,12 @@
    중심)의 하루 1회 사후 검증 스냅샷을 DB(positioning_snapshot 테이블)에
    남긴다 — 마찬가지로 새 외부 호출 없이 이미 워밍된 §5.50/§5.15 warm 함수만
    재사용한다(collectors/positioning_snapshot.py 모듈 docstring 참고).
+   **2026-08-04 추가(PLAN.md §5.54)**: 바로 이어서 `collectors/auto_trader.
+   run_auto_trade`도 호출한다 — 이 프로젝트 최초의 완전자동매매 실행 엔진
+   (0167A0 트레일링 스탑). 킬스위치(`AutoTradeState.enabled`) 기본값이 False라
+   (마이그레이션 시드) 사용자가 전용 탭에서 켜기 전까지는 이 호출이 매
+   폴링마다 즉시 반환되기만 하고 `place_buy_order`/`place_sell_order`를 전혀
+   호출하지 않는다(collectors/auto_trader.py 모듈 docstring 참고).
 2. ``live_refresh_extra``(7분, PLAN.md §4.7 3단 갱신 주기): value-rank/live
    1개만 채운다 — 코스피+코스닥 전 종목 페이지네이션(~44콜, 15~30초 소요)이라
    진짜로 비싼 유일한 소스다(수급 상위/flow-rank는 장중 실측 결과 소스 자체가
@@ -149,7 +155,7 @@ async def _run_live_refresh() -> None:
     from ..routers import basis as basis_router
     from ..routers import groups as groups_router
     from ..routers import markets
-    from . import intraday_snapshot, positioning_snapshot, scalp_tracker
+    from . import auto_trader, intraday_snapshot, positioning_snapshot, scalp_tracker
 
     if nxt_closed:
         logger.debug(
@@ -252,6 +258,21 @@ async def _run_live_refresh() -> None:
             logger.debug("live-refresh: positioning-snapshot %s", positioning_result)
         except Exception as e:  # noqa: BLE001
             logger.warning("live-refresh: positioning-snapshot 실패: %s", e)
+
+        # PLAN.md §5.54 — 완전자동매매 엔진(0167A0 트레일링 스탑) 1회 평가·실행.
+        # 이 프로젝트 최초로 실제 돈이 자동으로 움직이는 호출이다. `enabled`
+        # 킬스위치 기본값이 False라(마이그레이션 시드) 사용자가 전용 탭에서
+        # 명시적으로 켜기 전까지는 이 호출이 매 폴링마다 즉시 반환되기만 하고
+        # place_buy_order/place_sell_order를 전혀 호출하지 않는다 — 위
+        # scalp-tracker/positioning-snapshot과 완전히 동일한 이유(새 외부 호출은
+        # 이미 확보된 신호 계산부만 재사용)로 nxt_closed 게이트 밖에서 호출하되,
+        # 이 함수 자체는 내부에서 킬스위치로 스스로를 게이트한다
+        # (collectors/auto_trader.py 모듈 docstring 참고).
+        try:
+            auto_trade_result = await auto_trader.run_auto_trade(session)
+            logger.debug("live-refresh: auto-trader %s", auto_trade_result)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("live-refresh: auto-trader 실패: %s", e)
 
 
 async def _run_live_refresh_extra() -> None:

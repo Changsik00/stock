@@ -640,3 +640,30 @@ export async function deletePaperTrade(id) {
 export async function fetchPaperTrades(status = 'all') {
   return getJson(`/api/paper-trades?status=${status}`)
 }
+
+// -- 완전자동매매 엔진(SOL AI반도체TOP2플러스 0167A0, 트레일링 스탑) — PLAN.md
+// §5.54. 이 프로젝트 최초로 실제 주문(kt10000/kt10001)이 자동으로 나가는
+// 기능이다. 킬스위치(enabled) 기본값은 서버 쪽 마이그레이션이 이미 false로
+// 심어 뒀다 — 이 API들은 그 상태를 조회/전환/열람만 할 뿐 자체적으로 아무
+// 판단도 하지 않는다. 로컬 전용 기능, STATIC_DATA 대상 아님.
+
+// GET /api/auto-trade/state -> { enabled, status, code, entry_price, entry_qty,
+// entry_at, entry_order_no, peak_price, current_price, unrealized_pnl,
+// unrealized_pnl_pct, updated_at }. status가 "holding"|"trailing"일 때만
+// current_price 이하 필드가 채워진다(가격 조회 실패 시 전부 null).
+export async function fetchAutoTradeState() {
+  return getJson('/api/auto-trade/state')
+}
+
+// POST /api/auto-trade/toggle { enabled } -> 갱신된 state(위와 동일 모양).
+// 끌 때는 즉시 반영, 켤 때 이미 보유 중인 포지션이 있으면 그대로 유지된다.
+export async function toggleAutoTrade(enabled) {
+  return postJson('/api/auto-trade/toggle', { enabled })
+}
+
+// GET /api/auto-trade/log?limit=N(기본 200) -> { rows: [{id, ts, event_type,
+// code, price, reason, signal_snapshot, order_response}, ...] } — ts 내림차순
+// (매매일지, 최신이 먼저).
+export async function fetchAutoTradeLog(limit = 200) {
+  return getJson(`/api/auto-trade/log?limit=${limit}`)
+}

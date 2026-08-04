@@ -627,3 +627,73 @@ class PositioningSnapshot(Base):
     risk_alert_count: Mapped[int | None] = mapped_column(SmallInteger)
     same_day_remaining_change_rate: Mapped[float | None] = mapped_column(Numeric(8, 4))
     next_day_change_rate: Mapped[float | None] = mapped_column(Numeric(8, 4))
+
+
+class AutoTradeState(Base):
+    """자동매매 엔진의 현재 상태 — **단일 행(id=1)만 존재하는 싱글턴**(PLAN.md
+    §5.54). 이 프로젝트 최초의 완전자동매매 실행 엔진(`collectors/auto_trader.py`)이
+    참조/갱신하는 유일한 상태 저장소다.
+
+    ``enabled``가 **킬스위치**다 — 기본값 `False`(꺼짐)이고, 사용자가 전용 탭
+    (`AutoTradePage.jsx`)에서 명시적으로 켜기 전까지 `collectors/auto_trader.py`는
+    이 값을 함수 맨 첫 줄에서 확인해 `False`면 신호 평가조차 하지 않고 즉시
+    반환한다 — 이 원칙은 마이그레이션이 이 테이블에 `enabled=False`인 시드 행을
+    직접 INSERT하는 것으로도 한 번 더 보장한다(배포 직후부터 안전한 기본
+    상태여야 한다).
+
+    ``status``는 이 전략의 상태 기계 3단계: "idle"(포지션 없음, 진입 조건
+    감시 중) → "holding"(진입 완료, 손절만 감시) → "trailing"(진입가 대비
+    +1% 도달, 신고가 갱신하며 추세반전+플로어 도달을 감시) → (손절 또는
+    trailing 청산 시) 다시 "idle". 이 전략은 한 번에 포지션을 하나만
+    허용한다(단일 종목 0167A0, 단일 수량 1주) — `code`/`entry_*`/`peak_price`는
+    그 하나의 포지션에 대한 값이다.
+
+    킬스위치를 껐다 켜도(`POST /api/auto-trade/toggle`) 이 상태(특히 status/
+    entry_*)는 건드리지 않는다 — 사용자가 끄고 켜는 것만으로 실제 보유 포지션
+    정보가 유실되면 안 된다(PLAN.md §5.54 안전 설계)."""
+
+    __tablename__ = "auto_trade_state"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(nullable=False, default=False)  # 킬스위치, 기본 OFF
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="idle")  # idle|holding|trailing
+    code: Mapped[str] = mapped_column(String(20), nullable=False, default="0167A0")
+    entry_price: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    entry_qty: Mapped[int | None] = mapped_column(SmallInteger)
+    entry_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    entry_order_no: Mapped[str | None] = mapped_column(String(30))
+    peak_price: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class AutoTradeLog(Base):
+    """자동매매 감사 로그(매매일지) — **append-only**, 킬스위치가 켜진 상태에서
+    엔진이 내린 모든 판단/실행을 기록한다(PLAN.md §5.54, 사용자가 명시적으로
+    요청한 "매매일지, 판단 기준").
+
+    단순히 "샀다/팔았다"가 아니라 **그 순간의 신호값**(ma_cross state,
+    volume_spike 값, 가격, 진입가 대비 %, 어떤 조건이 충족/미충족이었는지)을
+    사람이 읽을 수 있는 문장으로 ``reason``에 남긴다 — house rule(§5)에 따라
+    "이 조합이 좋다/나쁘다" 같은 새로운 판단은 만들지 않고, 신호값과 실행
+    결과만 정직하게 서술한다. ``signal_snapshot``/``order_response``는 원본
+    JSON을 문자열로 그대로 보존해(사람이 읽는 reason과 별개로) 나중에 필요하면
+    원시 데이터를 다시 볼 수 있게 한다.
+
+    킬스위치가 꺼져 있는 동안(매 폴링마다 "disabled, skipped")이나 idle 상태에서
+    진입 조건이 미충족인 동안은 이 테이블에 아무 것도 쌓이지 않는다 — 노이즈를
+    피하기 위해 `collectors/auto_trader.py`가 의도적으로 로그를 남기지 않는
+    경로다(모듈 docstring 참고). ``id``는 `PaperTrade`와 동일한 이유(자연 키
+    없는 append-only 기록)로 autoincrement 정수 PK를 쓴다."""
+
+    __tablename__ = "auto_trade_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    event_type: Mapped[str] = mapped_column(String(20), nullable=False)  # entry|trail_activate|exit_trail|exit_stop_loss|error 등
+    code: Mapped[str] = mapped_column(String(20), nullable=False)
+    price: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    reason: Mapped[str] = mapped_column(String(1000), nullable=False)  # 사람이 읽는 판단 근거(신호값 포함)
+    signal_snapshot: Mapped[str | None] = mapped_column(String(2000))  # ma_cross/volume_spike 등 원본 JSON 문자열
+    order_response: Mapped[str | None] = mapped_column(String(2000))  # place_buy_order/place_sell_order 원본 응답 JSON 문자열(실행이 있었을 때만)

@@ -1,0 +1,351 @@
+"""자동매매 실행 엔진 — SOL AI반도체TOP2플러스(0167A0) 트레일링 스탑 (PLAN.md §5.54).
+
+**이 프로젝트 최초의 완전자동매매 실행 엔진이다 — 실제 증권 계좌(실전, 모의
+아님)에 연결돼 있고, `place_buy_order`/`place_sell_order`(`clients/kiwoom.py`,
+kt10000/kt10001, 2026-08-04 실호출 확정)를 실제로 호출해 진짜 돈을 움직인다.**
+이 모듈은 새 판단 로직을 만들지 않는다 — 사용자가 PLAN.md §5.54에서 직접
+확정한 진입/청산/손절 규칙을 기계적으로 실행할 뿐이다(house rule §5).
+
+## 절대 원칙(안전장치 — 바꾸지 말 것)
+
+1. **킬스위치 기본 OFF** — `AutoTradeState.enabled`가 False면 `run_auto_trade`는
+   맨 첫 줄에서 즉시 반환한다. 신호 평가조차 하지 않는다(로그도 남기지 않음 —
+   매 폴링마다 "disabled"를 기록하면 노이즈만 커진다).
+2. **누적 예산 가드** — `quant/auto_trade_rules.check_entry_budget`이
+   `AUTO_TRADE_TOTAL_BUDGET_KRW`(기본 25,000원, 사용자가 실제 입금한 금액)와
+   기존 `MAX_ORDER_NOTIONAL_KRW`(`clients/kiwoom.py`, 5만원, 주문 1건 캡)
+   **둘 다** 통과해야만 매수를 시도한다. 상태 기계가 한 번에 포지션 하나만
+   허용하므로(단일 종목, 단일 수량 1주) 실질적으로는 "이미 보유 중이면 추가
+   매수 안 함"과 같지만, 방어적으로 명시 체크를 둔다.
+3. **모든 실행/판단을 감사 로그(`AutoTradeLog`)에 남긴다** — 그 순간의
+   신호값(ma_cross state, volume_spike, 가격, 진입가 대비 %)을 사람이 읽을 수
+   있는 문장으로 남긴다. idle 상태에서 진입 조건 미충족, trailing 중 신고가만
+   조용히 갱신되는 경우는 의도적으로 로그하지 않는다 — `collectors/
+   scalp_tracker.py`/`positioning_snapshot.py`와 동일한 "의미 있는 사건만
+   기록" 태도(노이즈 방지).
+4. **house rule(§5)** — 이 엔진 자체는 사용자가 이미 확정한 규칙을 기계적으로
+   실행할 뿐이다. 로그 문구도 "이 조합이 좋다/나쁘다" 같은 새 판단을 만들지
+   않는다 — `quant/auto_trade_rules.py`가 만드는 reason 문자열(신호값과 임계값을
+   그대로 서술)을 그대로 저장한다.
+5. **주문 실패는 재시도 루프에 빠지지 않는다** — 매수/매도 시도는 각각 한 번의
+   `try/except`로 감싼다. 실패하면 `AutoTradeState`를 갱신하지 않고(잘못된
+   상태로 남기지 않음) 로그만 남기고 반환한다 — 조건이 다음 폴링에도 여전히
+   맞으면 자연히 재시도되지만, 이 함수 자체는 절대 같은 폴링 안에서 반복
+   시도하지 않는다.
+
+## 스케줄링 배선
+
+`collectors/live_refresh.py`의 60초 잡에서 `positioning_snapshot.
+track_positioning_snapshot` 호출 바로 옆에서 호출된다(같은 try/except 패턴).
+`enabled` 기본값이 False이므로 배포 직후에는 이 호출이 매 폴링마다 즉시
+반환되기만 하고 아무 부작용이 없다 — 안전하다.
+
+## 가격 정책 — "현재가"(판정용) vs "주문가"(체결용)
+
+상태 기계 판정(진입가 대비 %, 손절/트레일 조건)에 쓰는 **현재가**는 신호
+계산에 쓴 것과 같은 소스(§5.3 `GET /{code}/signals`가 쓰는 `_warm_stock_
+intraday`의 마지막 분봉 종가)를 그대로 재사용한다 — 중복 조회 없음. 반면
+**실제 주문가**(`place_buy_order`/`place_sell_order`에 넘기는 지정가)는 별도로
+`stock_quote`(ka10004, PLAN.md §5.50-2)를 호출해 즉시 체결 가능한 호가(매수
+주문 -> 매도 1호가, 매도 주문 -> 매수 1호가)를 쓴다 — 이건 새로운 매매
+"판단"이 아니라 지정가 주문이 실제로 체결되도록 하는 기계적 실행
+디테일이다(PLAN.md §5.54 지시 그대로).
+
+## 미체결 확인은 이 엔진의 책임이 아니다
+
+`place_buy_order`/`place_sell_order`가 성공(예외 없이 반환)하면 그 즉시 상태를
+전이한다(주문 접수 = 상태 전이) — 체결 여부를 `get_unfilled_orders`로 재확인하는
+루프는 두지 않는다(PLAN.md §5.54가 정의한 알고리즘 범위 밖). 즉시 체결 가능한
+호가로 지정가를 걸어 정상 시장 상황에서는 사실상 즉시 체결되는 것을 전제로
+한다 — 이 전제가 깨지는 경우(부분체결/미체결 잔류)에 대한 대응은 이번 범위
+밖의 후속 작업이다.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import json
+import logging
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..clients.kiwoom import MAX_ORDER_NOTIONAL_KRW, KiwoomClient, parse_quote_levels
+from ..models import AutoTradeLog, AutoTradeState
+from ..quant.auto_trade_rules import (
+    TARGET_CODE,
+    TARGET_QTY,
+    check_entry_budget,
+    decide_idle_action,
+    decide_position_action,
+)
+from ..quant.signals import moving_average_cross, volume_spike
+from ..routers.stocks import _warm_stock_intraday
+
+logger = logging.getLogger(__name__)
+
+# 이 자동매매 기능 전체의 누적 예산(원) — 사용자가 실제 입금한 금액(PLAN.md
+# §5.54). clients/kiwoom.py의 MAX_ORDER_NOTIONAL_KRW(5만원, 주문 1건 캡)와는
+# 별개로 추가 적용된다 — 둘 다 통과해야 매수 가능
+# (quant/auto_trade_rules.check_entry_budget). 실제 매수는 항상 이 값과
+# MAX_ORDER_NOTIONAL_KRW 중 더 작은 쪽이 사실상의 상한이 된다.
+AUTO_TRADE_TOTAL_BUDGET_KRW = 25_000
+
+STATE_ID = 1  # AutoTradeState 싱글턴 PK — routers/auto_trade.py와 동일한 상수 사용
+
+
+async def _get_state(session: AsyncSession) -> AutoTradeState | None:
+    return await session.get(AutoTradeState, STATE_ID)
+
+
+async def _log(
+    session: AsyncSession,
+    *,
+    event_type: str,
+    code: str,
+    price: float | None,
+    reason: str,
+    signal_snapshot: dict | None = None,
+    order_response: dict | None = None,
+) -> None:
+    session.add(
+        AutoTradeLog(
+            event_type=event_type,
+            code=code,
+            price=price,
+            reason=reason[:1000],
+            signal_snapshot=(
+                json.dumps(signal_snapshot, ensure_ascii=False, default=str)[:2000]
+                if signal_snapshot is not None
+                else None
+            ),
+            order_response=(
+                json.dumps(order_response, ensure_ascii=False, default=str)[:2000]
+                if order_response is not None
+                else None
+            ),
+        )
+    )
+    await session.commit()
+
+
+async def _best_fill_price(client: KiwoomClient, code: str, side: str) -> float | None:
+    """즉시 체결 가능한 지정가를 반환한다 — `side="buy"`는 매도 1호가
+    (`asks[0]`), `side="sell"`은 매수 1호가(`bids[0]`). 호가 잔량이 전부 0(호가
+    없음/데이터 없음)이면 None."""
+    data = await client.stock_quote(code)
+    levels = parse_quote_levels(data)
+    book = levels["asks"] if side == "buy" else levels["bids"]
+    for lvl in book:
+        if lvl["price"] > 0:
+            return lvl["price"]
+    return None
+
+
+async def run_auto_trade(session: AsyncSession) -> dict:
+    """PLAN.md §5.54 상태 기계를 1회 평가·실행한다.
+
+    Returns 요약 dict(로깅용, `scalp_tracker.track_scalp_picks`/
+    `positioning_snapshot.track_positioning_snapshot`의 반환 관례 참고) —
+    ``{"enabled": bool, "action": str, ...}``. ``action``은
+    "none"(꺼짐/조건 미충족/신고가만 조용히 갱신)|"enter"|"trail_activate"|
+    "exit_stop_loss"|"exit_trail"|"budget_blocked"|"buy_failed"|"sell_failed"|
+    "error" 중 하나.
+    """
+    result: dict = {"enabled": False, "action": "none"}
+
+    state = await _get_state(session)
+    if state is None or not state.enabled:
+        # 킬스위치 꺼짐(또는 시드 행이 없는 비정상 상태) — 신호 평가조차 하지
+        # 않고 즉시 반환. 로그도 남기지 않는다(노이즈 방지, 모듈 docstring 참고).
+        return result
+
+    result["enabled"] = True
+    code = state.code or TARGET_CODE
+
+    try:
+        intraday = await _warm_stock_intraday(code, 1)
+    except Exception as e:  # noqa: BLE001 - 신호 조회 실패는 다음 폴링에서 재시도
+        logger.warning("auto-trade: intraday 조회 실패, 이번 폴링 건너뜀: %s", e)
+        result["action"] = "error"
+        result["error"] = str(e)[:300]
+        return result
+
+    bars = intraday.get("bars") if intraday else None
+    if not bars:
+        result["action"] = "no_bars"
+        return result
+
+    current_price = bars[-1]["close"]
+    ma_cross = moving_average_cross(bars)
+    vspike = volume_spike(bars)
+    signal_snapshot = {
+        "ma_cross": ma_cross,
+        "volume_spike": vspike,
+        "current_price": current_price,
+    }
+
+    if state.status == "idle":
+        return await _handle_idle(session, state, code, current_price, ma_cross, vspike, signal_snapshot, result)
+
+    return await _handle_position(session, state, code, current_price, ma_cross, signal_snapshot, result)
+
+
+async def _handle_idle(
+    session: AsyncSession,
+    state: AutoTradeState,
+    code: str,
+    current_price: float,
+    ma_cross: dict,
+    vspike: dict,
+    signal_snapshot: dict,
+    result: dict,
+) -> dict:
+    decision = decide_idle_action(ma_cross["state"], vspike["is_spike"])
+    result["action"] = decision["action"]
+    if decision["action"] != "enter":
+        # idle + 조건 미충족은 노이즈라 로그하지 않는다(모듈 docstring 원칙 3).
+        return result
+
+    notional = TARGET_QTY * current_price
+    if not check_entry_budget(state.status, notional, AUTO_TRADE_TOTAL_BUDGET_KRW, MAX_ORDER_NOTIONAL_KRW):
+        await _log(
+            session,
+            event_type="error",
+            code=code,
+            price=current_price,
+            reason=(
+                f"{decision['reason']} — 그러나 예산 가드 실패: notional={notional} "
+                f"(qty={TARGET_QTY} x price={current_price}), "
+                f"budget={AUTO_TRADE_TOTAL_BUDGET_KRW}, "
+                f"max_order_notional={MAX_ORDER_NOTIONAL_KRW}, status={state.status}"
+            ),
+            signal_snapshot=signal_snapshot,
+        )
+        result["action"] = "budget_blocked"
+        return result
+
+    try:
+        async with KiwoomClient() as client:
+            order_price = await _best_fill_price(client, code, "buy")
+            if order_price is None:
+                raise RuntimeError("매도호가를 확인할 수 없어 주문가를 정할 수 없음")
+            order_response = await client.place_buy_order(code, TARGET_QTY, int(order_price))
+    except Exception as e:  # noqa: BLE001 - 주문 실패는 재시도 루프에 빠지지 않고 로그만
+        logger.warning("auto-trade: 매수 주문 실패: %s", e)
+        await _log(
+            session,
+            event_type="error",
+            code=code,
+            price=current_price,
+            reason=f"매수 주문 시도 실패: {decision['reason']} / 오류: {e}",
+            signal_snapshot=signal_snapshot,
+        )
+        result["action"] = "buy_failed"
+        result["error"] = str(e)[:300]
+        return result
+
+    now = dt.datetime.now(dt.timezone.utc)
+    state.status = "holding"
+    state.entry_price = order_price
+    state.entry_qty = TARGET_QTY
+    state.entry_at = now
+    state.entry_order_no = str(order_response.get("ord_no")) if order_response.get("ord_no") else None
+    state.peak_price = None
+    await session.commit()
+
+    await _log(
+        session,
+        event_type="entry",
+        code=code,
+        price=order_price,
+        reason=decision["reason"] + f" -> 매수 주문 제출(지정가 {order_price}원, {TARGET_QTY}주)",
+        signal_snapshot=signal_snapshot,
+        order_response=order_response,
+    )
+    result["action"] = "entry"
+    return result
+
+
+async def _handle_position(
+    session: AsyncSession,
+    state: AutoTradeState,
+    code: str,
+    current_price: float,
+    ma_cross: dict,
+    signal_snapshot: dict,
+    result: dict,
+) -> dict:
+    decision = decide_position_action(
+        state.status,
+        float(state.entry_price),
+        float(state.peak_price) if state.peak_price is not None else None,
+        ma_cross["state"],
+        current_price,
+    )
+    result["action"] = decision["action"]
+
+    if decision["action"] == "none":
+        return result
+
+    if decision["action"] == "peak_update":
+        # trailing 중 신고가만 조용히 갱신 — 로그하지 않는다(모듈 docstring 원칙 3).
+        state.peak_price = decision["new_peak_price"]
+        await session.commit()
+        return result
+
+    if decision["action"] == "trail_activate":
+        state.status = "trailing"
+        state.peak_price = decision["new_peak_price"]
+        await session.commit()
+        await _log(
+            session,
+            event_type="trail_activate",
+            code=code,
+            price=current_price,
+            reason=decision["reason"],
+            signal_snapshot=signal_snapshot,
+        )
+        return result
+
+    # stop_loss 또는 exit_trail -> 매도
+    event_type = "exit_stop_loss" if decision["action"] == "stop_loss" else "exit_trail"
+    try:
+        async with KiwoomClient() as client:
+            order_price = await _best_fill_price(client, code, "sell")
+            if order_price is None:
+                raise RuntimeError("매수호가를 확인할 수 없어 주문가를 정할 수 없음")
+            order_response = await client.place_sell_order(
+                code, int(state.entry_qty or TARGET_QTY), int(order_price)
+            )
+    except Exception as e:  # noqa: BLE001 - 주문 실패는 재시도 루프에 빠지지 않고 로그만
+        logger.warning("auto-trade: 매도 주문 실패: %s", e)
+        await _log(
+            session,
+            event_type="error",
+            code=code,
+            price=current_price,
+            reason=f"매도 주문 시도 실패({event_type}): {decision['reason']} / 오류: {e}",
+            signal_snapshot=signal_snapshot,
+        )
+        result["action"] = "sell_failed"
+        result["error"] = str(e)[:300]
+        return result
+
+    state.status = "idle"
+    state.entry_price = None
+    state.entry_qty = None
+    state.entry_at = None
+    state.entry_order_no = None
+    state.peak_price = None
+    await session.commit()
+
+    await _log(
+        session,
+        event_type=event_type,
+        code=code,
+        price=order_price,
+        reason=decision["reason"] + f" -> 매도 주문 제출(지정가 {order_price}원)",
+        signal_snapshot=signal_snapshot,
+        order_response=order_response,
+    )
+    return result

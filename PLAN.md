@@ -3077,10 +3077,18 @@ TOP2플러스(0167A0, 2026-08-04 기준 현재가 16,060원, 하루 거래대금
 | # | 작업 | 내용 | 완료 기준 |
 |---|---|---|---|
 | 5.54-0 ✅ | 주문 TR 실호출 검증(선행) | 1주, 체결 불가 가격으로 매수 → 미체결 조회 → 취소. 실제 응답 필드 확인해 kt10000/kt10003/ka10075 docstring "미확정" 표기 갱신 | ✅ 완료(2026-08-04) — 0193T0로 먼저 시도해 파생상품 ETF 등록 필요 사실을 발견(위 "대상" 절), 0167A0로 전환해 실호출 3단계 전부 성공(주문 접수 ord_no=0014198 → 미체결 조회로 `ord_stt`="접수"/`cntr_qty`="0" 확인 → 취소 성공 → 재조회로 `oso: []` 확인). 실제 체결 0건, 돈 이동 없음. 과정에서 버그 3건 발견·수정: `ord_qty`/`ord_uv`는 정수가 아니라 문자열이어야 함(kt10000/kt10001), `ka10075`는 빈 body 대신 `{"all_stk_tp":"0","trde_tp":"0","stk_cd":"","stex_tp":"0"}` 필요, `kt10003`은 수량 필드명이 `ord_qty`가 아니라 `cncl_qty`. pytest 773개 통과(회귀 테스트 갱신 포함) |
-| 5.54-1 | 자동매매 DB 스키마 | `auto_trade_state`(단일 행 상태: enabled, status, code, entry_price, entry_at, peak_price, qty), `auto_trade_log`(append-only 감사로그: ts, event_type, price, reason, raw_order_response) | `alembic upgrade head` 성공 |
-| 5.54-2 | 누적 예산 가드 | `AUTO_TRADE_TOTAL_BUDGET_KRW` 상수 + 매수 전 체크 함수, 기존 `MAX_ORDER_NOTIONAL_KRW`와 별개로 적용 | 단위테스트(이미 보유 중이면 추가 매수 거부) |
-| 5.54-3 | 상태 기계 실행 엔진 | `collectors/auto_trader.py` — 진입/트레일전환/청산/손절 조건 감시, `place_buy_order`/`place_sell_order` 실호출. 킬스위치 꺼져 있으면 아무 것도 안 함. 스케줄러(장중 폴링)에 배선 | 실 컨테이너에서 상태 전이 로그로 확인(장중 실데이터) |
-| 5.54-4 | 전용 탭 | `AutoTradePage.jsx` — 킬스위치, 현재 상태, 히스토리 테이블 | vite build 클린, 실 컨테이너 확인 |
+| 5.54-1 ✅ | 자동매매 DB 스키마 | `auto_trade_state`(단일 행 상태: enabled, status, code, entry_price, entry_at, peak_price, qty), `auto_trade_log`(append-only 감사로그: ts, event_type, price, reason, signal_snapshot, order_response) | ✅ 완료(2026-08-04) — `alembic upgrade head` 성공, 마이그레이션이 `enabled=false` 시드 행을 직접 INSERT(배포 직후부터 안전한 기본 상태) |
+| 5.54-2 ✅ | 누적 예산 가드 | `AUTO_TRADE_TOTAL_BUDGET_KRW`(25,000원) 상수 + 매수 전 체크 함수, 기존 `MAX_ORDER_NOTIONAL_KRW`와 별개로 둘 다 적용 | ✅ 완료(2026-08-04) — `quant/auto_trade_rules.check_entry_budget`, 단위테스트로 예산 초과 시 `KiwoomClient` 인스턴스화 자체가 없음을 확인 |
+| 5.54-3 ✅ | 상태 기계 실행 엔진 | `collectors/auto_trader.py` — 진입/트레일전환/청산/손절 조건 감시, `place_buy_order`/`place_sell_order` 실호출. 킬스위치 꺼져 있으면 아무 것도 안 함. 스케줄러(장중 폴링)에 배선 | ✅ 완료(2026-08-04) — 단위테스트 14건(킬스위치 꺼짐 시 외부 호출 0건이 가장 중요한 케이스, 손절이 트레일 로직보다 항상 우선, 신고가 갱신/조건 미충족은 로그 안 남김, 주문 실패 시 상태 오염 없음 등). live_refresh 60초 잡에서 실제로 몇 차례 폴링됐으나(장중, 조건 미충족) 실주문 0건 — 로그·실계좌 미체결조회로 교차 확인 |
+| 5.54-4 ✅ | 전용 탭 | `AutoTradePage.jsx` — 킬스위치, 현재 상태, 히스토리 테이블 | ✅ 완료(2026-08-04) — 킬스위치 ON일 때 눈에 띄는 경고(빨간 테두리+"실제 주문이 자동으로 나갑니다"), 15초 자동 새로고침. **STATIC_DATA(GitHub Pages 공개 배포) 빌드에서는 탭 자체를 숨김**(실전 계좌 연결 기능을 공개 데모에 노출하지 않음, `App.jsx`). vite build 클린 |
+
+**검증 중 발견한 프로세스 이슈**: 구현 위임 에이전트가 완료 기준 (c)(실제 킬스위치를 켜서 라이브 폴링 확인) 수행 후 (d)(반드시 다시 끄기)를 마치지 못한 채로 종료됐다 — 메인 세션이 결과 보고를 받자마자 DB를 직접 확인해 `enabled=true`로 남아 있는 걸 발견하고 즉시 껐다(실제 계좌 미체결조회·`auto_trade_log` 0건으로 교차 확인해 그 사이 실주문은 전혀 없었음을 확인). **교훈**: 실제 자금이 걸린 스위치를 만지는 검증 단계는, 위임하더라도 반드시 사람이 직접 최종 상태를 재확인해야 한다 — 이번엔 문제 없었지만 다음에도 이 원칙을 지킨다.
+
+**검증 중 발견한 무관한 기존 이슈**: `tests/test_markets_positioning_hitrate_router.py`가 전체 스위트 실행 시 가끔 setup 단계에서 `RuntimeError: Event loop is closed`로 죽는다(pytest-asyncio 이벤트루프 재사용 + SQLAlchemy 커넥션 풀 간 기존 충돌로 추정) — 새 auto_trade 테스트 파일들을 빼고 실행해도 동일하게 재현돼 **이번 작업과 무관한 기존 결함**임을 확인했다. 단독 실행 시엔 항상 통과(로직 자체는 정상). 후속 조사 과제로 남겨 둔다.
+
+**중요 — 알려진 설계 한계(사용자에게 보고, 다음 논의 필요)**: 이 엔진은 매수/매도 주문이 성공(예외 없이 반환)하면 그 즉시 상태를 전이한다 — `get_unfilled_orders`로 실제 체결 여부를 재확인하는 루프는 없다(즉시 체결 가능한 반대편 최우선호가로 지정가를 걸어 사실상 즉시 체결된다고 가정). 정상적인 유동성 상황에서는 문제없지만, 부분체결/미체결 잔류가 실제로 발생하면 이 엔진은 알아채지 못한다 — 이번 범위 밖의 후속 작업.
+
+**킬스위치는 검증 완료 후에도 꺼진 상태로 남겨 뒀다** — 사용자가 전용 탭에서 직접 켜기 전까지는 계속 꺼짐.
 
 **후속(이번 범위 밖)**: 인버스(0197X0) 활용, 진입/청산 파라미터를 UI에서 직접 조정하는
 기능은 이번 범위에서 제외 — 지금은 상수로 고정.
