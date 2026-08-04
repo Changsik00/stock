@@ -352,8 +352,36 @@ ka90013용으로 스키마만 미리 만들어 둔 채 수집기/라우터/프�
   방식으로 전담 처리한다(`_parse_minute_price`가 절대값만 반환하는 것과
   달리, 여기는 부호 자체가 의미 있는 값이라 보존해야 한다).
 
-## 주문 TR(kt10000~kt10003)/계좌 TR(kt00001, ka10075) 조사 — 실호출로 미확정
-(2026-07-31, PLAN.md §5.48, 실전 매매 최초 도입)
+## 주문 TR(kt10000~kt10003)/계좌 TR(kt00001, ka10075) 조사·실측 확정
+(2026-07-31 조사, 2026-08-04 kt10000/kt10003/ka10075 실호출 확정 — PLAN.md
+§5.48/§5.54, 실전 매매 최초 도입)
+
+**2026-08-04 실전 계좌 실호출 검증 결과**(§5.54-0, 체결 불가 가격으로 1주
+매수 → 미체결 조회로 확인 → 취소, 실제 체결 0건): 아래 "조사" 절의 body
+필드 형태는 URL·필드명은 맞았지만 **타입이 틀렸다** — `ord_qty`/`ord_uv`는
+정수가 아니라 **문자열**이어야 했다(다른 모든 TR과 동일한 관례인데 이
+TR만 실수로 정수를 보내고 있었다, 실제 오류: `[1517] 파라미터=ord_qty
+타입 불일치`). `trde_tp="0"`(보통/지정가)은 실호출로 확정. `ka10075`
+(미체결요청)는 빈 body로는 `[1511] 필수입력 파라미터=all_stk_tp` 오류가
+나며, `{"all_stk_tp": "0", "trde_tp": "0", "stk_cd": "", "stex_tp": "0"}`
+로 정상 동작 확인. `kt10003`(취소주문)은 `orig_ord_no`는 맞았지만 수량
+필드는 `ord_qty`가 아니라 **`cncl_qty`**(문자열)였다. 계좌번호는 예상대로
+요청 body/헤더에 불필요(앱키/토큰으로 암묵 결정). `kt10001`(매도)/
+`kt10002`(정정)/`kt00001`(예수금상세)은 이번에 아직 실호출하지 않아 여전히
+미확정 상태로 남는다(매도는 kt10000과 body 구조가 동일하다고 알려져 있어
+같은 타입 수정을 이미 반영해 뒀지만, 실제 매도 체결로 확정된 적은 없다).
+
+**중요 발견 — 레버리지/인버스 ETF는 별도 계좌 등록이 필요하다**: §5.50에서
+확보한 4개 타깃 ETF(0193W0/0193T0/0193L0/0197X0, 전부 2X 또는 -2X)는
+"파생상품 ETF"로 분류돼 있어, 매수 시도 시 `[2000] 파생상품 ETF 거래신청
+등록 후 주문이 가능합니다`로 즉시 거부됐다(2026-08-04 0193T0 실측) — 코드
+문제가 아니라 계좌 자체가 이 상품군 거래 적합성 심사(파생상품 이해도
+테스트/거래신청)를 아직 통과하지 못한 상태다. 일반(1배수, 비합성) ETF는
+이 제한이 없음을 같은 날 0167A0(SOL AI반도체TOP2플러스)로 확인했다 —
+§5.54의 자동매매 대상을 이 종목으로 변경한 이유(PLAN.md §5.54 참고).
+
+(2026-07-31, PLAN.md §5.48, 실전 매매 최초 도입 — 아래는 위 실측 이전의
+원 조사 기록, 역사적 참고용으로 그대로 남겨 둔다)
 
 이 프로젝트가 지금까지 다룬 모든 TR은 읽기 전용 시세/수급 조회였다. 이번에
 처음으로 실제 돈이 오가는 주문 제출 기능을 추가한다 — 사용자가 합의한 총
@@ -1368,9 +1396,10 @@ class KiwoomClient:
         exchange: str = "KRX",
         order_type: str = ORDER_TRADE_TYPE_LIMIT,
     ) -> dict[str, Any]:
-        """매수주문 (kt10000) — **실호출로 미확정**(모듈 docstring "주문 TR
-        (kt10000~kt10003)/계좌 TR 조사" 절 참고). 이 클라이언트가 처음으로
-        실제 돈이 오가는 주문을 내는 메서드다.
+        """매수주문 (kt10000) — **2026-08-04 실호출 확정**(모듈 docstring
+        "주문 TR(kt10000~kt10003)/계좌 TR 조사·실측 확정" 절 참고 — `ord_qty`/
+        `ord_uv`는 정수가 아니라 문자열로 보내야 했다). 이 클라이언트가 처음
+        으로 실제 돈이 오가는 주문을 내는 메서드다.
 
         **안전장치(우회 불가)**: HTTP 호출 전에 `quantity * price`(notional)를
         계산해 `MAX_ORDER_NOTIONAL_KRW`(5만원, 사용자가 합의한 이 기능 전체의
@@ -1415,8 +1444,8 @@ class KiwoomClient:
         body = {
             "dmst_stex_tp": exchange,
             "stk_cd": stock_code,
-            "ord_qty": quantity,
-            "ord_uv": price,
+            "ord_qty": str(quantity),
+            "ord_uv": str(price),
             "trde_tp": order_type,
         }
         data, _ = await self.call_tr("kt10000", body)
@@ -1454,8 +1483,8 @@ class KiwoomClient:
         body = {
             "dmst_stex_tp": exchange,
             "stk_cd": stock_code,
-            "ord_qty": quantity,
-            "ord_uv": price,
+            "ord_qty": str(quantity),
+            "ord_uv": str(price),
             "trde_tp": order_type,
         }
         data, _ = await self.call_tr("kt10001", body)
@@ -1468,17 +1497,18 @@ class KiwoomClient:
         quantity: int,
         exchange: str = "KRX",
     ) -> dict[str, Any]:
-        """취소주문 (kt10003) — **실호출로 미확정**. 자금 노출을 새로 만들지
+        """취소주문 (kt10003) — 2026-08-04 실호출 확정. 자금 노출을 새로 만들지
         않는(오히려 없애는) 동작이라 `MAX_ORDER_NOTIONAL_KRW` 캡은 걸지 않는다.
 
-        원주문번호의 정확한 요청 JSON 키는 미확정이다(후보: `orig_ord_no` —
-        모듈 docstring "주문 TR" 절 참고). 실호출로 실제 키가 다르다고
-        밝혀지면 아래 `body` dict 한 곳만 고치면 되도록 `orig_order_no`를
-        별도 named parameter로 분리해 뒀다.
+        `orig_ord_no`는 조사 단계 추정이 맞았다(실호출 확인). 다만 수량 필드는
+        `ord_qty`가 아니라 `cncl_qty`(취소수량)였다 — `place_buy_order`류와
+        달리 이 TR만 별도 이름을 쓴다(2026-08-04, 0167A0 테스트 주문 취소로
+        확인). 수량 필드도 문자열로 보내야 한다(다른 주문 TR들과 동일한
+        타입 요구사항, 같은 날 실호출로 함께 확인).
 
         Args:
             stock_code: 종목코드.
-            orig_order_no: 취소 대상 원주문번호(주문 시 응답으로 받은 값).
+            orig_order_no: 취소 대상 원주문번호(주문 시 응답의 `ord_no`).
             quantity: 취소수량.
             exchange: 거래소구분 — 기본값 "KRX"(주문 메서드들과 동일 관례).
 
@@ -1489,7 +1519,7 @@ class KiwoomClient:
             "dmst_stex_tp": exchange,
             "stk_cd": stock_code,
             "orig_ord_no": orig_order_no,
-            "ord_qty": quantity,
+            "cncl_qty": str(quantity),
         }
         data, _ = await self.call_tr("kt10003", body)
         return data
@@ -1510,17 +1540,23 @@ class KiwoomClient:
         return data
 
     async def get_unfilled_orders(self) -> dict[str, Any]:
-        """미체결요청 (ka10075) — **읽기전용**, 실호출로 미확정.
+        """미체결요청 (ka10075) — **읽기전용**, 2026-08-04 실호출 확정.
 
         `place_buy_order`/`place_sell_order`로 낸 주문이 실제로 서버에
         걸렸는지 취소 전에 확인하는 용도(비체결 지정가 주문 검증 절차).
-        `get_deposit_detail`과 마찬가지로 파라미터 요구사항이 미확정이라
-        일단 빈 body로 호출한다.
+        빈 body로는 400(`all_stk_tp` 필수 입력 누락)이 나서, 실호출로
+        `{"all_stk_tp": "0", "trde_tp": "0", "stk_cd": "", "stex_tp": "0"}`
+        (전체종목/전체매매구분/전체종목코드/전체거래소)이 정상 동작함을
+        확인했다(2026-08-04, 0167A0 테스트 주문으로 검증 — 응답 `oso` 배열의
+        `ord_stt`가 "접수"로 미체결 상태를 확인할 수 있었다).
 
         Returns:
-            `call_tr`이 반환한 응답 body dict.
+            `call_tr`이 반환한 응답 body dict — ``oso``가 미체결 주문 배열
+            (`ord_no`, `ord_stt`("접수" 등), `ord_qty`, `ord_pric`, `cntr_qty`
+            (체결수량, "0"이면 미체결) 등 포함).
         """
-        data, _ = await self.call_tr("ka10075", {})
+        body = {"all_stk_tp": "0", "trde_tp": "0", "stk_cd": "", "stex_tp": "0"}
+        data, _ = await self.call_tr("ka10075", body)
         return data
 
 

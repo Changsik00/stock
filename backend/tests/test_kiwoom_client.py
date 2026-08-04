@@ -651,8 +651,8 @@ async def test_place_buy_order_sends_correct_body(make_client):
     assert captured["body"] == {
         "dmst_stex_tp": "KRX",
         "stk_cd": "007980",
-        "ord_qty": 1,
-        "ord_uv": 1928,
+        "ord_qty": "1",
+        "ord_uv": "1928",
         "trde_tp": "0",
     }
     assert data["ord_no"] == "0000001"
@@ -715,7 +715,7 @@ async def test_place_buy_order_at_exact_cap_boundary_is_allowed(make_client):
     finally:
         await client.aclose()
 
-    assert captured["body"]["ord_qty"] == 10
+    assert captured["body"]["ord_qty"] == "10"
     assert data["ord_no"] == "0000001"
 
 
@@ -738,8 +738,8 @@ async def test_place_sell_order_sends_correct_body(make_client):
     assert captured["body"] == {
         "dmst_stex_tp": "KRX",
         "stk_cd": "007980",
-        "ord_qty": 1,
-        "ord_uv": 1928,
+        "ord_qty": "1",
+        "ord_uv": "1928",
         "trde_tp": "0",
     }
     assert data["ord_no"] == "0000001"
@@ -765,7 +765,7 @@ async def test_cancel_order_sends_correct_body(make_client):
         "dmst_stex_tp": "KRX",
         "stk_cd": "007980",
         "orig_ord_no": "0000001",
-        "ord_qty": 1,
+        "cncl_qty": "1",
     }
     assert data["ord_no"] == "0000001"
 
@@ -830,7 +830,12 @@ async def test_get_unfilled_orders_request_shape(make_client):
             return _token_response(request)
         assert request.url.path == "/api/dostk/acnt"
         assert request.headers["api-id"] == "ka10075"
-        assert json.loads(request.content) == {}
+        assert json.loads(request.content) == {
+            "all_stk_tp": "0",
+            "trde_tp": "0",
+            "stk_cd": "",
+            "stex_tp": "0",
+        }
         return httpx.Response(
             200,
             json={"return_code": 0, "return_msg": "", "oso": []},
