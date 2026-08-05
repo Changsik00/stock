@@ -33,6 +33,20 @@ kt10000/kt10001, 2026-08-04 실호출 확정)를 실제로 호출해 진짜 돈�
    맞으면 자연히 재시도되지만, 이 함수 자체는 절대 같은 폴링 안에서 반복
    시도하지 않는다.
 
+## 진입 신호 감지 — "지금 이 순간"이 아니라 "최근 몇 봉 이내"(2026-08-05 수정)
+
+골든크로스(`quant/signals.py::moving_average_cross`)는 교차가 일어난 바로 그
+1분봉에서만 "golden"이고, 다음 봉부터는 이미 "none"으로 돌아가는 순간 이벤트다.
+60초 폴링과 1분봉 경계가 정확히 맞아떨어지지 않으면 이 순간을 그냥 지나칠 수
+있다 — 실제로 2026-08-05 10:33 KST에 골든크로스+거래량 스파이크가 동시에
+떴는데도(사후 재계산 확인) 폴링이 이 정확한 순간을 못 맞춰 진입이 일어나지
+않은 사례가 있었다(사용자 지적으로 발견). `_golden_cross_in_lookback`/
+`_volume_spike_in_lookback`(아래)이 "지금 이 순간"뿐 아니라
+`ENTRY_SIGNAL_LOOKBACK_BARS`(3봉, 약 3분) 이내에 신호가 있었는지도 함께
+본다 — 조건 자체(golden AND spike)를 느슨하게 하는 게 아니라 감지 시점만
+넓혀 이 폴링 타이밍 미스를 없앤다. 청산(dead cross) 판정은 이번 수정 범위
+밖이다(최신 봉 기준 그대로) — 진입에서 실제로 관측된 문제만 고쳤다.
+
 ## 스케줄링 배선
 
 `collectors/live_refresh.py`의 60초 잡에서 `positioning_snapshot.
@@ -91,6 +105,39 @@ logger = logging.getLogger(__name__)
 AUTO_TRADE_TOTAL_BUDGET_KRW = 25_000
 
 STATE_ID = 1  # AutoTradeState 싱글턴 PK — routers/auto_trade.py와 동일한 상수 사용
+
+# **2026-08-05 실측 버그 수정**: `moving_average_cross`는 "교차가 일어난 바로 그
+# 1분봉"에서만 "golden"이고, 다음 봉부터는 이미 "none"으로 돌아간다(순간 이벤트).
+# 60초 폴링과 1분봉 경계가 정확히 안 맞아떨어지면(예: 봉이 아직 마감되기 전에
+# 폴링하거나, 폴링 시점에 이미 다음 봉이 "최신"이 돼 있으면) 이 순간을 그냥
+# 지나칠 수 있다 — 실제로 2026-08-05 10:33 KST에 골든크로스+거래량 스파이크가
+# 동시에 떴는데도(사후 재계산으로 확인) 폴링이 이 정확한 순간을 못 맞춰 진입이
+# 일어나지 않았다(사용자 지적, 로그로 재현·확인). 조건 자체(golden AND spike)를
+# 느슨하게 하는 게 아니라, "지금 이 순간"만 보던 걸 "최근 몇 봉 안에 있었는지"로
+# 감지 시점만 넓혀서 이 폴링 타이밍 미스를 없앤다.
+ENTRY_SIGNAL_LOOKBACK_BARS = 3
+
+
+def _golden_cross_in_lookback(bars: list[dict]) -> bool:
+    """최근 `ENTRY_SIGNAL_LOOKBACK_BARS`개 봉 중 하나라도 그 시점 기준으로
+    골든크로스였으면 True. `moving_average_cross`는 항상 "지금까지 주어진
+    봉 리스트의 마지막 봉" 기준으로 판정하므로, 봉을 하나씩 줄여 가며(과거
+    시점을 재현해) 반복 호출한다 — 새 지표가 아니라 기존 `moving_average_cross`를
+    여러 시점에 다시 적용할 뿐이다."""
+    if len(bars) < 21:  # moving_average_cross의 long_window(20)+1 최소 요구량
+        return False
+    start = max(21, len(bars) - ENTRY_SIGNAL_LOOKBACK_BARS + 1)
+    return any(moving_average_cross(bars[:i])["state"] == "golden" for i in range(start, len(bars) + 1))
+
+
+def _volume_spike_in_lookback(bars: list[dict]) -> bool:
+    """최근 `ENTRY_SIGNAL_LOOKBACK_BARS`개 봉 중 하나라도 그 시점 기준으로
+    거래량 스파이크였으면 True. `_golden_cross_in_lookback`과 동일한 방식
+    (기존 `volume_spike`를 여러 시점에 재적용)."""
+    if len(bars) < 2:
+        return False
+    start = max(1, len(bars) - ENTRY_SIGNAL_LOOKBACK_BARS + 1)
+    return any(volume_spike(bars[:i])["is_spike"] for i in range(start, len(bars) + 1))
 
 
 async def _get_state(session: AsyncSession) -> AutoTradeState | None:
@@ -178,14 +225,23 @@ async def run_auto_trade(session: AsyncSession) -> dict:
     current_price = bars[-1]["close"]
     ma_cross = moving_average_cross(bars)
     vspike = volume_spike(bars)
+    # 진입 판정 전용 — "지금 이 순간"뿐 아니라 최근 몇 봉 안에 신호가 있었는지도
+    # 함께 본다(모듈 상단 "2026-08-05 실측 버그 수정" 절 참고). 청산(dead cross)
+    # 판정은 이번 수정 범위 밖이라 `ma_cross`(최신 봉 기준)를 그대로 쓴다.
+    golden_recent = ma_cross["state"] == "golden" or _golden_cross_in_lookback(bars)
+    spike_recent = bool(vspike["is_spike"]) or _volume_spike_in_lookback(bars)
     signal_snapshot = {
         "ma_cross": ma_cross,
         "volume_spike": vspike,
         "current_price": current_price,
+        "golden_cross_recent": golden_recent,
+        "volume_spike_recent": spike_recent,
     }
 
     if state.status == "idle":
-        return await _handle_idle(session, state, code, current_price, ma_cross, vspike, signal_snapshot, result)
+        return await _handle_idle(
+            session, state, code, current_price, golden_recent, spike_recent, signal_snapshot, result
+        )
 
     return await _handle_position(session, state, code, current_price, ma_cross, signal_snapshot, result)
 
@@ -195,12 +251,18 @@ async def _handle_idle(
     state: AutoTradeState,
     code: str,
     current_price: float,
-    ma_cross: dict,
-    vspike: dict,
+    golden_recent: bool,
+    spike_recent: bool,
     signal_snapshot: dict,
     result: dict,
 ) -> dict:
-    decision = decide_idle_action(ma_cross["state"], vspike["is_spike"])
+    # `evaluate_entry`/`decide_idle_action`은 문자열 ma_cross_state를 받아
+    # `== "golden"`으로 비교한다(quant/auto_trade_rules.py) — 이미 "최근 봉
+    # 이내 골든크로스 있었음"으로 판정된 값이므로, 그 인터페이스를 그대로
+    # 재사용하려고 "golden"/"none" 문자열로 다시 인코딩한다(모듈 상단
+    # "2026-08-05 실측 버그 수정" 절 참고, quant/auto_trade_rules.py는 수정하지
+    # 않음 — 판정 로직 자체는 그대로, 입력값만 lookback 반영).
+    decision = decide_idle_action("golden" if golden_recent else "none", spike_recent)
     result["action"] = decision["action"]
     if decision["action"] != "enter":
         # idle + 조건 미충족은 노이즈라 로그하지 않는다(모듈 docstring 원칙 3).
