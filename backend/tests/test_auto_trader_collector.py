@@ -17,6 +17,8 @@ app.db.async_session_factory. `AutoTradeState`는 **싱글턴(id=1 고정)**이�
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from sqlalchemy import func, select
 
@@ -95,6 +97,14 @@ async def _current_max_log_id() -> int:
         return result.scalar() or 0
 
 
+# 2026-08-05부터 실제 자동매매가 이 테이블에 진짜 행을 남기기 시작했다(§5.54-6
+# 완료 후 최초 실거래 진입) — `_log_rows()`가 전체 테이블을 무조건으로 읽으면
+# 실제 운영 로그까지 섞여서 테스트가 깨진다. 이 워터마크(테스트 시작 시점의
+# max id)로 "이 테스트가 만든 행만" 걸러낸다 — 아래 autouse 픽스처가 매 테스트
+# 시작 시 갱신한다.
+_test_log_watermark: dict[str, int] = {"id": 0}
+
+
 @pytest.fixture(autouse=True)
 async def _snapshot_and_restore_state():
     """싱글턴 AutoTradeState(id=1) 행을 스냅샷/복원한다 — 이 테이블은 실제
@@ -118,6 +128,7 @@ async def _snapshot_and_restore_state():
         )
 
     start_max_log_id = await _current_max_log_id()
+    _test_log_watermark["id"] = start_max_log_id
 
     yield
 
@@ -167,8 +178,15 @@ async def _get_state() -> AutoTradeState:
 
 
 async def _log_rows() -> list[AutoTradeLog]:
+    """이 테스트가 만든 행만 반환한다(`_test_log_watermark` 기준) — 2026-08-05부터
+    실제 운영 로그가 이 테이블에 섞여 있어, 필터 없이 전체를 읽으면 실제
+    자동매매 기록까지 테스트 결과에 끼어든다(모듈 상단 주석 참고)."""
     async with async_session_factory() as session:
-        result = await session.execute(select(AutoTradeLog).order_by(AutoTradeLog.id))
+        result = await session.execute(
+            select(AutoTradeLog)
+            .where(AutoTradeLog.id > _test_log_watermark["id"])
+            .order_by(AutoTradeLog.id)
+        )
         return list(result.scalars().all())
 
 
@@ -503,3 +521,158 @@ async def test_sell_order_failure_keeps_state_holding(monkeypatch):
     logs = await _log_rows()
     assert len(logs) == 1
     assert logs[0].event_type == "error"
+
+
+# ---------------------------------------------------------------------------
+# watch_stop_loss (PLAN.md §5.54-6, 30초 고빈도 손절 감시 — 실시간 호가 기반)
+# ---------------------------------------------------------------------------
+
+
+async def test_watch_disabled_makes_no_external_calls(monkeypatch):
+    await _set_state(enabled=False, status="holding", entry_price=16000, entry_qty=1)
+    monkeypatch.setattr(auto_trader, "KiwoomClient", _raising_kiwoom_client_factory)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.watch_stop_loss(session)
+
+    assert result == {"enabled": False, "action": "none"}
+    assert await _log_rows() == []
+    state = await _get_state()
+    assert state.status == "holding"  # 건드리지 않음
+
+
+async def test_watch_idle_status_makes_no_calls(monkeypatch):
+    """이 잡은 포지션 관리 전용 — idle(진입 대기) 상태면 아무 것도 하지 않는다
+    (진입 스캔은 60초 run_auto_trade가 전담)."""
+    await _set_state(enabled=True, status="idle")
+    monkeypatch.setattr(auto_trader, "KiwoomClient", _raising_kiwoom_client_factory)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.watch_stop_loss(session)
+
+    assert result["enabled"] is True
+    assert result["action"] == "none"
+    assert await _log_rows() == []
+
+
+async def test_watch_holding_no_action_when_price_above_floor(monkeypatch):
+    await _set_state(enabled=True, status="holding", entry_price=16000, entry_qty=1)
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+    # FAKE_QUOTE_RAW의 매수1호가(buy_fpr_bid)는 -16050 -> abs 16050,
+    # 16000 대비 (16050-16000)/16000*100 = +0.31% -> 손절(-1.5%) 아님.
+
+    async with async_session_factory() as session:
+        result = await auto_trader.watch_stop_loss(session)
+
+    assert result["action"] == "none"
+    fake = fake_cls.instances[-1]
+    assert fake.sell_calls == []
+    state = await _get_state()
+    assert state.status == "holding"
+    assert await _log_rows() == []
+
+
+async def test_watch_holding_triggers_stop_loss_using_live_quote(monkeypatch):
+    """실시간 호가(매수1호가)가 -1.5% 이하로 내려오면 즉시 매도 — 1분봉을
+    전혀 쓰지 않는다(이 테스트는 `_warm_stock_intraday`를 아예 몽키패치하지
+    않는다 — 호출되면 실제 키움을 두드리게 되므로, 호출된다면 이 테스트
+    자체가 다른 이유로 실패해야 정상이다)."""
+    entry_price = 20000.0  # 매수1호가 16050 -> (16050-20000)/20000*100 = -19.75% << -1.5%
+    await _set_state(enabled=True, status="holding", entry_price=entry_price, entry_qty=1)
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.watch_stop_loss(session)
+
+    assert result["action"] == "exit_stop_loss"
+    fake = fake_cls.instances[-1]
+    assert fake.sell_calls == [("0167A0", 1, 16050)]  # 방금 조회한 매수1호가 그대로 주문가
+
+    state = await _get_state()
+    assert state.status == "idle"
+    assert state.entry_price is None
+    assert state.entry_qty is None
+    assert state.peak_price is None
+
+    logs = await _log_rows()
+    assert len(logs) == 1
+    assert logs[0].event_type == "exit_stop_loss"
+    assert "실시간" in logs[0].reason
+
+
+async def test_watch_trailing_also_triggers_stop_loss(monkeypatch):
+    """trailing 상태에서도(신고가를 찍은 뒤라도) 손절은 상태 무관하게 적용된다."""
+    await _set_state(
+        enabled=True, status="trailing", entry_price=20000.0, entry_qty=1, peak_price=21000.0
+    )
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.watch_stop_loss(session)
+
+    assert result["action"] == "exit_stop_loss"
+    state = await _get_state()
+    assert state.status == "idle"
+    assert state.peak_price is None
+    fake = fake_cls.instances[-1]
+    assert fake.sell_calls == [("0167A0", 1, 16050)]
+
+
+async def test_watch_sell_failure_keeps_state_unchanged(monkeypatch):
+    await _set_state(enabled=True, status="holding", entry_price=20000.0, entry_qty=1)
+
+    class _FailingSellClient(_FakeKiwoomClient):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.sell_error = RuntimeError("kiwoom 500")
+
+    monkeypatch.setattr(auto_trader, "KiwoomClient", _FailingSellClient)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.watch_stop_loss(session)
+
+    assert result["action"] == "sell_failed"
+    state = await _get_state()
+    assert state.status == "holding"
+    assert float(state.entry_price) == pytest.approx(20000.0)
+
+    logs = await _log_rows()
+    assert len(logs) == 1
+    assert logs[0].event_type == "error"
+
+
+async def test_watch_and_run_auto_trade_do_not_double_sell_concurrently(monkeypatch):
+    """PLAN.md §5.54-6 핵심 안전장치 — `run_auto_trade`(60초)와 `watch_stop_loss`
+    (30초)가 동시에 같은 포지션을 보고 동시에 매도를 시도해도(둘 다 손절
+    조건이 충족된 상황을 흉내낸다), `_position_lock` 덕분에 실제 매도 주문은
+    딱 1건만 나가야 한다."""
+    entry_price = 20000.0
+    await _set_state(enabled=True, status="holding", entry_price=entry_price, entry_qty=1)
+
+    # run_auto_trade 쪽 신호(1분봉)도 손절 조건을 충족하도록 구성.
+    _patch_signals(monkeypatch, ma_state="none", is_spike=False, bars_close=entry_price * 0.98)
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session_a, async_session_factory() as session_b:
+        results = await asyncio.gather(
+            auto_trader.run_auto_trade(session_a),
+            auto_trader.watch_stop_loss(session_b),
+        )
+
+    actions = {r["action"] for r in results}
+    assert actions == {"stop_loss", "exit_stop_loss"} or actions == {"stop_loss", "none"} or actions == {
+        "none",
+        "exit_stop_loss",
+    }
+    # 핵심 단언 — 두 함수가 각자 KiwoomClient를 새로 열더라도(각자 async with
+    # KiwoomClient()), 실제로 place_sell_order가 호출된 총 횟수는 1건이어야 한다.
+    total_sell_calls = sum(len(c.sell_calls) for c in fake_cls.instances)
+    assert total_sell_calls == 1
+
+    state = await _get_state()
+    assert state.status == "idle"
+    assert state.entry_price is None
+
+    logs = await _log_rows()
+    assert len(logs) == 1  # 둘 중 하나만 실제로 로그를 남겼어야 한다(락으로 직렬화됨)
+    assert logs[0].event_type == "exit_stop_loss"

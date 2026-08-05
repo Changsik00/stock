@@ -77,6 +77,7 @@ intraday`의 마지막 분봉 종가)를 그대로 재사용한다 — 중복 �
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import logging
@@ -86,11 +87,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..clients.kiwoom import MAX_ORDER_NOTIONAL_KRW, KiwoomClient, parse_quote_levels
 from ..models import AutoTradeLog, AutoTradeState
 from ..quant.auto_trade_rules import (
+    STOP_LOSS_PCT,
     TARGET_CODE,
     TARGET_QTY,
     check_entry_budget,
     decide_idle_action,
     decide_position_action,
+    evaluate_stop_loss,
 )
 from ..quant.signals import moving_average_cross, volume_spike
 from ..routers.stocks import _warm_stock_intraday
@@ -105,6 +108,13 @@ logger = logging.getLogger(__name__)
 AUTO_TRADE_TOTAL_BUDGET_KRW = 25_000
 
 STATE_ID = 1  # AutoTradeState 싱글턴 PK — routers/auto_trade.py와 동일한 상수 사용
+
+# **2026-08-05 추가(PLAN.md §5.54-6)**: `run_auto_trade`(60초)와 `watch_stop_loss`
+# (30초, 아래)가 둘 다 AutoTradeState(포지션)를 읽고 매도를 시도할 수 있다 —
+# 이 락으로 두 잡이 동시에 "지금 보유 중"을 보고 동시에 매도를 시도해 중복
+# 주문이 나가는 걸 막는다. 두 함수 모두 상태를 읽는 시점부터 이 락 안에서
+# 실행돼야 한다(읽기부터 쓰기까지 원자적으로).
+_position_lock = asyncio.Lock()
 
 # **2026-08-05 실측 버그 수정**: `moving_average_cross`는 "교차가 일어난 바로 그
 # 1분봉"에서만 "golden"이고, 다음 봉부터는 이미 "none"으로 돌아간다(순간 이벤트).
@@ -200,50 +210,54 @@ async def run_auto_trade(session: AsyncSession) -> dict:
     """
     result: dict = {"enabled": False, "action": "none"}
 
-    state = await _get_state(session)
-    if state is None or not state.enabled:
-        # 킬스위치 꺼짐(또는 시드 행이 없는 비정상 상태) — 신호 평가조차 하지
-        # 않고 즉시 반환. 로그도 남기지 않는다(노이즈 방지, 모듈 docstring 참고).
-        return result
+    # PLAN.md §5.54-6 — `watch_stop_loss`(30초 잡)와 동일한 락을 잡는다. 상태를
+    # 읽는 시점부터 잡아야 두 잡이 동시에 "지금 보유 중"을 보고 동시에 매도를
+    # 시도하는 걸 막을 수 있다(모듈 상단 `_position_lock` 주석 참고).
+    async with _position_lock:
+        state = await _get_state(session)
+        if state is None or not state.enabled:
+            # 킬스위치 꺼짐(또는 시드 행이 없는 비정상 상태) — 신호 평가조차 하지
+            # 않고 즉시 반환. 로그도 남기지 않는다(노이즈 방지, 모듈 docstring 참고).
+            return result
 
-    result["enabled"] = True
-    code = state.code or TARGET_CODE
+        result["enabled"] = True
+        code = state.code or TARGET_CODE
 
-    try:
-        intraday = await _warm_stock_intraday(code, 1)
-    except Exception as e:  # noqa: BLE001 - 신호 조회 실패는 다음 폴링에서 재시도
-        logger.warning("auto-trade: intraday 조회 실패, 이번 폴링 건너뜀: %s", e)
-        result["action"] = "error"
-        result["error"] = str(e)[:300]
-        return result
+        try:
+            intraday = await _warm_stock_intraday(code, 1)
+        except Exception as e:  # noqa: BLE001 - 신호 조회 실패는 다음 폴링에서 재시도
+            logger.warning("auto-trade: intraday 조회 실패, 이번 폴링 건너뜀: %s", e)
+            result["action"] = "error"
+            result["error"] = str(e)[:300]
+            return result
 
-    bars = intraday.get("bars") if intraday else None
-    if not bars:
-        result["action"] = "no_bars"
-        return result
+        bars = intraday.get("bars") if intraday else None
+        if not bars:
+            result["action"] = "no_bars"
+            return result
 
-    current_price = bars[-1]["close"]
-    ma_cross = moving_average_cross(bars)
-    vspike = volume_spike(bars)
-    # 진입 판정 전용 — "지금 이 순간"뿐 아니라 최근 몇 봉 안에 신호가 있었는지도
-    # 함께 본다(모듈 상단 "2026-08-05 실측 버그 수정" 절 참고). 청산(dead cross)
-    # 판정은 이번 수정 범위 밖이라 `ma_cross`(최신 봉 기준)를 그대로 쓴다.
-    golden_recent = ma_cross["state"] == "golden" or _golden_cross_in_lookback(bars)
-    spike_recent = bool(vspike["is_spike"]) or _volume_spike_in_lookback(bars)
-    signal_snapshot = {
-        "ma_cross": ma_cross,
-        "volume_spike": vspike,
-        "current_price": current_price,
-        "golden_cross_recent": golden_recent,
-        "volume_spike_recent": spike_recent,
-    }
+        current_price = bars[-1]["close"]
+        ma_cross = moving_average_cross(bars)
+        vspike = volume_spike(bars)
+        # 진입 판정 전용 — "지금 이 순간"뿐 아니라 최근 몇 봉 안에 신호가 있었는지도
+        # 함께 본다(모듈 상단 "2026-08-05 실측 버그 수정" 절 참고). 청산(dead cross)
+        # 판정은 이번 수정 범위 밖이라 `ma_cross`(최신 봉 기준)를 그대로 쓴다.
+        golden_recent = ma_cross["state"] == "golden" or _golden_cross_in_lookback(bars)
+        spike_recent = bool(vspike["is_spike"]) or _volume_spike_in_lookback(bars)
+        signal_snapshot = {
+            "ma_cross": ma_cross,
+            "volume_spike": vspike,
+            "current_price": current_price,
+            "golden_cross_recent": golden_recent,
+            "volume_spike_recent": spike_recent,
+        }
 
-    if state.status == "idle":
-        return await _handle_idle(
-            session, state, code, current_price, golden_recent, spike_recent, signal_snapshot, result
-        )
+        if state.status == "idle":
+            return await _handle_idle(
+                session, state, code, current_price, golden_recent, spike_recent, signal_snapshot, result
+            )
 
-    return await _handle_position(session, state, code, current_price, ma_cross, signal_snapshot, result)
+        return await _handle_position(session, state, code, current_price, ma_cross, signal_snapshot, result)
 
 
 async def _handle_idle(
@@ -411,3 +425,119 @@ async def _handle_position(
         order_response=order_response,
     )
     return result
+
+
+async def watch_stop_loss(session: AsyncSession) -> dict:
+    """포지션 보유 중(holding/trailing) 손절만 감시하는 고빈도 보조 잡
+    (PLAN.md §5.54-6, 2026-08-05 사용자 질의 — "매수하고 나서 모니터링 간격은
+    어떻게 되니?"). `run_auto_trade`(60초, `collectors/live_refresh.py`의
+    60초 잡)와 별개로 30초 간격의 전용 잡으로 등록된다(`start_live_refresh_
+    scheduler` 참고).
+
+    **왜 그냥 폴링만 더 자주 하면 안 되는가**: `run_auto_trade`의 손절 판정은
+    1분봉(`ka10080`) 종가를 쓰는데, 이 데이터 자체가 60초 캐시로 묶여 있다
+    (`routers/stocks.py::_intraday_ttl_seconds` — 1분봉은 1분에 한 번만
+    갱신되므로 그보다 자주 조회해봤자 같은 봉을 다시 받을 뿐이다). 폴링
+    주기만 30초로 당겨도 반응속도는 안 빨라진다 — 데이터 소스 자체를
+    캐시 없는 실시간 호가(`stock_quote`, ka10004)로 바꿔야 실제로 더 빨리
+    반응한다. 이 함수는 **딱 손절 판정에만** 실시간 매수 1호가(즉시 매도
+    가능한 가격)를 쓴다.
+
+    **진입/트레일전환/트레일청산은 건드리지 않는다** — 골든크로스/거래량
+    스파이크/dead cross는 전부 1분봉 기반 기술적 지표라, 더 자주 봐도
+    데이터가 그대로라 의미가 없다(위와 동일한 논리). 그건 계속
+    `run_auto_trade`(60초)가 전담한다 — 이 함수는 상태가 "holding"/
+    "trailing"이 아니면 즉시 반환한다.
+
+    **동시성**: `run_auto_trade`와 동일한 `_position_lock`을 잡는다(모듈
+    상단 주석 참고) — 두 잡이 동시에 같은 포지션에 대해 매도를 시도해
+    중복 주문이 나가는 걸 막는다.
+
+    Returns ``{"enabled": bool, "action": "none"|"exit_stop_loss"|
+    "sell_failed"|"error"}``.
+    """
+    result: dict = {"enabled": False, "action": "none"}
+
+    async with _position_lock:
+        state = await _get_state(session)
+        if state is None or not state.enabled:
+            return result
+        result["enabled"] = True
+
+        if state.status not in ("holding", "trailing"):
+            # 이 잡은 포지션 관리 전용 — 진입(idle) 스캔은 하지 않는다
+            # (60초 run_auto_trade가 전담, 모듈 docstring 참고).
+            return result
+
+        entry_price = float(state.entry_price) if state.entry_price is not None else None
+        if entry_price is None:
+            # 정상 상태 기계라면 holding/trailing인데 entry_price가 없는 경우는
+            # 없어야 한다 — 방어적으로 아무 것도 하지 않는다(잘못된 값으로
+            # 손절 계산하지 않음).
+            result["action"] = "error"
+            return result
+
+        code = state.code or TARGET_CODE
+
+        try:
+            async with KiwoomClient() as client:
+                live_price = await _best_fill_price(client, code, "sell")
+        except Exception as e:  # noqa: BLE001 - 호가 조회 실패는 다음 폴링에서 재시도
+            logger.warning("auto-trade(fast watch): 호가 조회 실패, 이번 폴링 건너뜀: %s", e)
+            result["action"] = "error"
+            result["error"] = str(e)[:300]
+            return result
+
+        if live_price is None or not evaluate_stop_loss(entry_price, live_price):
+            return result
+
+        # 손절 조건 충족 — 방금 조회한 매수1호가(live_price)를 그대로 매도
+        # 지정가로 쓴다(재조회 없음 — 그 사이 값이 바뀌어봤자 여전히 손절
+        # 구간이므로 다시 조회할 필요가 없다).
+        pct = round((live_price - entry_price) / entry_price * 100, 4) if entry_price else None
+        signal_snapshot = {
+            "live_price": live_price,
+            "entry_price": entry_price,
+            "pct": pct,
+            "source": "realtime_quote_fast_watch",
+        }
+
+        try:
+            async with KiwoomClient() as client:
+                order_response = await client.place_sell_order(code, int(state.entry_qty or TARGET_QTY), int(live_price))
+        except Exception as e:  # noqa: BLE001 - 주문 실패는 재시도 루프에 빠지지 않고 로그만
+            logger.warning("auto-trade(fast watch): 매도 주문 실패: %s", e)
+            await _log(
+                session,
+                event_type="error",
+                code=code,
+                price=live_price,
+                reason=f"[실시간 호가 손절 감시] 매도 주문 시도 실패: {e}",
+                signal_snapshot=signal_snapshot,
+            )
+            result["action"] = "sell_failed"
+            result["error"] = str(e)[:300]
+            return result
+
+        state.status = "idle"
+        state.entry_price = None
+        state.entry_qty = None
+        state.entry_at = None
+        state.entry_order_no = None
+        state.peak_price = None
+        await session.commit()
+
+        await _log(
+            session,
+            event_type="exit_stop_loss",
+            code=code,
+            price=live_price,
+            reason=(
+                f"[실시간 호가 손절 감시(30초)] 손절 조건 충족: 실시간가 {live_price} vs "
+                f"진입가 {entry_price} ({pct:+.2f}%) <= {STOP_LOSS_PCT}% -> 매도 주문 제출"
+            ),
+            signal_snapshot=signal_snapshot,
+            order_response=order_response,
+        )
+        result["action"] = "exit_stop_loss"
+        return result

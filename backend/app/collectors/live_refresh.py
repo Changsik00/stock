@@ -137,6 +137,12 @@ EXTRA_REFRESH_INTERVAL_SECONDS = 420
 # 걸려 60초/7분 티어보다 훨씬 느린 창이 필요하다(모듈 docstring "3." 문단 참고).
 STOCK_FLOW_SCAN_INTERVAL_SECONDS = 600
 
+# 30초 티어 — 자동매매 손절 전용 고빈도 감시(PLAN.md §5.54-6, 2026-08-05). 다른
+# 티어보다 훨씬 짧은 이유는 collectors/auto_trader.py::watch_stop_loss 모듈
+# docstring 참고 — 1분봉 기반 판정(60초 잡)과 달리 캐시 없는 실시간 호가를 써서
+# 실제로 더 빨리 반응하게 하는 게 목적이다.
+AUTO_TRADE_WATCH_INTERVAL_SECONDS = 30
+
 
 async def _run_live_refresh() -> None:
     # 2026-07-21(NXT) — 이 잡은 attention(개별 종목, NXT 08:00~20:00 필요)과
@@ -376,6 +382,30 @@ async def _run_stock_flow_scan() -> None:
     )
 
 
+async def _run_auto_trade_watch() -> None:
+    """30초 티어(PLAN.md §5.54-6, 2026-08-05) — 자동매매 손절 전용 고빈도 감시.
+    `_run_live_refresh`(60초)의 `auto_trader.run_auto_trade`와 별개 잡이다 —
+    자세한 이유는 `collectors/auto_trader.py::watch_stop_loss` 모듈 docstring
+    참고. 개별 종목 실시간 호가(ka10004)를 쓰므로 `_run_live_refresh_extra`/
+    `_run_stock_flow_scan`과 동일하게 NXT 확장세션(08:00~20:00,
+    `is_nxt_closed`) 밖에서는 아예 호출하지 않는다 — `watch_stop_loss` 자체도
+    킬스위치/상태(holding·trailing)로 스스로 게이트하므로(모듈 docstring
+    참고) 이중 안전이다."""
+    now_kst = dt.datetime.now(KST)
+    if is_nxt_closed(now_kst):
+        return
+
+    from . import auto_trader
+
+    async with async_session_factory() as session:
+        try:
+            result = await auto_trader.watch_stop_loss(session)
+            if result.get("action") not in ("none",):
+                logger.info("auto-trade-watch(30s): %s", result)
+        except Exception as e:  # noqa: BLE001 - 이 잡이 죽어도 60초 run_auto_trade가 손절 안전망으로 남는다
+            logger.warning("auto-trade-watch(30s) 실패: %s", e)
+
+
 def start_live_refresh_scheduler() -> AsyncIOScheduler:
     """Create, start, and return the module-level scheduler (idempotent)."""
     global _scheduler
@@ -417,12 +447,25 @@ def start_live_refresh_scheduler() -> AsyncIOScheduler:
         # 즉시 실행하면 그때마다 키움에 최대 200콜을 몰아 치는 부담이 생긴다 —
         # 첫 자연 tick(600초 뒤)부터 느긋하게 시작한다.
     )
+    scheduler.add_job(
+        _run_auto_trade_watch,
+        IntervalTrigger(seconds=AUTO_TRADE_WATCH_INTERVAL_SECONDS),
+        id="auto_trade_watch",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        # 킬스위치 기본 OFF + watch_stop_loss 자체가 즉시 반환하므로(모듈
+        # docstring 참고) 기동 즉시 실행해도 무해하다 — 위 60초/7분 잡과
+        # 동일하게 첫 tick을 기다리지 않는다.
+        next_run_time=dt.datetime.now(),
+    )
     scheduler.start()
     _scheduler = scheduler
     logger.info(
-        "live-refresh scheduler started: 60s + %ds + %ds interval, weekday 09:00-15:30 KST only",
+        "live-refresh scheduler started: 60s + %ds + %ds + %ds interval, weekday 09:00-15:30 KST only",
         EXTRA_REFRESH_INTERVAL_SECONDS,
         STOCK_FLOW_SCAN_INTERVAL_SECONDS,
+        AUTO_TRADE_WATCH_INTERVAL_SECONDS,
     )
     return scheduler
 
