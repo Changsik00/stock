@@ -118,6 +118,7 @@ import datetime as dt
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from ..db import async_session_factory
@@ -406,6 +407,36 @@ async def _run_auto_trade_watch() -> None:
             logger.warning("auto-trade-watch(30s) 실패: %s", e)
 
 
+async def _run_nasdaq_futures_morning_job() -> None:
+    """평일 07:50 KST 1회 — PLAN.md §5.54-7(2026-08-05 사용자 지적: "나스닥
+    선물은 자주 확인할 필요 없다, 코스피/코스닥 위주라 한국 장(09:00) 시작
+    전 참고용으로 오전 8시 이전에 한 번이면 된다"). `routers/markets.py::
+    _warm_nasdaq_futures_live`의 캐시 TTL을 20시간으로 늘려 뒀으므로, 이
+    잡이 하루 한 번 미리 채워 두면 그날 나머지 시간은 대시보드가 이 캐시를
+    그대로 재사용한다.
+
+    **collectors/scheduler.py(18:00/07:30/19:30 cron)가 아니라 여기(60초 잡과
+    같은 파일)에 두는 이유**: `_warm_nasdaq_futures_live`의 캐시는 DB가 아니라
+    이 프로세스(backend, `--reload`)의 인메모리 딕셔너리다 — `collectors/
+    scheduler.py`는 별도 컨테이너(`worker`)에서 도는 완전히 다른 프로세스라,
+    거기서 이 함수를 불러도 backend 프로세스의 캐시는 전혀 채워지지 않는다
+    (worker/scheduler.py 모듈 docstring "왜 backend가 아니라 worker인가" 참고
+    — 그건 DB에 쓰는 배치라 프로세스가 어디든 상관없지만, 이건 인메모리
+    캐시라 반드시 이 프로세스여야 한다).
+
+    DB에 쓰는 REGISTRY/collect_log 기반 수집기가 아니라 그냥 캐시 워밍이라
+    `run_job`을 쓰지 않는다 — 실패해도 이 잡이 스케줄러 전체를 죽이지 않고,
+    실패하면 그냥 그날 첫 온디맨드 요청이 폴백으로 새로 채운다(`_warm_
+    nasdaq_futures_live`의 기존 "캐시 없으면 새로 조회" 동작 그대로)."""
+    from ..routers import markets
+
+    try:
+        await markets._warm_nasdaq_futures_live()
+        logger.info("nasdaq-futures morning warm(07:50 KST): 완료")
+    except Exception as e:  # noqa: BLE001 - 실패해도 온디맨드 폴백이 있어 무해하다
+        logger.warning("nasdaq-futures morning warm 실패: %s", e)
+
+
 def start_live_refresh_scheduler() -> AsyncIOScheduler:
     """Create, start, and return the module-level scheduler (idempotent)."""
     global _scheduler
@@ -458,6 +489,18 @@ def start_live_refresh_scheduler() -> AsyncIOScheduler:
         # docstring 참고) 기동 즉시 실행해도 무해하다 — 위 60초/7분 잡과
         # 동일하게 첫 tick을 기다리지 않는다.
         next_run_time=dt.datetime.now(),
+    )
+    scheduler.add_job(
+        _run_nasdaq_futures_morning_job,
+        CronTrigger(day_of_week="mon-fri", hour=7, minute=50, timezone="Asia/Seoul"),
+        id="nasdaq_futures_morning",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        # 의도적으로 next_run_time을 지정하지 않는다 — 위 stock_flow_scan과
+        # 동일한 이유: 기동/리로드(--reload 개발 환경)마다 즉시 실행되면
+        # "하루 한 번"이라는 목적 자체가 무너진다(리로드가 잦은 개발 중에는
+        # 하루에도 여러 번 재실행될 것). 07:50 정시 tick만 기다린다.
     )
     scheduler.start()
     _scheduler = scheduler

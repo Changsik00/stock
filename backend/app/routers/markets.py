@@ -2088,10 +2088,18 @@ async def positioning_pair_view(
 # -- 나스닥선물(NQ=F) 인트라데이 (PLAN.md §5.50-1/5.50-5) — "미장 선행지표" 구획에
 # SOX(EOD)와 나란히 붙이는 준실시간 참고 타일. 판단 문구 없이 숫자만(house rule).
 
-# 5분봉 특성상 다른 라이브 엔드포인트들의 60초보다 길게 잡는다 — 5분봉을 60초마다
-# 다시 조회해봤자 같은 봉을 반복해서 받을 뿐이다(`_intraday_ttl_seconds`와 동일한
-# 판단 근거).
-_NASDAQ_FUTURES_CACHE_TTL_SECONDS = 300
+# **2026-08-05 변경(PLAN.md §5.54-7, 사용자 지적)**: "나스닥 선물은 자주 볼 필요
+# 없다 — 코스피/코스닥 위주라 한국 장 시작(09:00) 전 참고용으로 하루 한 번이면
+# 충분하다, 오전 8시 이전에 한 번만." 원래 300초(5분)였던 TTL을 20시간으로 크게
+# 늘렸다 — `collectors/live_refresh.py`의 07:50 KST 아침 잡(`_run_nasdaq_futures_
+# morning_job`)이 하루 한 번 이 캐시를 미리 채워 두면, 그날 나머지 시간 동안
+# 대시보드가 반복 요청해도 이 캐시를 그대로 재사용해 yfinance를 다시 부르지
+# 않는다. 이건 단순 절약이 아니라 실측 버그 수정이기도 하다 — yfinance 호출마다
+# 서브프로세스가 하나씩 남아 정리되지 않고 CPU를 계속 갉아먹는 문제를 2026-08-05에
+# 발견했다(PLAN.md §5.54-6 "부수적으로 발견한 것" 절 참고, 컨테이너 CPU가 90~120%
+# 까지 치솟았다가 재시작 후 정상화됨) — 호출 자체를 하루 1회로 줄이는 게 근본
+# 대응이다.
+_NASDAQ_FUTURES_CACHE_TTL_SECONDS = 72_000  # 20시간
 _nasdaq_futures_cache: dict[str, object] = {"ts": 0.0, "data": None}
 _nasdaq_futures_cache_lock = asyncio.Lock()
 
@@ -2134,8 +2142,10 @@ async def _warm_nasdaq_futures_live() -> dict:
 async def nasdaq_futures_live():
     """나스닥선물(NQ=F) 준실시간 5분봉(PLAN.md §5.50-5) — SOX(전일 EOD)와 달리
     CME Globex가 KST 주간에도 열려 있어 "지금"에 가까운 값을 준다(clients/
-    us_indices.py::fetch_nasdaq_futures_intraday 참고). 5분(300초) 메모리
-    캐시로 감싸 온다(DB 저장 없음, §3.5 원칙과 동일).
+    us_indices.py::fetch_nasdaq_futures_intraday 참고). **2026-08-05부터 20시간
+    메모리 캐시**(PLAN.md §5.54-7 — 사용자가 코스피/코스닥 위주라 장 시작 전
+    하루 한 번이면 충분하다고 지적, `collectors/live_refresh.py`의 07:50 KST
+    아침 잡이 하루 1회 미리 채운다)로 감싸 온다(DB 저장 없음, §3.5 원칙과 동일).
 
     `latest_change_pct`는 마지막 bar와 그 직전 bar의 종가 차이(%) — 판단 문구
     없이 숫자만 제공한다(house rule, PLAN.md §5).
