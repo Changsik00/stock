@@ -159,3 +159,39 @@ async def test_run_live_refresh_extra_only_warms_value_rank(monkeypatch):
 
 async def _async_return(value):
     return value
+
+
+async def test_nasdaq_futures_morning_job_calls_fetch_and_cache_not_warm(monkeypatch):
+    """PLAN.md §5.56(2026-08-06) — 07:50 KST 아침 크론은 실제로 조회하는
+    `_fetch_and_cache_nasdaq_futures_live`를 불러야 한다. 캐시만 읽는
+    `_warm_nasdaq_futures_live`를 잘못 불렀다면(회귀) 그날 나스닥 캐시가
+    영영 채워지지 않는다 — 이 잡이 하루 중 실제 조회를 하는 유일한 경로이기
+    때문이다."""
+    called = {"fetch": False}
+
+    async def _fake_fetch():
+        called["fetch"] = True
+        return {"symbol": "NQ=F", "bars": [], "latest_change_pct": None, "cached_at": "x"}
+
+    def _warm_should_not_be_called():  # pragma: no cover - 호출되면 안 됨
+        raise AssertionError("아침 크론이 캐시-읽기 전용 _warm_nasdaq_futures_live를 호출했다")
+
+    monkeypatch.setattr(markets, "_fetch_and_cache_nasdaq_futures_live", _fake_fetch)
+    monkeypatch.setattr(markets, "_warm_nasdaq_futures_live", _warm_should_not_be_called)
+
+    await live_refresh._run_nasdaq_futures_morning_job()
+
+    assert called["fetch"] is True
+
+
+async def test_nasdaq_futures_morning_job_swallows_fetch_failure(monkeypatch):
+    """실패해도 스케줄러 전체를 죽이지 않는다(2026-08-06부터 온디맨드 폴백이
+    없어졌으므로 — 이 잡 실패 시 그날은 그냥 나스닥 데이터 없이 넘어간다,
+    모듈 docstring 참고)."""
+
+    async def _raise():
+        raise RuntimeError("yfinance boom")
+
+    monkeypatch.setattr(markets, "_fetch_and_cache_nasdaq_futures_live", _raise)
+
+    await live_refresh._run_nasdaq_futures_morning_job()  # 예외가 새 나오지 않아야 함

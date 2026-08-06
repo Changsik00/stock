@@ -3247,6 +3247,53 @@ pytest 직접 재실행(`874 passed`, 실패 1건은 무관한 기존
 실행 확인 + `GET /api/auto-trade/state` → `enabled: false` 재확인(킬스위치
 계속 꺼진 채로 둠, 자동 재활성화 없음).
 
+### Phase 5.56 — 나스닥선물 캐시: 온디맨드 yfinance 호출 완전 제거 (2026-08-06)
+
+**증상**: PC가 다시 버벅거려 `docker top`으로 확인하니 `stock-backend-1`
+컨테이너 안에 yfinance가 남긴 `multiprocessing.spawn_main` 서브프로세스가
+8시간 넘게 CPU 25%를 계속 잡아먹고 있었다(§5.54-6에서 처음 발견한 것과
+동일한 근본 버그 — yfinance 호출마다 정리 안 되는 서브프로세스가 남는다).
+
+**재발 경로**: §5.54-7에서 나스닥선물 캐시 TTL을 20시간으로 늘리고 07:50
+KST 아침 크론으로 하루 1회만 채우게 했지만, **그 프로세스가 `--reload`로
+돈다는 걸 놓쳤다** — 이번 Phase 5.55 작업 중 `auto_trader.py`/테스트 파일을
+수십 번 고치는 동안 백엔드가 그때마다 재시작됐고, 재시작마다 이 인메모리
+캐시가 초기화됐다. 캐시가 콜드인 순간 대시보드가 온디맨드로 요청을 보내면
+(20시간 TTL 만료 여부와 무관하게 "캐시 없음"이라 곧바로) yfinance를 다시
+불렀고, 그 직후 다음 코드 변경으로 그 워커가 또 재시작되면서 yfinance가
+남긴 서브프로세스가 부모 없는 고아로 남아 계속 CPU를 소모했다. TTL을
+아무리 늘려도 "재시작 직후 콜드 캐시" 경로 자체는 못 막는다는 게 이번에
+드러난 새로운 사실이다.
+
+**사용자 지적**: "나스닥 정보는 매번 볼 필요 없이 8시 정도에 NXT 장 10분
+전에 준비되면 되고, 한번 처리되었으면 그 이후는 안 봐도 될 것 같아."
+
+**조치**: 온디맨드 경로(라우트 핸들러 `GET /api/markets/nasdaq-futures/live`,
+`positioning_snapshot`)가 **yfinance를 절대 직접 호출하지 않도록** 구조
+자체를 바꿨다 — TTL 기반 "오래됐으면 다시 조회"가 아니라 "오직 크론만
+조회, 나머지는 캐시 읽기 전용"으로 전환.
+
+- `routers/markets.py`: 기존 `_warm_nasdaq_futures_live`(TTL 체크 후 조회)를
+  둘로 분리 — `_fetch_and_cache_nasdaq_futures_live`(실제 yfinance 호출,
+  07:50 KST 크론 전용) / `_warm_nasdaq_futures_live`(캐시 읽기 전용, 없으면
+  `bars: []`인 빈 payload 반환, 절대 조회하지 않음). TTL 상수(
+  `_NASDAQ_FUTURES_CACHE_TTL_SECONDS`) 자체를 제거 — 더 이상 의미가 없다.
+- `collectors/live_refresh.py::_run_nasdaq_futures_morning_job`: 이제
+  `_fetch_and_cache_nasdaq_futures_live`를 부른다(기존엔 `_warm_...`을
+  불러 사실상 온디맨드와 같은 함수를 썼다). 실패해도 온디맨드 폴백 없이
+  그날은 그냥 데이터 없이 넘어간다(의도적 — 폴백을 두면 하루 1회 제한이
+  깨진다).
+- 07:50 KST는 NXT 개장(08:00 KST) 10분 전 — 사용자가 요청한 시점과 이미
+  정확히 일치해 크론 스케줄 자체는 변경하지 않았다.
+
+**효과**: `--reload`로 몇 번을 재시작하든, 코드 변경이 몇 시에 일어나든
+yfinance는 하루 최대 1회(07:50 KST)만 호출된다 — 이번에 재현된 재발
+경로가 구조적으로 막힌다.
+
+`docker restart stock-backend-1`로 당장의 좀비 프로세스는 정리했다(킬스위치
+`enabled: false`/포지션 `idle` 상태는 DB 저장이라 재시작 전후 그대로
+유지됨을 확인). 코드 변경 후 pytest 전체 통과 확인 예정(아래 검증 결과).
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)

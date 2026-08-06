@@ -306,9 +306,59 @@ async def test_pair_view_etf_nav_cache_shared_across_both_sets(monkeypatch):
 
 
 # -- GET /api/markets/nasdaq-futures/live -------------------------------------------
+#
+# **2026-08-06부터(PLAN.md §5.56) 이 라우트는 절대 yfinance를 직접 호출하지
+# 않는다** — 오직 07:50 KST 아침 크론(`_fetch_and_cache_nasdaq_futures_live`,
+# `collectors/live_refresh.py::_run_nasdaq_futures_morning_job`)만 실제로
+# 조회하고, 라우트 핸들러(`_warm_nasdaq_futures_live`)는 그 크론이 채워둔
+# 모듈 전역 캐시(`markets._nasdaq_futures_cache`)를 읽기만 한다. 그래서 아래
+# 라우트 테스트는 `us_indices.fetch_nasdaq_futures_intraday`를 몽키패치하는
+# 대신 캐시를 직접 채우거나 비워 둔 채로 호출한다 — "요청이 오면 조회한다"가
+# 아니라 "캐시에 있으면 그대로 주고, 없으면 빈 payload"라는 새 계약을
+# 검증한다. 실제 yfinance 호출 로직 자체(정상/실패)는 아래
+# `_fetch_and_cache_nasdaq_futures_live` 전용 테스트가 담당한다.
 
 
-async def test_nasdaq_futures_live_computes_latest_change_pct(monkeypatch):
+async def test_nasdaq_futures_live_returns_cached_payload_without_fetching(monkeypatch):
+    def _raising_fetch(bars=50):  # pragma: no cover - 호출되면 안 됨
+        raise AssertionError("온디맨드 경로가 yfinance를 직접 호출했다 — PLAN.md §5.56 위반")
+
+    monkeypatch.setattr(markets.us_indices, "fetch_nasdaq_futures_intraday", _raising_fetch)
+    markets._nasdaq_futures_cache["data"] = {
+        "symbol": "NQ=F",
+        "bars": [{"time": "2026-08-06T07:50:00+09:00", "close": 20050.0}],
+        "latest_change_pct": 0.25,
+        "cached_at": "2026-08-06T07:50:00+00:00",
+    }
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/nasdaq-futures/live")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["latest_change_pct"] == 0.25
+    assert len(body["bars"]) == 1
+
+
+async def test_nasdaq_futures_live_empty_payload_when_cache_not_warmed_yet(monkeypatch):
+    def _raising_fetch(bars=50):  # pragma: no cover - 호출되면 안 됨
+        raise AssertionError("온디맨드 경로가 yfinance를 직접 호출했다 — PLAN.md §5.56 위반")
+
+    monkeypatch.setattr(markets.us_indices, "fetch_nasdaq_futures_intraday", _raising_fetch)
+    assert markets._nasdaq_futures_cache["data"] is None  # autouse fixture가 매 테스트 시작 전 리셋
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/nasdaq-futures/live")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {"symbol": "NQ=F", "bars": [], "latest_change_pct": None, "cached_at": None}
+
+
+# -- _fetch_and_cache_nasdaq_futures_live (07:50 KST 아침 크론 전용, 실제 yfinance 호출) --
+
+
+async def test_fetch_and_cache_nasdaq_futures_live_computes_latest_change_pct(monkeypatch):
     def fake_fetch_nasdaq_futures_intraday(bars=50):
         assert bars == 50
         return [
@@ -318,24 +368,21 @@ async def test_nasdaq_futures_live_computes_latest_change_pct(monkeypatch):
 
     monkeypatch.setattr(markets.us_indices, "fetch_nasdaq_futures_intraday", fake_fetch_nasdaq_futures_intraday)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/api/markets/nasdaq-futures/live")
+    payload = await markets._fetch_and_cache_nasdaq_futures_live()
 
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["symbol"] == "NQ=F"
-    assert len(body["bars"]) == 2
-    assert body["latest_change_pct"] == round((20100.0 - 20000.0) / 20000.0 * 100, 4)
-    assert "cached_at" in body
+    assert payload["symbol"] == "NQ=F"
+    assert len(payload["bars"]) == 2
+    assert payload["latest_change_pct"] == round((20100.0 - 20000.0) / 20000.0 * 100, 4)
+    assert markets._nasdaq_futures_cache["data"] == payload  # 캐시에 실제로 반영됐는지
 
 
-async def test_nasdaq_futures_live_fetch_failure_returns_502(monkeypatch):
+async def test_fetch_and_cache_nasdaq_futures_live_propagates_failure(monkeypatch):
     def _raise(bars=50):
         raise RuntimeError("yfinance boom")
 
     monkeypatch.setattr(markets.us_indices, "fetch_nasdaq_futures_intraday", _raise)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/api/markets/nasdaq-futures/live")
+    with pytest.raises(RuntimeError, match="yfinance boom"):
+        await markets._fetch_and_cache_nasdaq_futures_live()
 
-    assert resp.status_code == 502
+    assert markets._nasdaq_futures_cache["data"] is None  # 실패 시 캐시는 그대로(부분 갱신 없음)

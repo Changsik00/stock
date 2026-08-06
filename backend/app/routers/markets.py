@@ -2091,67 +2091,86 @@ async def positioning_pair_view(
 # **2026-08-05 변경(PLAN.md §5.54-7, 사용자 지적)**: "나스닥 선물은 자주 볼 필요
 # 없다 — 코스피/코스닥 위주라 한국 장 시작(09:00) 전 참고용으로 하루 한 번이면
 # 충분하다, 오전 8시 이전에 한 번만." 원래 300초(5분)였던 TTL을 20시간으로 크게
-# 늘렸다 — `collectors/live_refresh.py`의 07:50 KST 아침 잡(`_run_nasdaq_futures_
-# morning_job`)이 하루 한 번 이 캐시를 미리 채워 두면, 그날 나머지 시간 동안
-# 대시보드가 반복 요청해도 이 캐시를 그대로 재사용해 yfinance를 다시 부르지
-# 않는다. 이건 단순 절약이 아니라 실측 버그 수정이기도 하다 — yfinance 호출마다
-# 서브프로세스가 하나씩 남아 정리되지 않고 CPU를 계속 갉아먹는 문제를 2026-08-05에
-# 발견했다(PLAN.md §5.54-6 "부수적으로 발견한 것" 절 참고, 컨테이너 CPU가 90~120%
-# 까지 치솟았다가 재시작 후 정상화됨) — 호출 자체를 하루 1회로 줄이는 게 근본
-# 대응이다.
-_NASDAQ_FUTURES_CACHE_TTL_SECONDS = 72_000  # 20시간
+# 늘렸었다.
+#
+# **2026-08-06 추가 변경(PLAN.md §5.56, 사용자 지적)**: "NXT 개장(08:00 KST) 10분
+# 전에 준비되면 되고, 한번 처리됐으면 그 이후는 계속 볼 필요 없다." 20시간
+# TTL만으로는 부족했다 — 이 프로세스는 `--reload`로 도는데, 코드 변경으로
+# 재시작될 때마다 이 인메모리 캐시가 초기화되고, 그 직후 대시보드가 요청을
+# 보내면 온디맨드로 yfinance를 다시 불렀다. 재시작 직후 켜졌던 이전 워커가
+# 곧바로 다음 재시작으로 죽으면서 yfinance가 남긴 서브프로세스가 부모 없이
+# 고아로 남아 CPU를 계속 갉아먹는 게 실제로 재현됐다(2026-08-06, `docker top`
+# 으로 8시간 넘게 25% CPU 지속 확인, PLAN.md §5.56). TTL을 더 늘리는 걸로는
+# "재시작 직후 콜드 캐시" 경로 자체를 막을 수 없다 — 그래서 **온디맨드 경로
+# (라우트 핸들러/`positioning_snapshot`)는 이제 yfinance를 절대 직접 호출하지
+# 않는다.** 오직 07:50 KST 아침 크론(`_run_nasdaq_futures_morning_job` ->
+# `_fetch_and_cache_nasdaq_futures_live`)만 실제로 조회하고, 그 밖의 모든
+# 호출은 그 캐시를 그대로 읽기만 한다 — 캐시가 아직 없으면(아침 크론 전/실패)
+# 빈 payload를 반환할 뿐, 다시 조회를 시도하지 않는다. 하루 최대 1회 호출이
+# 구조적으로 보장된다.
 _nasdaq_futures_cache: dict[str, object] = {"ts": 0.0, "data": None}
 _nasdaq_futures_cache_lock = asyncio.Lock()
 
 
-async def _warm_nasdaq_futures_live() -> dict:
-    """나스닥선물 인트라데이 캐시를 채우고 payload를 반환한다. yfinance는 동기
-    라이브러리라 `asyncio.to_thread`로 감싼다(`_fetch_breadth_blocking`과 동일한
-    관례). 장중 나스닥선물은 FRED에 없어(clients/us_indices.py 참고) 실패 시
-    폴백이 없다 — 그대로 502로 변환한다(다른 라이브 엔드포인트들의 기존 관례)."""
-    now = time.monotonic()
+async def _fetch_and_cache_nasdaq_futures_live() -> dict:
+    """실제로 yfinance를 호출해 캐시를 채운다 — **오직 `_run_nasdaq_futures_
+    morning_job`(07:50 KST, NXT 개장 10분 전)만 이 함수를 부른다.** 온디맨드
+    경로는 이 함수를 절대 직접 호출하지 않는다(`_warm_nasdaq_futures_live`
+    참고, 위 모듈 docstring "2026-08-06 추가 변경" 절). yfinance는 동기
+    라이브러리라 `asyncio.to_thread`로 감싼다(`_fetch_breadth_blocking`과
+    동일한 관례)."""
+    bars = await asyncio.to_thread(us_indices.fetch_nasdaq_futures_intraday, 50)
+
+    latest_change_pct = None
+    if len(bars) >= 2:
+        prev_close = bars[-2]["close"]
+        latest_close = bars[-1]["close"]
+        if prev_close:
+            latest_change_pct = round((latest_close - prev_close) / prev_close * 100, 4)
+
+    payload = {
+        "symbol": "NQ=F",
+        "bars": bars,
+        "latest_change_pct": latest_change_pct,
+        "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
     async with _nasdaq_futures_cache_lock:
-        cached = _nasdaq_futures_cache["data"]
-        if cached is not None and (now - _nasdaq_futures_cache["ts"]) < _NASDAQ_FUTURES_CACHE_TTL_SECONDS:
-            return cached
-
-        try:
-            bars = await asyncio.to_thread(us_indices.fetch_nasdaq_futures_intraday, 50)
-        except Exception as e:  # noqa: BLE001 - yfinance 예외 전부 502로 변환
-            raise HTTPException(502, f"nasdaq futures live fetch failed: {str(e)[:200]}") from e
-
-        latest_change_pct = None
-        if len(bars) >= 2:
-            prev_close = bars[-2]["close"]
-            latest_close = bars[-1]["close"]
-            if prev_close:
-                latest_change_pct = round((latest_close - prev_close) / prev_close * 100, 4)
-
-        payload = {
-            "symbol": "NQ=F",
-            "bars": bars,
-            "latest_change_pct": latest_change_pct,
-            "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-        }
         _nasdaq_futures_cache["data"] = payload
-        _nasdaq_futures_cache["ts"] = now
-        return payload
+        _nasdaq_futures_cache["ts"] = time.monotonic()
+    return payload
+
+
+async def _warm_nasdaq_futures_live() -> dict:
+    """온디맨드 경로(라우트 핸들러, `positioning_snapshot`) 전용 — **yfinance를
+    직접 호출하지 않는다.** 07:50 KST 아침 크론(`_fetch_and_cache_nasdaq_
+    futures_live`)이 채워둔 캐시를 그대로 반환할 뿐이다(위 모듈 docstring
+    "2026-08-06 추가 변경" 절). 아직 채워지지 않았으면(그날 첫 아침 크론 전,
+    또는 크론 실패) bars가 빈 리스트인 빈 payload를 반환한다 — 참고용 보조
+    타일이라 없으면 없는 대로 보여주면 되고, 이 경로에서 502로 실패시키지
+    않는다(yfinance 예외 자체가 이 경로에서는 발생할 수 없다)."""
+    cached = _nasdaq_futures_cache["data"]
+    if cached is not None:
+        return cached
+    return {"symbol": "NQ=F", "bars": [], "latest_change_pct": None, "cached_at": None}
 
 
 @router.get("/api/markets/nasdaq-futures/live")
 async def nasdaq_futures_live():
     """나스닥선물(NQ=F) 준실시간 5분봉(PLAN.md §5.50-5) — SOX(전일 EOD)와 달리
     CME Globex가 KST 주간에도 열려 있어 "지금"에 가까운 값을 준다(clients/
-    us_indices.py::fetch_nasdaq_futures_intraday 참고). **2026-08-05부터 20시간
-    메모리 캐시**(PLAN.md §5.54-7 — 사용자가 코스피/코스닥 위주라 장 시작 전
-    하루 한 번이면 충분하다고 지적, `collectors/live_refresh.py`의 07:50 KST
-    아침 잡이 하루 1회 미리 채운다)로 감싸 온다(DB 저장 없음, §3.5 원칙과 동일).
+    us_indices.py::fetch_nasdaq_futures_intraday 참고). **2026-08-06부터 순수
+    캐시 읽기 전용**(PLAN.md §5.56 — 사용자가 "NXT 개장 10분 전에 준비되면
+    그 이후는 계속 볼 필요 없다"고 지적, `collectors/live_refresh.py`의 07:50
+    KST 아침 잡만 실제로 조회하고 이 핸들러는 그 결과를 그대로 반환) —
+    yfinance를 절대 온디맨드로 호출하지 않는다(DB 저장도 없음, §3.5 원칙과
+    동일, 인메모리 캐시일 뿐).
 
     `latest_change_pct`는 마지막 bar와 그 직전 bar의 종가 차이(%) — 판단 문구
     없이 숫자만 제공한다(house rule, PLAN.md §5).
 
     Returns ``{"symbol": "NQ=F", "bars": [{"time", "close"}, ...],
-    "latest_change_pct": float|None, "cached_at": iso8601}``.
+    "latest_change_pct": float|None, "cached_at": iso8601|None}`` — 아침 크론이
+    아직 안 돌았으면 bars=[]/cached_at=None.
     """
     return await _warm_nasdaq_futures_live()
 

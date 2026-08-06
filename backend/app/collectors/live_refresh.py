@@ -408,33 +408,39 @@ async def _run_auto_trade_watch() -> None:
 
 
 async def _run_nasdaq_futures_morning_job() -> None:
-    """평일 07:50 KST 1회 — PLAN.md §5.54-7(2026-08-05 사용자 지적: "나스닥
-    선물은 자주 확인할 필요 없다, 코스피/코스닥 위주라 한국 장(09:00) 시작
-    전 참고용으로 오전 8시 이전에 한 번이면 된다"). `routers/markets.py::
-    _warm_nasdaq_futures_live`의 캐시 TTL을 20시간으로 늘려 뒀으므로, 이
-    잡이 하루 한 번 미리 채워 두면 그날 나머지 시간은 대시보드가 이 캐시를
-    그대로 재사용한다.
+    """평일 07:50 KST 1회 — PLAN.md §5.54-7/§5.56(2026-08-05/06 사용자 지적:
+    "나스닥 선물은 자주 확인할 필요 없다, NXT 개장(08:00 KST) 10분 전에
+    준비되면 되고 한번 처리됐으면 그 이후는 계속 볼 필요 없다"). **이 잡이
+    하루 중 `routers/markets.py::_fetch_and_cache_nasdaq_futures_live`(실제
+    yfinance 호출)를 부르는 유일한 경로다** — 온디맨드 경로(라우트 핸들러/
+    `positioning_snapshot`)는 `_warm_nasdaq_futures_live`(캐시 읽기 전용)만
+    쓰고 절대 직접 조회하지 않는다(`routers/markets.py` 모듈 docstring
+    "2026-08-06 추가 변경" 절 참고 — TTL만으로는 `--reload` 재시작 직후
+    콜드 캐시 상태에서의 온디맨드 조회를 막지 못해, yfinance가 남기는
+    고아 서브프로세스가 CPU를 계속 갉아먹는 사고가 실제로 재현됐다).
 
     **collectors/scheduler.py(18:00/07:30/19:30 cron)가 아니라 여기(60초 잡과
-    같은 파일)에 두는 이유**: `_warm_nasdaq_futures_live`의 캐시는 DB가 아니라
-    이 프로세스(backend, `--reload`)의 인메모리 딕셔너리다 — `collectors/
-    scheduler.py`는 별도 컨테이너(`worker`)에서 도는 완전히 다른 프로세스라,
-    거기서 이 함수를 불러도 backend 프로세스의 캐시는 전혀 채워지지 않는다
-    (worker/scheduler.py 모듈 docstring "왜 backend가 아니라 worker인가" 참고
-    — 그건 DB에 쓰는 배치라 프로세스가 어디든 상관없지만, 이건 인메모리
-    캐시라 반드시 이 프로세스여야 한다).
+    같은 파일)에 두는 이유**: 이 캐시는 DB가 아니라 이 프로세스(backend,
+    `--reload`)의 인메모리 딕셔너리다 — `collectors/scheduler.py`는 별도
+    컨테이너(`worker`)에서 도는 완전히 다른 프로세스라, 거기서 이 함수를
+    불러도 backend 프로세스의 캐시는 전혀 채워지지 않는다(worker/scheduler.py
+    모듈 docstring "왜 backend가 아니라 worker인가" 참고 — 그건 DB에 쓰는
+    배치라 프로세스가 어디든 상관없지만, 이건 인메모리 캐시라 반드시 이
+    프로세스여야 한다).
 
     DB에 쓰는 REGISTRY/collect_log 기반 수집기가 아니라 그냥 캐시 워밍이라
-    `run_job`을 쓰지 않는다 — 실패해도 이 잡이 스케줄러 전체를 죽이지 않고,
-    실패하면 그냥 그날 첫 온디맨드 요청이 폴백으로 새로 채운다(`_warm_
-    nasdaq_futures_live`의 기존 "캐시 없으면 새로 조회" 동작 그대로)."""
+    `run_job`을 쓰지 않는다 — 실패해도 이 잡이 스케줄러 전체를 죽이지 않는다.
+    **이 잡이 실패하면 그날은 그냥 나스닥 선물 데이터가 없는 채로 남는다**
+    (2026-08-06부터 온디맨드 폴백이 없다 — 있으면 하루 1회 제한이 깨지므로
+    의도적으로 없앴다, 어차피 참고용 보조 타일이라 하루 결측이 문제되지
+    않는다)."""
     from ..routers import markets
 
     try:
-        await markets._warm_nasdaq_futures_live()
+        await markets._fetch_and_cache_nasdaq_futures_live()
         logger.info("nasdaq-futures morning warm(07:50 KST): 완료")
-    except Exception as e:  # noqa: BLE001 - 실패해도 온디맨드 폴백이 있어 무해하다
-        logger.warning("nasdaq-futures morning warm 실패: %s", e)
+    except Exception as e:  # noqa: BLE001 - 실패해도 스케줄러 자체는 계속 돌아야 한다
+        logger.warning("nasdaq-futures morning warm 실패(그날은 데이터 없이 넘어감): %s", e)
 
 
 def start_live_refresh_scheduler() -> AsyncIOScheduler:
