@@ -50,6 +50,7 @@ async def _snapshot_and_restore_state():
                 "entry_at": row.entry_at,
                 "entry_order_no": row.entry_order_no,
                 "peak_price": row.peak_price,
+                "entry_foreign_flow_sign": row.entry_foreign_flow_sign,
             }
             if row is not None
             else None
@@ -103,6 +104,7 @@ async def _set_state(**kwargs) -> None:
             entry_at=None,
             entry_order_no=None,
             peak_price=None,
+            entry_foreign_flow_sign=None,
         )
         defaults.update(kwargs)
         for k, v in defaults.items():

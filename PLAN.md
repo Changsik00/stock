@@ -3228,14 +3228,24 @@ scheduler.py`(18:00/07:30/19:30 cron, `worker` 컨테이너)가 아니라
 
 | # | 작업 | 내용 | 완료 기준 |
 |---|---|---|---|
-| 5.55-1 | 진입 시간 필터 | `quant/auto_trade_rules.py`에 개장/마감 근접 판정 추가, `decide_idle_action` 호출 전에 체크 | 단위테스트(09:05/15:25 진입 시도 시 조건 충족해도 차단, 손절은 이 시간에도 정상 작동) |
-| 5.55-2 | 장마감 전 조건부 오버나잇 청산 | 15:20 KST 이후 신규 판정 함수 — 리스크 경보/평가손익/trailing 여부/코스닥 외국인 스트릭 4개 조건 평가, 실패 시 강제 매도(이벤트타입 `exit_eod_forced`) | 단위테스트(4개 조건 각각 실패 케이스, 전부 통과 시 오버나잇 허용 케이스), 이번 실제 사고 케이스(트레일 진입 못하고 평가손익 마이너스로 마감)를 그대로 재현해 강제청산되는지 회귀 테스트 |
-| 5.55-3 | 리스크 경보 연동 | 활성 중 신규 진입 차단 + 보유 중 손절선 임시 축소(-0.8%) | 단위테스트 |
-| 5.55-4 | 수급 방향 전환 조기청산 | 진입 시점 외인 현물 부호 기록 → 반전 감지 시 청산 | 단위테스트 |
+| 5.55-1 | 진입 시간 필터 | `quant/auto_trade_rules.py`에 개장/마감 근접 판정 추가, `decide_idle_action` 호출 전에 체크 | ✅ 완료. `is_entry_blocked_by_time` + `_handle_idle` 배선 |
+| 5.55-2 | 장마감 전 조건부 오버나잇 청산 | 15:20 KST 이후 신규 판정 함수 — 리스크 경보/평가손익/trailing 여부/코스닥 외국인 스트릭 4개 조건 평가, 실패 시 강제 매도(이벤트타입 `exit_eod_forced`) | ✅ 완료. `evaluate_eod_forced_exit` + `_check_forced_exits`. 실제 사고 케이스(holding 상태, 트레일 이력 없이 15:20 진입, 평가손익 +0.5%, 리스크 경보 없음, 코스닥 외국인 정상)를 그대로 재현하는 회귀 테스트 `test_eod_forced_exit_reproduces_actual_incident` 통과 확인 |
+| 5.55-3 | 리스크 경보 연동 | 활성 중 신규 진입 차단 + 보유 중 손절선 임시 축소(-0.8%) | ✅ 완료. `STOP_LOSS_PCT_RISK_ALERT`, `_get_risk_alert_active`, `run_auto_trade`/`watch_stop_loss` 양쪽 배선 |
+| 5.55-4 | 수급 방향 전환 조기청산 | 진입 시점 외인 현물 부호 기록 → 반전 감지 시 청산 | ✅ 완료. `AutoTradeState.entry_foreign_flow_sign`(신규 마이그레이션 `d9fcb5a87435`) + `evaluate_foreign_flow_reversal_exit` |
 
 **검증 순서**: 코드 변경 후 반드시 pytest 전체 통과 + 실 컨테이너 배포 확인까지
 마친 뒤, 킬스위치는 **사용자가 직접 검토 후 켤 때까지 계속 꺼둔 채로 둔다**
 (이번 사고 이후 재활성화는 자동으로 하지 않는다).
+
+**검증 결과(2026-08-06)**: 전체 diff 직접 검토 완료(4개 규칙 모두 PLAN.md 표
+그대로 구현, 매도 경로는 어디에도 시간/조건 게이트가 없음을 확인) + 전체
+pytest 직접 재실행(`874 passed`, 실패 1건은 무관한 기존
+`test_markets_positioning_hitrate_router.py` dev DB 오염 문제로 이번 변경과
+무관) + `test_eod_forced_exit_reproduces_actual_incident` 회귀 테스트가 실제
+사고 시나리오를 정확히 재현함을 코드 레벨에서 확인 + 실 컨테이너
+(`stock-backend-1`, `--reload`) 핫리로드 후 로그 무오류, 60초/30초 잡 정상
+실행 확인 + `GET /api/auto-trade/state` → `enabled: false` 재확인(킬스위치
+계속 꺼진 채로 둠, 자동 재활성화 없음).
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 

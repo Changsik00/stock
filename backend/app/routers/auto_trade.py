@@ -47,6 +47,10 @@ def _serialize_state(row: AutoTradeState, current_price: float | None) -> dict:
         "entry_at": row.entry_at.isoformat() if row.entry_at else None,
         "entry_order_no": row.entry_order_no,
         "peak_price": float(row.peak_price) if row.peak_price is not None else None,
+        # PLAN.md §5.55-4(2026-08-06) — 진입 시점 외인 현물 누적 순매수 부호
+        # ("positive"|"negative"|None). 이후 반전되면 조기 청산되는 근거값이라
+        # 대시보드에서도 참고할 수 있게 그대로 노출한다.
+        "entry_foreign_flow_sign": row.entry_foreign_flow_sign,
         "current_price": current_price,
         "unrealized_pnl": unrealized_pnl,
         "unrealized_pnl_pct": unrealized_pnl_pct,
@@ -78,8 +82,8 @@ async def get_auto_trade_state(session: AsyncSession = Depends(get_session)) -> 
     관대함).
 
     Returns ``{"enabled", "status", "code", "entry_price", "entry_qty",
-    "entry_at", "entry_order_no", "peak_price", "current_price",
-    "unrealized_pnl", "unrealized_pnl_pct", "updated_at"}``.
+    "entry_at", "entry_order_no", "peak_price", "entry_foreign_flow_sign",
+    "current_price", "unrealized_pnl", "unrealized_pnl_pct", "updated_at"}``.
     """
     row = await _get_or_create_state(session)
 

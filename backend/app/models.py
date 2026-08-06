@@ -663,6 +663,13 @@ class AutoTradeState(Base):
     entry_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     entry_order_no: Mapped[str | None] = mapped_column(String(30))
     peak_price: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    # PLAN.md §5.55-4(2026-08-06, 실제 손실 사고 이후 안전 규칙) — 진입 시점
+    # 외인 현물 누적 순매수 부호("positive"|"negative"|None,
+    # `quant/auto_trade_rules.foreign_flow_sign`이 인코딩). 이후 폴링에서 이
+    # 부호가 반전되면(`evaluate_foreign_flow_reversal_exit`) 가격 조건과
+    # 무관하게 조기 청산한다. idle로 돌아갈 때(손절/청산/강제청산 전부) 다른
+    # entry_* 필드와 함께 None으로 리셋된다.
+    entry_foreign_flow_sign: Mapped[str | None] = mapped_column(String(10))
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )

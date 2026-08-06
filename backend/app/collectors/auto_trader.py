@@ -73,6 +73,50 @@ intraday`의 마지막 분봉 종가)를 그대로 재사용한다 — 중복 �
 호가로 지정가를 걸어 정상 시장 상황에서는 사실상 즉시 체결되는 것을 전제로
 한다 — 이 전제가 깨지는 경우(부분체결/미체결 잔류)에 대한 대응은 이번 범위
 밖의 후속 작업이다.
+
+## 안전 규칙 추가(PLAN.md §5.55, 2026-08-06 — 2026-08-05 실제 손실 사고 이후)
+
+2026-08-05 오버나잇 갭하락으로 의도한 -1.5%가 아니라 -4.87%에 손절된 실제
+사고 이후 추가된 4개 안전 규칙. 판정 로직 자체(`quant/auto_trade_rules.py`
+의 `is_entry_blocked_by_time`/`evaluate_eod_forced_exit`/
+`evaluate_foreign_flow_reversal_exit`/`foreign_flow_sign`)는 순수 함수이고,
+이 파일은 그 판정에 필요한 값을 조회해 넘기고 실행(주문/로그/상태 갱신)만
+한다 — 기존 `decide_idle_action`/`decide_position_action` + 이 파일의 분업
+그대로다.
+
+- **§5.55-1 진입 시간 필터**: `_handle_idle`이 `decide_idle_action`이 "enter"를
+  반환한 *뒤에* `is_entry_blocked_by_time`으로 한 번 더 거른다(`check_entry_
+  budget`과 같은 위치 — 신호 자체는 순수 판정, 실행 가드는 호출부가 겹겹이
+  확인). 손절/트레일청산/강제청산 경로는 이 함수를 절대 호출하지 않는다.
+- **§5.55-2 장마감 전 조건부 오버나잇 청산**(최우선 규칙): `_handle_position`이
+  손절/트레일청산으로 이어지지 않은 뒤(`_check_forced_exits`) 리스크 경보
+  (`_warm_index_tiles_live` 재사용) + regime(`_warm_regime` 재사용, 코스닥
+  외국인 `confirmed_streak`)를 조회해 `evaluate_eod_forced_exit`에 넘긴다.
+  regime/리스크 조회가 상대적으로 무겁고 15:20~15:30 사이에만 의미가 있어
+  30초 `watch_stop_loss`가 아니라 60초 `run_auto_trade`에서만 평가한다.
+  **regime 조회 자체가 실패하면 안전 측(청산)으로 폴백**한다 — "확인 못 함"을
+  "조건 충족"으로 착각하지 않기 위해서다(이 파일의 다른 실패 처리와 다른
+  선택 — 아래 `_check_forced_exits` 주석 참고).
+- **§5.55-3 리스크 경보 연동**: 매 폴링(`run_auto_trade`/`watch_stop_loss`
+  둘 다) `_warm_index_tiles_live`의 `risk.alerts`를 조회해 `risk_alert_active`
+  로 넘긴다 — 활성 중이면 (a) idle 상태에서 신규 진입 금지, (b) 보유 중이면
+  `decide_position_action`/`evaluate_stop_loss`에 `STOP_LOSS_PCT_RISK_ALERT`
+  (-0.8%)를 적용해 손절선을 타이트하게 조정. 이 조회는 리스크 배너 자체가
+  "지금 당장의 위험" 보조 신호라 **조회 실패 시 위험 없음(False)으로 폴백**
+  한다(fail-open) — 그래도 절대 손절(-1.5%)은 항상 살아있어 최소 안전망은
+  유지된다.
+- **§5.55-4 수급 방향 전환 조기청산**: 진입 체결 직후 `intraday_snapshot.
+  get_foreign_position_series`(§5.50-6, `spot` 필드 — 코스피+코스닥 외국인
+  현물 합산 누적)의 최신 값을 `foreign_flow_sign`으로 부호만 인코딩해
+  `AutoTradeState.entry_foreign_flow_sign`에 기록한다. 이후 보유 중 매
+  `run_auto_trade` 폴링마다(DB 조회뿐, 새 외부 호출 없음) 현재 부호를 다시
+  구해 `evaluate_foreign_flow_reversal_exit`로 비교 — 반전되면 가격과 무관하게
+  조기 청산한다.
+
+네 규칙 모두 **매도(청산)는 절대 막지 않는다** — 시간 필터(§5.55-1)는 진입
+경로에만 적용되고, 나머지 세 규칙은 전부 "매도를 앞당기는" 방향으로만
+작동한다(청산 조건을 추가할 뿐, 기존 손절/트레일청산을 지연시키거나 막는
+로직은 어디에도 없다).
 """
 
 from __future__ import annotations
@@ -85,18 +129,28 @@ import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..clients.kiwoom import MAX_ORDER_NOTIONAL_KRW, KiwoomClient, parse_quote_levels
+from ..market_hours import KST
 from ..models import AutoTradeLog, AutoTradeState
 from ..quant.auto_trade_rules import (
+    EOD_FORCED_EXIT_END,
+    EOD_FORCED_EXIT_START,
     STOP_LOSS_PCT,
+    STOP_LOSS_PCT_RISK_ALERT,
     TARGET_CODE,
     TARGET_QTY,
     check_entry_budget,
     decide_idle_action,
     decide_position_action,
+    evaluate_eod_forced_exit,
+    evaluate_foreign_flow_reversal_exit,
     evaluate_stop_loss,
+    foreign_flow_sign,
+    is_entry_blocked_by_time,
 )
 from ..quant.signals import moving_average_cross, volume_spike
+from ..routers.markets import _warm_index_tiles_live, _warm_regime
 from ..routers.stocks import _warm_stock_intraday
+from . import intraday_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -198,15 +252,44 @@ async def _best_fill_price(client: KiwoomClient, code: str, side: str) -> float 
     return None
 
 
-async def run_auto_trade(session: AsyncSession) -> dict:
-    """PLAN.md §5.54 상태 기계를 1회 평가·실행한다.
+async def _get_risk_alert_active(session: AsyncSession) -> bool:
+    """PLAN.md §5.55-3 — `index-tiles/live`의 `risk.alerts`가 하나라도 있으면
+    True. `_warm_index_tiles_live`는 이 파일이 이미 새 TR 호출 없이 재사용하는
+    캐시된 warm 함수(60초 TTL)라, 매 폴링 호출해도 대부분 캐시 히트다. 조회
+    자체가 실패하면(DB 오류 등) **위험 없음(False)으로 폴백**한다(fail-open) —
+    이 배너는 "지금 당장의 위험"을 알리는 보조 신호이고, 이 값이 틀려도 절대
+    손절(-1.5%, `STOP_LOSS_PCT`)은 항상 살아있어 최소 안전망은 유지되기
+    때문이다. 장 마감이면 `risk`가 `None`이라(`_warm_index_tiles_live` 참고)
+    자연히 False가 된다."""
+    try:
+        index_tiles = await _warm_index_tiles_live(session)
+    except Exception as e:  # noqa: BLE001 - 보조 신호 조회 실패는 위험 없음으로 폴백
+        logger.warning("auto-trade: 리스크 경보 조회 실패, 위험 없음으로 폴백: %s", e)
+        return False
+    risk = index_tiles.get("risk")
+    return bool(risk and risk.get("alerts"))
+
+
+async def run_auto_trade(session: AsyncSession, now_kst: dt.time | None = None) -> dict:
+    """PLAN.md §5.54 상태 기계를 1회 평가·실행한다. PLAN.md §5.55(2026-08-06,
+    실제 손실 사고 이후 안전 규칙) 4개가 이 함수와 `_handle_idle`/
+    `_handle_position`에 배선돼 있다 — 모듈 상단 "안전 규칙 추가" 절 참고.
+
+    `now_kst`(선택, 기본 None)를 넘기면 §5.55-1/§5.55-2의 시간 판정에 실제
+    시계 대신 그 값을 쓴다 — `collectors/live_refresh.py`의 실제 스케줄러
+    호출부는 이 인자를 넘기지 않아(기본 동작 그대로 실제 시계) 동작이
+    바뀌지 않는다. 테스트가 15:20~15:30 KST 같은 특정 시각을 재현하려고
+    실제 벽시계를 기다리지 않게 하기 위한 주입 지점이다(house rule — "시간
+    관련 테스트는 now_kst를 파라미터로 주입 가능하게 설계", 하드코딩된
+    `dt.datetime.now()`를 함수 내부 깊은 곳에 두지 않는다).
 
     Returns 요약 dict(로깅용, `scalp_tracker.track_scalp_picks`/
     `positioning_snapshot.track_positioning_snapshot`의 반환 관례 참고) —
     ``{"enabled": bool, "action": str, ...}``. ``action``은
     "none"(꺼짐/조건 미충족/신고가만 조용히 갱신)|"enter"|"trail_activate"|
-    "exit_stop_loss"|"exit_trail"|"budget_blocked"|"buy_failed"|"sell_failed"|
-    "error" 중 하나.
+    "exit_stop_loss"|"exit_trail"|"exit_eod_forced"|"exit_flow_reversal"|
+    "entry_blocked_time"|"entry_blocked_risk"|"budget_blocked"|"buy_failed"|
+    "sell_failed"|"error" 중 하나.
     """
     result: dict = {"enabled": False, "action": "none"}
 
@@ -252,12 +335,31 @@ async def run_auto_trade(session: AsyncSession) -> dict:
             "volume_spike_recent": spike_recent,
         }
 
+        # PLAN.md §5.55-1/3 — 진입 시간 필터(idle 경로)와 리스크 경보 연동(idle
+        # 진입 차단 + holding/trailing 손절선 조정) 둘 다 "지금 몇 시인지"/
+        # "리스크 경보가 활성인지"가 필요하다. 상태(idle/holding/trailing)와
+        # 무관하게 매 폴링 한 번만 구한다. `now_kst` 인자가 주입됐으면(테스트)
+        # 그 값을 그대로 쓰고, 아니면(실제 스케줄러 호출) 실제 시계를 읽는다.
+        effective_now_kst = now_kst if now_kst is not None else dt.datetime.now(KST).time()
+        risk_alert_active = await _get_risk_alert_active(session)
+
         if state.status == "idle":
             return await _handle_idle(
-                session, state, code, current_price, golden_recent, spike_recent, signal_snapshot, result
+                session,
+                state,
+                code,
+                current_price,
+                golden_recent,
+                spike_recent,
+                signal_snapshot,
+                result,
+                effective_now_kst,
+                risk_alert_active,
             )
 
-        return await _handle_position(session, state, code, current_price, ma_cross, signal_snapshot, result)
+        return await _handle_position(
+            session, state, code, current_price, ma_cross, signal_snapshot, result, effective_now_kst, risk_alert_active
+        )
 
 
 async def _handle_idle(
@@ -269,6 +371,8 @@ async def _handle_idle(
     spike_recent: bool,
     signal_snapshot: dict,
     result: dict,
+    now_kst: dt.time,
+    risk_alert_active: bool,
 ) -> dict:
     # `evaluate_entry`/`decide_idle_action`은 문자열 ma_cross_state를 받아
     # `== "golden"`으로 비교한다(quant/auto_trade_rules.py) — 이미 "최근 봉
@@ -280,6 +384,34 @@ async def _handle_idle(
     result["action"] = decision["action"]
     if decision["action"] != "enter":
         # idle + 조건 미충족은 노이즈라 로그하지 않는다(모듈 docstring 원칙 3).
+        return result
+
+    # PLAN.md §5.55-1 — 개장 후 10분/마감 전 10분엔 신규 진입만 금지. 신호
+    # 판정(decide_idle_action) 자체는 순수하게 그대로 두고, 실행 여부를
+    # 가르는 추가 가드로 여기서 겹겹이 확인한다(`check_entry_budget`과 동일한
+    # 위치·관례). 손절/트레일청산/강제청산 경로는 이 체크를 절대 거치지
+    # 않으므로(모두 다른 함수) 항상 정상 작동한다.
+    if is_entry_blocked_by_time(now_kst):
+        reason = (
+            f"{decision['reason']} — 그러나 진입 제한 시간대(now={now_kst.isoformat()}, "
+            "09:00~09:10 또는 15:20~15:30 KST)라 진입 보류"
+        )
+        await _log(
+            session, event_type="entry_blocked_time", code=code, price=current_price,
+            reason=reason, signal_snapshot=signal_snapshot,
+        )
+        result["action"] = "entry_blocked_time"
+        return result
+
+    # PLAN.md §5.55-3 — 리스크 경보(서킷브레이커/사이드카/거래량급증/수급가속도)
+    # 활성 중엔 신규 진입 금지.
+    if risk_alert_active:
+        reason = f"{decision['reason']} — 그러나 리스크 경보 활성 중이라 진입 보류"
+        await _log(
+            session, event_type="entry_blocked_risk", code=code, price=current_price,
+            reason=reason, signal_snapshot=signal_snapshot,
+        )
+        result["action"] = "entry_blocked_risk"
         return result
 
     notional = TARGET_QTY * current_price
@@ -327,6 +459,20 @@ async def _handle_idle(
     state.entry_at = now
     state.entry_order_no = str(order_response.get("ord_no")) if order_response.get("ord_no") else None
     state.peak_price = None
+
+    # PLAN.md §5.55-4 — 진입 시점 외인 현물 누적 순매수 부호를 기록해 둔다
+    # (이후 반전 감지용). 조회 실패해도 진입 자체는 이미 체결됐으니 막지
+    # 않는다 — None으로 남으면 `evaluate_foreign_flow_reversal_exit`이
+    # "판정 불가"로 처리해 조기청산을 시도하지 않는다(안전한 기본값).
+    try:
+        foreign_series = await intraday_snapshot.get_foreign_position_series(session, days=1)
+        spot_points = foreign_series.get("spot") or []
+        entry_flow_value = spot_points[-1]["value"] if spot_points else None
+    except Exception as e:  # noqa: BLE001 - 조회 실패는 기록 생략, 진입 자체는 계속 진행
+        logger.warning("auto-trade: 진입 시점 외인 현물 수급 조회 실패(반전 감지 기록 생략): %s", e)
+        entry_flow_value = None
+    state.entry_foreign_flow_sign = foreign_flow_sign(entry_flow_value)
+
     await session.commit()
 
     await _log(
@@ -334,11 +480,150 @@ async def _handle_idle(
         event_type="entry",
         code=code,
         price=order_price,
-        reason=decision["reason"] + f" -> 매수 주문 제출(지정가 {order_price}원, {TARGET_QTY}주)",
+        reason=(
+            decision["reason"] + f" -> 매수 주문 제출(지정가 {order_price}원, {TARGET_QTY}주), "
+            f"진입 시점 외인 현물 수급 부호={state.entry_foreign_flow_sign!r}"
+        ),
         signal_snapshot=signal_snapshot,
         order_response=order_response,
     )
     result["action"] = "entry"
+    return result
+
+
+async def _execute_sell(
+    session: AsyncSession,
+    state: AutoTradeState,
+    code: str,
+    current_price: float,
+    event_type: str,
+    reason: str,
+    signal_snapshot: dict,
+    result: dict,
+) -> dict:
+    """공통 매도 실행 — 손절/트레일청산/EOD강제청산(§5.55-2)/수급반전조기청산
+    (§5.55-4)이 전부 이 로직(호가 조회 -> 매도 주문 -> 상태 초기화 -> 로그)을
+    공유한다. **이 함수를 호출한다는 것 자체가 이미 "매도하기로 결정됨"을
+    뜻한다** — 여기서는 더 이상 조건을 판단하지 않고 기계적으로 실행만 한다
+    (모듈 상단 "매도는 항상 최우선/무조건 허용" 원칙)."""
+    try:
+        async with KiwoomClient() as client:
+            order_price = await _best_fill_price(client, code, "sell")
+            if order_price is None:
+                raise RuntimeError("매수호가를 확인할 수 없어 주문가를 정할 수 없음")
+            order_response = await client.place_sell_order(
+                code, int(state.entry_qty or TARGET_QTY), int(order_price)
+            )
+    except Exception as e:  # noqa: BLE001 - 주문 실패는 재시도 루프에 빠지지 않고 로그만
+        logger.warning("auto-trade: 매도 주문 실패(%s): %s", event_type, e)
+        await _log(
+            session,
+            event_type="error",
+            code=code,
+            price=current_price,
+            reason=f"매도 주문 시도 실패({event_type}): {reason} / 오류: {e}",
+            signal_snapshot=signal_snapshot,
+        )
+        result["action"] = "sell_failed"
+        result["error"] = str(e)[:300]
+        return result
+
+    state.status = "idle"
+    state.entry_price = None
+    state.entry_qty = None
+    state.entry_at = None
+    state.entry_order_no = None
+    state.peak_price = None
+    state.entry_foreign_flow_sign = None
+    await session.commit()
+
+    await _log(
+        session,
+        event_type=event_type,
+        code=code,
+        price=order_price,
+        reason=reason + f" -> 매도 주문 제출(지정가 {order_price}원)",
+        signal_snapshot=signal_snapshot,
+        order_response=order_response,
+    )
+    # `result["action"]`은 여기서 건드리지 않는다 — 손절/트레일청산 호출부
+    # (`_handle_position`)는 이미 `decision["action"]`("stop_loss"/"exit_trail",
+    # `event_type`과 다른 문자열일 수 있음 — 기존 관례 그대로 유지)을 미리
+    # 넣어 뒀고, EOD강제청산/수급반전 호출부(`_check_forced_exits`)는 각자
+    # 호출 전에 명시적으로 넣는다. 실패(sell_failed)만 위에서 이미 덮어썼다.
+    return result
+
+
+async def _check_forced_exits(
+    session: AsyncSession,
+    state: AutoTradeState,
+    code: str,
+    current_price: float,
+    signal_snapshot: dict,
+    result: dict,
+    now_kst: dt.time,
+    risk_alert_active: bool,
+) -> dict:
+    """PLAN.md §5.55-2/§5.55-4 — `decide_position_action`이 "none"/
+    "peak_update"/"trail_activate"를 반환해 매도로 이어지지 않은 뒤에도, 이
+    두 가지 강제청산 조건(가격과 무관)을 추가로 확인한다. `_handle_position`이
+    stop_loss/exit_trail일 때는 이 함수를 아예 호출하지 않는다(모듈 상단
+    "매도는 항상 최우선" 원칙 — 이미 손절/트레일청산이 나갔으면 사족 없이
+    바로 나간다).
+
+    확인 순서: 수급 방향 반전(§5.55-4, 시간 무관 — DB 조회뿐이라 매 폴링
+    확인해도 가볍다) -> EOD 강제청산(§5.55-2, 15:20~15:30 KST에서만 확인 —
+    regime 조회가 상대적으로 무겁고 이 시간대 밖에서는 애초에 의미가 없다).
+    """
+    entry_price = float(state.entry_price)
+
+    # §5.55-4 — 수급 방향 전환 조기청산.
+    try:
+        foreign_series = await intraday_snapshot.get_foreign_position_series(session, days=1)
+        spot_points = foreign_series.get("spot") or []
+        current_flow_value = spot_points[-1]["value"] if spot_points else None
+    except Exception as e:  # noqa: BLE001 - 조회 실패는 이번 폴링만 건너뜀(다음 폴링 재시도)
+        logger.warning("auto-trade: 외인 현물 수급 조회 실패, 반전 조기청산 체크 건너뜀: %s", e)
+        current_flow_value = None
+    current_flow_sign = foreign_flow_sign(current_flow_value)
+
+    flow_decision = evaluate_foreign_flow_reversal_exit(state.entry_foreign_flow_sign, current_flow_sign)
+    if flow_decision["should_exit"]:
+        result["action"] = "exit_flow_reversal"
+        return await _execute_sell(
+            session, state, code, current_price, "exit_flow_reversal", flow_decision["reason"],
+            signal_snapshot, result,
+        )
+
+    # §5.55-2 — 장마감 전 조건부 오버나잇 청산. 15:20~15:30 KST 밖이면 리스크
+    # 경보/regime 조회 없이 즉시 반환(`evaluate_eod_forced_exit`도 시간 자체를
+    # 다시 확인하지만, 여기서 먼저 걸러야 이 시간대 밖에서 불필요한 regime
+    # 조회를 하지 않는다).
+    if not (EOD_FORCED_EXIT_START <= now_kst <= EOD_FORCED_EXIT_END):
+        return result
+
+    try:
+        regime = await _warm_regime(session)
+        kosdaq_foreign_streak_ok = regime["kosdaq"]["외국인"]["confirmed_streak"] >= 0
+    except Exception as e:  # noqa: BLE001 - "확인 못 함"을 안전 측(청산)으로 폴백
+        logger.warning("auto-trade: EOD 강제청산 판정용 regime 조회 실패, 안전 측(청산)으로 폴백: %s", e)
+        kosdaq_foreign_streak_ok = False
+
+    unrealized_pnl_positive = current_price > entry_price
+
+    eod_decision = evaluate_eod_forced_exit(
+        now_kst=now_kst,
+        status=state.status,
+        unrealized_pnl_positive=unrealized_pnl_positive,
+        kosdaq_foreign_streak_ok=kosdaq_foreign_streak_ok,
+        risk_alert_active=risk_alert_active,
+    )
+    if eod_decision["should_exit"]:
+        result["action"] = "exit_eod_forced"
+        return await _execute_sell(
+            session, state, code, current_price, "exit_eod_forced", eod_decision["reason"],
+            signal_snapshot, result,
+        )
     return result
 
 
@@ -350,6 +635,8 @@ async def _handle_position(
     ma_cross: dict,
     signal_snapshot: dict,
     result: dict,
+    now_kst: dt.time,
+    risk_alert_active: bool,
 ) -> dict:
     decision = decide_position_action(
         state.status,
@@ -357,17 +644,22 @@ async def _handle_position(
         float(state.peak_price) if state.peak_price is not None else None,
         ma_cross["state"],
         current_price,
+        risk_alert_active=risk_alert_active,
     )
     result["action"] = decision["action"]
 
     if decision["action"] == "none":
-        return result
+        return await _check_forced_exits(
+            session, state, code, current_price, signal_snapshot, result, now_kst, risk_alert_active
+        )
 
     if decision["action"] == "peak_update":
         # trailing 중 신고가만 조용히 갱신 — 로그하지 않는다(모듈 docstring 원칙 3).
         state.peak_price = decision["new_peak_price"]
         await session.commit()
-        return result
+        return await _check_forced_exits(
+            session, state, code, current_price, signal_snapshot, result, now_kst, risk_alert_active
+        )
 
     if decision["action"] == "trail_activate":
         state.status = "trailing"
@@ -381,50 +673,18 @@ async def _handle_position(
             reason=decision["reason"],
             signal_snapshot=signal_snapshot,
         )
-        return result
-
-    # stop_loss 또는 exit_trail -> 매도
-    event_type = "exit_stop_loss" if decision["action"] == "stop_loss" else "exit_trail"
-    try:
-        async with KiwoomClient() as client:
-            order_price = await _best_fill_price(client, code, "sell")
-            if order_price is None:
-                raise RuntimeError("매수호가를 확인할 수 없어 주문가를 정할 수 없음")
-            order_response = await client.place_sell_order(
-                code, int(state.entry_qty or TARGET_QTY), int(order_price)
-            )
-    except Exception as e:  # noqa: BLE001 - 주문 실패는 재시도 루프에 빠지지 않고 로그만
-        logger.warning("auto-trade: 매도 주문 실패: %s", e)
-        await _log(
-            session,
-            event_type="error",
-            code=code,
-            price=current_price,
-            reason=f"매도 주문 시도 실패({event_type}): {decision['reason']} / 오류: {e}",
-            signal_snapshot=signal_snapshot,
+        return await _check_forced_exits(
+            session, state, code, current_price, signal_snapshot, result, now_kst, risk_alert_active
         )
-        result["action"] = "sell_failed"
-        result["error"] = str(e)[:300]
-        return result
 
-    state.status = "idle"
-    state.entry_price = None
-    state.entry_qty = None
-    state.entry_at = None
-    state.entry_order_no = None
-    state.peak_price = None
-    await session.commit()
-
-    await _log(
-        session,
-        event_type=event_type,
-        code=code,
-        price=order_price,
-        reason=decision["reason"] + f" -> 매도 주문 제출(지정가 {order_price}원)",
-        signal_snapshot=signal_snapshot,
-        order_response=order_response,
+    # stop_loss 또는 exit_trail -> 매도. 손절은 항상 최우선(decide_position_action이
+    # 이미 다른 판정보다 먼저 확인) — 여기서 §5.55의 새 강제청산 판정 없이
+    # 바로 나간다(모듈 상단 "매도는 항상 최우선" 원칙, `_check_forced_exits`를
+    # 아예 호출하지 않는다).
+    event_type = "exit_stop_loss" if decision["action"] == "stop_loss" else "exit_trail"
+    return await _execute_sell(
+        session, state, code, current_price, event_type, decision["reason"], signal_snapshot, result
     )
-    return result
 
 
 async def watch_stop_loss(session: AsyncSession) -> dict:
@@ -453,6 +713,17 @@ async def watch_stop_loss(session: AsyncSession) -> dict:
     상단 주석 참고) — 두 잡이 동시에 같은 포지션에 대해 매도를 시도해
     중복 주문이 나가는 걸 막는다.
 
+    **PLAN.md §5.55-3(2026-08-06 추가)**: 리스크 경보 활성 중엔 손절선을
+    `STOP_LOSS_PCT`(-1.5%) 대신 `STOP_LOSS_PCT_RISK_ALERT`(-0.8%)로 타이트하게
+    적용한다 — "장중 변동성 급등 대응"이 바로 이 30초 고빈도 감시의 존재
+    이유와 정확히 일치하는 상황이라, 느린 60초 잡뿐 아니라 이 잡에도 같은
+    조정을 반영한다. `_warm_index_tiles_live`는 60초 캐시라 이 잡이 매번
+    호출해도 대부분 캐시 히트라 실질적으로 추가 지연이 없다. EOD 강제청산
+    (§5.55-2)/수급 반전 조기청산(§5.55-4)은 이 잡에 넣지 않는다(모듈 상단
+    "진입/트레일전환/트레일청산은 건드리지 않는다" 원칙 그대로 — regime/외인
+    수급 조회가 이 30초 잡의 "딱 손절 판정에만" 범위를 벗어난다, `run_auto_
+    trade`가 전담).
+
     Returns ``{"enabled": bool, "action": "none"|"exit_stop_loss"|
     "sell_failed"|"error"}``.
     """
@@ -479,6 +750,12 @@ async def watch_stop_loss(session: AsyncSession) -> dict:
 
         code = state.code or TARGET_CODE
 
+        # PLAN.md §5.55-3 — 리스크 경보 활성 중이면 손절선을 타이트하게(위
+        # 모듈 docstring 참고). 조회 실패는 `_get_risk_alert_active` 내부에서
+        # 이미 위험 없음(False)으로 폴백한다.
+        risk_alert_active = await _get_risk_alert_active(session)
+        stop_loss_threshold = STOP_LOSS_PCT_RISK_ALERT if risk_alert_active else STOP_LOSS_PCT
+
         try:
             async with KiwoomClient() as client:
                 live_price = await _best_fill_price(client, code, "sell")
@@ -488,7 +765,7 @@ async def watch_stop_loss(session: AsyncSession) -> dict:
             result["error"] = str(e)[:300]
             return result
 
-        if live_price is None or not evaluate_stop_loss(entry_price, live_price):
+        if live_price is None or not evaluate_stop_loss(entry_price, live_price, stop_loss_threshold):
             return result
 
         # 손절 조건 충족 — 방금 조회한 매수1호가(live_price)를 그대로 매도
@@ -500,6 +777,8 @@ async def watch_stop_loss(session: AsyncSession) -> dict:
             "entry_price": entry_price,
             "pct": pct,
             "source": "realtime_quote_fast_watch",
+            "risk_alert_active": risk_alert_active,
+            "stop_loss_threshold": stop_loss_threshold,
         }
 
         try:
@@ -525,6 +804,7 @@ async def watch_stop_loss(session: AsyncSession) -> dict:
         state.entry_at = None
         state.entry_order_no = None
         state.peak_price = None
+        state.entry_foreign_flow_sign = None
         await session.commit()
 
         await _log(
@@ -534,7 +814,9 @@ async def watch_stop_loss(session: AsyncSession) -> dict:
             price=live_price,
             reason=(
                 f"[실시간 호가 손절 감시(30초)] 손절 조건 충족: 실시간가 {live_price} vs "
-                f"진입가 {entry_price} ({pct:+.2f}%) <= {STOP_LOSS_PCT}% -> 매도 주문 제출"
+                f"진입가 {entry_price} ({pct:+.2f}%) <= {stop_loss_threshold}%"
+                + (" (리스크 경보 활성 -> 임시 손절선 적용)" if risk_alert_active else "")
+                + " -> 매도 주문 제출"
             ),
             signal_snapshot=signal_snapshot,
             order_response=order_response,

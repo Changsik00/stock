@@ -18,6 +18,7 @@ app.db.async_session_factory. `AutoTradeState`는 **싱글턴(id=1 고정)**이�
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 
 import pytest
 from sqlalchemy import func, select
@@ -27,6 +28,15 @@ from app.db import async_session_factory, engine
 from app.models import AutoTradeLog, AutoTradeState
 
 STATE_ID = auto_trader.STATE_ID
+
+# PLAN.md §5.55(2026-08-06) 배선 이후 run_auto_trade가 진입 시간 필터(§5.55-1,
+# 09:00~09:10/15:20~15:30 KST 진입 금지)와 EOD 강제청산(§5.55-2, 15:20~15:30
+# KST) 판정에 "지금 몇 시인지"를 쓴다. §5.55와 무관한 기존 테스트가 실행되는
+# 실제 벽시계 시각에 따라 우연히 이 창에 걸려 플레이키해지지 않도록, 그 두
+# 창 밖의 고정 시각을 기본으로 넘긴다(house rule — 시간 관련 테스트는 now_kst
+# 주입으로 실제 시계에 의존하지 않게 설계). §5.55 전용 테스트는 각자 원하는
+# 시각을 명시적으로 넘긴다.
+SAFE_NOW_KST = dt.time(10, 0)
 
 FAKE_QUOTE_RAW = {
     "sel_fpr_bid": "-16100",  # 매도 1호가 -> 매수 주문가로 쓰임
@@ -122,6 +132,7 @@ async def _snapshot_and_restore_state():
                 "entry_at": row.entry_at,
                 "entry_order_no": row.entry_order_no,
                 "peak_price": row.peak_price,
+                "entry_foreign_flow_sign": row.entry_foreign_flow_sign,
             }
             if row is not None
             else None
@@ -165,6 +176,7 @@ async def _set_state(**kwargs) -> None:
             entry_at=None,
             entry_order_no=None,
             peak_price=None,
+            entry_foreign_flow_sign=None,
         )
         defaults.update(kwargs)
         for k, v in defaults.items():
@@ -214,6 +226,38 @@ def _patch_kiwoom_client(monkeypatch) -> _FakeKiwoomClient:
 
 
 # ---------------------------------------------------------------------------
+# PLAN.md §5.55(2026-08-06, 실제 손실 사고 이후 안전 규칙) 배선용 몽키패치
+#
+# run_auto_trade/watch_stop_loss가 이제 매 폴링 `_warm_index_tiles_live`(리스크
+# 경보)/`_warm_regime`(EOD 강제청산용 코스닥 외국인 confirmed_streak)를
+# 호출한다 — 실제 키움/네이버를 두드리지 않도록 아래 autouse 픽스처가 기본값
+# (리스크 경보 없음, 코스닥 외국인 스트릭 0=중립)으로 항상 몽키패치해 둔다.
+# §5.55 전용 테스트는 각자 monkeypatch.setattr로 이 기본값을 다시 덮어쓴다
+# (같은 monkeypatch 픽스처 인스턴스라 마지막 설정이 이긴다).
+# ---------------------------------------------------------------------------
+
+
+def _fake_index_tiles_live(alerts: list | None = None):
+    async def fn(session):
+        return {"risk": {"alerts": alerts or [], "has_data": True}, "market_closed": False}
+
+    return fn
+
+
+def _fake_regime(kosdaq_confirmed_streak: int = 0):
+    async def fn(session):
+        return {"kosdaq": {"외국인": {"confirmed_streak": kosdaq_confirmed_streak}}}
+
+    return fn
+
+
+@pytest.fixture(autouse=True)
+def _patch_risk_and_regime_default(monkeypatch):
+    monkeypatch.setattr(auto_trader, "_warm_index_tiles_live", _fake_index_tiles_live())
+    monkeypatch.setattr(auto_trader, "_warm_regime", _fake_regime())
+
+
+# ---------------------------------------------------------------------------
 # 킬스위치 꺼짐 — 가장 중요한 테스트: 어떤 외부 호출도 절대 일어나면 안 된다
 # ---------------------------------------------------------------------------
 
@@ -224,7 +268,7 @@ async def test_disabled_makes_no_external_calls_and_returns_immediately(monkeypa
     monkeypatch.setattr(auto_trader, "KiwoomClient", _raising_kiwoom_client_factory)
 
     async with async_session_factory() as session:
-        result = await auto_trader.run_auto_trade(session)
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
 
     assert result == {"enabled": False, "action": "none"}
     assert await _log_rows() == []
@@ -238,7 +282,7 @@ async def test_disabled_even_while_holding_a_position_makes_no_calls(monkeypatch
     monkeypatch.setattr(auto_trader, "KiwoomClient", _raising_kiwoom_client_factory)
 
     async with async_session_factory() as session:
-        result = await auto_trader.run_auto_trade(session)
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
 
     assert result["enabled"] is False
     assert await _log_rows() == []
@@ -257,7 +301,7 @@ async def test_missing_state_row_treated_as_disabled(monkeypatch):
     monkeypatch.setattr(auto_trader, "KiwoomClient", _raising_kiwoom_client_factory)
 
     async with async_session_factory() as session:
-        result = await auto_trader.run_auto_trade(session)
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
 
     assert result == {"enabled": False, "action": "none"}
 
@@ -273,7 +317,7 @@ async def test_idle_no_entry_when_conditions_unmet(monkeypatch):
     fake_cls = _patch_kiwoom_client(monkeypatch)
 
     async with async_session_factory() as session:
-        result = await auto_trader.run_auto_trade(session)
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
 
     assert result["action"] == "none"
     assert fake_cls.instances == []  # 주문 시도 자체가 없어야 함
@@ -288,7 +332,7 @@ async def test_idle_enters_when_conditions_met_and_budget_ok(monkeypatch):
     _patch_kiwoom_client(monkeypatch)
 
     async with async_session_factory() as session:
-        result = await auto_trader.run_auto_trade(session)
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
 
     assert result["action"] == "entry"
     fake = _FakeKiwoomClient.instances[-1]
@@ -317,7 +361,7 @@ async def test_idle_blocked_by_budget_guard_when_notional_exceeds_total_budget(m
     fake_cls = _patch_kiwoom_client(monkeypatch)
 
     async with async_session_factory() as session:
-        result = await auto_trader.run_auto_trade(session)
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
 
     assert result["action"] == "budget_blocked"
     assert fake_cls.instances == []  # place_buy_order로 이어지는 클라이언트 호출 자체가 없어야 함
@@ -339,7 +383,7 @@ async def test_idle_already_holding_never_reaches_entry_logic(monkeypatch):
     fake_cls = _patch_kiwoom_client(monkeypatch)
 
     async with async_session_factory() as session:
-        result = await auto_trader.run_auto_trade(session)
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
 
     # holding 상태이므로 idle 진입 로직이 아니라 포지션 관리 로직(손절/트레일)이 평가된다.
     assert result["action"] != "entry"
@@ -357,7 +401,7 @@ async def test_holding_stop_loss_sells_and_resets_to_idle(monkeypatch):
     _patch_kiwoom_client(monkeypatch)
 
     async with async_session_factory() as session:
-        result = await auto_trader.run_auto_trade(session)
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
 
     assert result["action"] == "stop_loss"
     fake = _FakeKiwoomClient.instances[-1]
@@ -381,7 +425,7 @@ async def test_holding_trail_activate_no_order_placed(monkeypatch):
     fake_cls = _patch_kiwoom_client(monkeypatch)
 
     async with async_session_factory() as session:
-        result = await auto_trader.run_auto_trade(session)
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
 
     assert result["action"] == "trail_activate"
     assert fake_cls.instances == []  # 트레일 전환은 주문이 아니다
@@ -401,7 +445,7 @@ async def test_holding_no_action_when_no_condition_met(monkeypatch):
     fake_cls = _patch_kiwoom_client(monkeypatch)
 
     async with async_session_factory() as session:
-        result = await auto_trader.run_auto_trade(session)
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
 
     assert result["action"] == "none"
     assert fake_cls.instances == []
@@ -420,7 +464,7 @@ async def test_trailing_peak_update_is_silent_no_log(monkeypatch):
     fake_cls = _patch_kiwoom_client(monkeypatch)
 
     async with async_session_factory() as session:
-        result = await auto_trader.run_auto_trade(session)
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
 
     assert result["action"] == "peak_update"
     assert fake_cls.instances == []
@@ -438,7 +482,7 @@ async def test_trailing_exit_when_dead_cross_and_floor_reached(monkeypatch):
     _patch_kiwoom_client(monkeypatch)
 
     async with async_session_factory() as session:
-        result = await auto_trader.run_auto_trade(session)
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
 
     assert result["action"] == "exit_trail"
     fake = _FakeKiwoomClient.instances[-1]
@@ -460,7 +504,7 @@ async def test_trailing_stop_loss_overrides_trail_logic(monkeypatch):
     _patch_kiwoom_client(monkeypatch)
 
     async with async_session_factory() as session:
-        result = await auto_trader.run_auto_trade(session)
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
 
     assert result["action"] == "stop_loss"
     logs = await _log_rows()
@@ -487,7 +531,7 @@ async def test_buy_order_failure_keeps_state_idle(monkeypatch):
     monkeypatch.setattr(auto_trader, "KiwoomClient", _FailingBuyClient)
 
     async with async_session_factory() as session:
-        result = await auto_trader.run_auto_trade(session)
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
 
     assert result["action"] == "buy_failed"
     state = await _get_state()
@@ -511,7 +555,7 @@ async def test_sell_order_failure_keeps_state_holding(monkeypatch):
     monkeypatch.setattr(auto_trader, "KiwoomClient", _FailingSellClient)
 
     async with async_session_factory() as session:
-        result = await auto_trader.run_auto_trade(session)
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
 
     assert result["action"] == "sell_failed"
     state = await _get_state()
@@ -655,7 +699,7 @@ async def test_watch_and_run_auto_trade_do_not_double_sell_concurrently(monkeypa
 
     async with async_session_factory() as session_a, async_session_factory() as session_b:
         results = await asyncio.gather(
-            auto_trader.run_auto_trade(session_a),
+            auto_trader.run_auto_trade(session_a, now_kst=SAFE_NOW_KST),
             auto_trader.watch_stop_loss(session_b),
         )
 
@@ -676,3 +720,412 @@ async def test_watch_and_run_auto_trade_do_not_double_sell_concurrently(monkeypa
     logs = await _log_rows()
     assert len(logs) == 1  # 둘 중 하나만 실제로 로그를 남겼어야 한다(락으로 직렬화됨)
     assert logs[0].event_type == "exit_stop_loss"
+
+
+# ---------------------------------------------------------------------------
+# PLAN.md §5.55(2026-08-06, 실제 손실 사고 이후 안전 규칙) 통합 테스트
+# ---------------------------------------------------------------------------
+
+
+def _patch_risk_alert(monkeypatch, alerts: list | None = None, market_closed: bool = False):
+    async def fn(session):
+        return {"risk": None if market_closed else {"alerts": alerts or [], "has_data": True}, "market_closed": market_closed}
+
+    monkeypatch.setattr(auto_trader, "_warm_index_tiles_live", fn)
+
+
+def _patch_regime(monkeypatch, kosdaq_confirmed_streak: int = 0, raise_error: bool = False):
+    async def fn(session):
+        if raise_error:
+            raise RuntimeError("regime 조회 실패(테스트)")
+        return {"kosdaq": {"외국인": {"confirmed_streak": kosdaq_confirmed_streak}}}
+
+    monkeypatch.setattr(auto_trader, "_warm_regime", fn)
+
+
+def _patch_foreign_flow(monkeypatch, spot_value: float | None):
+    async def fn(session, days=1):
+        spot = [] if spot_value is None else [{"time": "10:00:00", "value": spot_value}]
+        return {"date": "2026-08-06", "spot": spot, "futures": [], "market_closed": False}
+
+    monkeypatch.setattr(auto_trader.intraday_snapshot, "get_foreign_position_series", fn)
+
+
+# ---------------------------------------------------------------------------
+# §5.55-1 — 진입 시간 필터(개장 후 10분/마감 전 10분엔 신규 진입만 금지)
+# ---------------------------------------------------------------------------
+
+
+async def test_entry_blocked_during_open_window(monkeypatch):
+    await _set_state(enabled=True, status="idle")
+    _patch_signals(monkeypatch, ma_state="golden", is_spike=True, bars_close=16000.0)
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(9, 5))
+
+    assert result["action"] == "entry_blocked_time"
+    assert fake_cls.instances == []  # 매수 시도 자체가 없어야 함
+
+    state = await _get_state()
+    assert state.status == "idle"
+
+    logs = await _log_rows()
+    assert len(logs) == 1
+    assert logs[0].event_type == "entry_blocked_time"
+
+
+async def test_entry_blocked_during_close_window(monkeypatch):
+    await _set_state(enabled=True, status="idle")
+    _patch_signals(monkeypatch, ma_state="golden", is_spike=True, bars_close=16000.0)
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(15, 25))
+
+    assert result["action"] == "entry_blocked_time"
+    assert fake_cls.instances == []
+
+    state = await _get_state()
+    assert state.status == "idle"
+
+
+async def test_entry_allowed_just_outside_open_window(monkeypatch):
+    await _set_state(enabled=True, status="idle")
+    _patch_signals(monkeypatch, ma_state="golden", is_spike=True, bars_close=16000.0)
+    _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(9, 11))
+
+    assert result["action"] == "entry"
+
+
+async def test_stop_loss_not_affected_by_entry_time_block_open_window(monkeypatch):
+    """손절은 진입 제한 시간대(09:00~09:10)에도 절대 영향받지 않는다 —
+    `is_entry_blocked_by_time`은 idle(진입) 경로에서만 쓰인다."""
+    await _set_state(enabled=True, status="holding", entry_price=16000, entry_qty=1)
+    _patch_signals(monkeypatch, ma_state="none", is_spike=False, bars_close=16000 * 0.98)
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(9, 5))
+
+    assert result["action"] == "stop_loss"
+    fake = fake_cls.instances[-1]
+    assert fake.sell_calls == [("0167A0", 1, 16050)]
+
+
+async def test_stop_loss_not_affected_by_entry_time_block_close_window(monkeypatch):
+    """마감 전 10분(15:20~15:30)에도 손절은 정상 작동한다."""
+    await _set_state(enabled=True, status="holding", entry_price=16000, entry_qty=1)
+    _patch_signals(monkeypatch, ma_state="none", is_spike=False, bars_close=16000 * 0.98)
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(15, 25))
+
+    assert result["action"] == "stop_loss"
+    fake = fake_cls.instances[-1]
+    assert fake.sell_calls == [("0167A0", 1, 16050)]
+
+
+# ---------------------------------------------------------------------------
+# §5.55-3 — 리스크 경보 연동(신규 진입 금지 + 손절선 임시 축소)
+# ---------------------------------------------------------------------------
+
+
+async def test_entry_blocked_by_risk_alert(monkeypatch):
+    await _set_state(enabled=True, status="idle")
+    _patch_signals(monkeypatch, ma_state="golden", is_spike=True, bars_close=16000.0)
+    _patch_risk_alert(monkeypatch, alerts=[{"kind": "circuit_breaker", "market": "kospi", "severity": 3}])
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
+
+    assert result["action"] == "entry_blocked_risk"
+    assert fake_cls.instances == []
+
+    state = await _get_state()
+    assert state.status == "idle"
+
+    logs = await _log_rows()
+    assert len(logs) == 1
+    assert logs[0].event_type == "entry_blocked_risk"
+
+
+async def test_holding_stop_loss_tightened_by_risk_alert(monkeypatch):
+    """평상시라면 -1.5%가 아니라 손절이 아닌 -1% 하락이, 리스크 경보 활성
+    중엔 임시 손절선(-0.8%)에 걸려 즉시 손절된다."""
+    await _set_state(enabled=True, status="holding", entry_price=16000, entry_qty=1)
+    _patch_signals(monkeypatch, ma_state="none", is_spike=False, bars_close=16000 * 0.99)  # -1%
+    _patch_risk_alert(monkeypatch, alerts=[{"kind": "volume_surge", "market": "kosdaq", "severity": 1}])
+    _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
+
+    assert result["action"] == "stop_loss"
+    logs = await _log_rows()
+    assert len(logs) == 1
+    assert logs[0].event_type == "exit_stop_loss"
+    assert "리스크 경보" in logs[0].reason
+
+
+async def test_holding_no_stop_loss_at_minus_1pct_without_risk_alert(monkeypatch):
+    """대조군 — 리스크 경보가 없으면 같은 -1% 하락으로는 손절되지 않는다."""
+    await _set_state(enabled=True, status="holding", entry_price=16000, entry_qty=1)
+    _patch_signals(monkeypatch, ma_state="none", is_spike=False, bars_close=16000 * 0.99)
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
+
+    assert result["action"] == "none"
+    assert fake_cls.instances == []
+
+
+# ---------------------------------------------------------------------------
+# §5.55-2(최우선 규칙) — 장마감 전 조건부 오버나잇 청산
+# ---------------------------------------------------------------------------
+
+
+async def test_eod_forced_exit_reproduces_actual_incident(monkeypatch):
+    """**2026-08-05 실제 손실 사고 재현 회귀 테스트**: 0167A0 1주 진입 후
+    장중 한 번도 +1% 트레일 발동 없이("holding" 상태 그대로) 장 마감
+    (15:20~15:30 KST)을 맞았다. 지금 이 순간의 평가손익이 플러스이고
+    (+0.5%, 아직 트레일 전환 문턱 +1%에는 못 미침) 코스닥 외국인도 매도
+    스트릭이 아니어도(리스크 경보 없음), status가 "trailing"이 아니라는
+    사실 하나만으로 강제 청산돼야 한다 — 이 규칙이 있었다면 실제 사고
+    (오버나잇 갭하락으로 다음날 -4.87% 손절)를 막았을 것이다."""
+    entry_price = 16935.0
+    current_price = entry_price * 1.005  # +0.5% -> 트레일 전환(+1%) 문턱 미달, status는 여전히 "holding"
+    await _set_state(enabled=True, status="holding", entry_price=entry_price, entry_qty=1)
+    _patch_signals(monkeypatch, ma_state="none", is_spike=False, bars_close=current_price)
+    _patch_risk_alert(monkeypatch, alerts=[])  # 리스크 경보 없음
+    _patch_regime(monkeypatch, kosdaq_confirmed_streak=0)  # 코스닥 외국인 매도 스트릭 아님
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(15, 22))
+
+    # 핵심 단언 — 가격이 플러스라도, 스트릭이 매도가 아니라도, status가
+    # "trailing"이 아니라는 이유만으로 강제 청산돼야 한다.
+    assert result["action"] == "exit_eod_forced"
+    assert fake_cls.instances != []
+    fake = fake_cls.instances[-1]
+    assert fake.sell_calls == [("0167A0", 1, 16050)]  # 매수1호가로 지정가 매도(FAKE_QUOTE_RAW)
+
+    state = await _get_state()
+    assert state.status == "idle"
+    assert state.entry_price is None
+
+    logs = await _log_rows()
+    assert len(logs) == 1
+    assert logs[0].event_type == "exit_eod_forced"
+    assert "trailing 아님" in logs[0].reason
+
+
+async def test_eod_forced_exit_when_risk_alert_active_overrides_good_conditions(monkeypatch):
+    """나머지 3개 조건(평가손익>0, trailing, 스트릭 정상)이 전부 통과여도
+    리스크 경보가 활성 중이면 무조건 청산."""
+    entry_price = 16000.0
+    current_price = entry_price * 1.02
+    await _set_state(
+        enabled=True, status="trailing", entry_price=entry_price, entry_qty=1, peak_price=current_price
+    )
+    _patch_signals(monkeypatch, ma_state="none", is_spike=False, bars_close=current_price)
+    _patch_risk_alert(monkeypatch, alerts=[{"kind": "circuit_breaker", "market": "kosdaq", "severity": 2}])
+    _patch_regime(monkeypatch, kosdaq_confirmed_streak=3)
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(15, 25))
+
+    assert result["action"] == "exit_eod_forced"
+    assert fake_cls.instances != []
+    logs = await _log_rows()
+    assert logs[0].event_type == "exit_eod_forced"
+    assert "리스크 경보" in logs[0].reason
+
+
+async def test_eod_forced_exit_when_kosdaq_foreign_selling_streak(monkeypatch):
+    entry_price = 16000.0
+    current_price = entry_price * 1.02
+    await _set_state(
+        enabled=True, status="trailing", entry_price=entry_price, entry_qty=1, peak_price=current_price
+    )
+    _patch_signals(monkeypatch, ma_state="none", is_spike=False, bars_close=current_price)
+    _patch_risk_alert(monkeypatch, alerts=[])
+    _patch_regime(monkeypatch, kosdaq_confirmed_streak=-2)  # 코스닥 외국인 2일 연속 매도
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(15, 25))
+
+    assert result["action"] == "exit_eod_forced"
+    assert fake_cls.instances != []
+    logs = await _log_rows()
+    assert "코스닥 외국인" in logs[0].reason
+
+
+async def test_eod_overnight_allowed_when_all_conditions_met(monkeypatch):
+    """리스크 경보 없음 + 평가손익 플러스 + trailing + 코스닥 외국인 매도
+    스트릭 아님 -> 오버나잇 허용, 매도하지 않는다."""
+    entry_price = 16000.0
+    peak_price = entry_price * 1.03
+    current_price = entry_price * 1.02  # peak보다 낮아 dead cross 없이도 "none"
+    await _set_state(
+        enabled=True, status="trailing", entry_price=entry_price, entry_qty=1, peak_price=peak_price
+    )
+    _patch_signals(monkeypatch, ma_state="none", is_spike=False, bars_close=current_price)
+    _patch_risk_alert(monkeypatch, alerts=[])
+    _patch_regime(monkeypatch, kosdaq_confirmed_streak=2)  # 코스닥 외국인 매수 중
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(15, 25))
+
+    assert result["action"] == "none"
+    assert fake_cls.instances == []  # 매도 시도 자체가 없어야 함
+
+    state = await _get_state()
+    assert state.status == "trailing"  # 그대로 오버나잇 보유
+    assert await _log_rows() == []
+
+
+async def test_eod_forced_exit_only_applies_within_time_window(monkeypatch):
+    """같은 조건(holding, trailing 이력 없음)이라도 15:20~15:30 KST 밖이면
+    EOD 강제청산 판정 자체를 하지 않는다."""
+    entry_price = 16000.0
+    current_price = entry_price * 1.005
+    await _set_state(enabled=True, status="holding", entry_price=entry_price, entry_qty=1)
+    _patch_signals(monkeypatch, ma_state="none", is_spike=False, bars_close=current_price)
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(14, 0))
+
+    assert result["action"] == "none"
+    assert fake_cls.instances == []
+
+    state = await _get_state()
+    assert state.status == "holding"
+
+
+async def test_eod_forced_exit_stop_loss_still_takes_priority(monkeypatch):
+    """15:20~15:30 KST라도 손절 조건이 이미 충족되면 EOD 강제청산 판정 없이
+    그냥 손절로 나간다(로그도 exit_stop_loss 하나만 남아야 한다 — 이중 판단/
+    로그 없음)."""
+    entry_price = 16000.0
+    await _set_state(enabled=True, status="holding", entry_price=entry_price, entry_qty=1)
+    _patch_signals(monkeypatch, ma_state="none", is_spike=False, bars_close=entry_price * 0.98)  # -2% -> 손절
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(15, 25))
+
+    assert result["action"] == "stop_loss"
+    logs = await _log_rows()
+    assert len(logs) == 1
+    assert logs[0].event_type == "exit_stop_loss"
+
+
+async def test_eod_forced_exit_regime_fetch_failure_falls_back_to_exit(monkeypatch):
+    """regime 조회 자체가 실패하면 "확인 못 함"을 안전 측(청산)으로 폴백한다
+    — 조건 충족 여부를 모르는 채로 오버나잇을 허용하지 않는다."""
+    entry_price = 16000.0
+    current_price = entry_price * 1.02
+    await _set_state(
+        enabled=True, status="trailing", entry_price=entry_price, entry_qty=1, peak_price=current_price
+    )
+    _patch_signals(monkeypatch, ma_state="none", is_spike=False, bars_close=current_price)
+    _patch_risk_alert(monkeypatch, alerts=[])
+    _patch_regime(monkeypatch, raise_error=True)
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(15, 25))
+
+    assert result["action"] == "exit_eod_forced"
+    assert fake_cls.instances != []
+
+
+# ---------------------------------------------------------------------------
+# §5.55-4 — 수급 방향 전환 조기청산
+# ---------------------------------------------------------------------------
+
+
+async def test_entry_records_foreign_flow_sign(monkeypatch):
+    await _set_state(enabled=True, status="idle")
+    _patch_signals(monkeypatch, ma_state="golden", is_spike=True, bars_close=16000.0)
+    _patch_foreign_flow(monkeypatch, spot_value=1234.0)  # 양수 -> "positive"
+    _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
+
+    assert result["action"] == "entry"
+    state = await _get_state()
+    assert state.entry_foreign_flow_sign == "positive"
+
+
+async def test_holding_early_exit_on_foreign_flow_reversal(monkeypatch):
+    """진입 시점엔 외인 현물 순매수(양수)였는데, 이후 폴링에서 순매도(음수)로
+    반전되면 가격 조건과 무관하게(가격은 변화 없음) 조기 청산한다."""
+    await _set_state(
+        enabled=True, status="holding", entry_price=16000, entry_qty=1, entry_foreign_flow_sign="positive"
+    )
+    _patch_signals(monkeypatch, ma_state="none", is_spike=False, bars_close=16000.0)  # 가격 변화 없음
+    _patch_foreign_flow(monkeypatch, spot_value=-500.0)  # 음수로 반전
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
+
+    assert result["action"] == "exit_flow_reversal"
+    assert fake_cls.instances != []
+
+    state = await _get_state()
+    assert state.status == "idle"
+    assert state.entry_foreign_flow_sign is None
+
+    logs = await _log_rows()
+    assert len(logs) == 1
+    assert logs[0].event_type == "exit_flow_reversal"
+    assert "반전" in logs[0].reason
+
+
+async def test_holding_no_early_exit_when_flow_sign_unchanged(monkeypatch):
+    await _set_state(
+        enabled=True, status="holding", entry_price=16000, entry_qty=1, entry_foreign_flow_sign="positive"
+    )
+    _patch_signals(monkeypatch, ma_state="none", is_spike=False, bars_close=16000.0)
+    _patch_foreign_flow(monkeypatch, spot_value=500.0)  # 여전히 양수
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
+
+    assert result["action"] == "none"
+    assert fake_cls.instances == []
+    state = await _get_state()
+    assert state.status == "holding"
+
+
+async def test_holding_no_early_exit_when_entry_sign_not_recorded(monkeypatch):
+    """진입 시점 기록이 없는(레거시) 포지션은 반전 여부를 판정할 수 없으므로
+    조기청산하지 않는다 — 데이터 부족을 "반전"으로 오판하지 않는다."""
+    await _set_state(
+        enabled=True, status="holding", entry_price=16000, entry_qty=1, entry_foreign_flow_sign=None
+    )
+    _patch_signals(monkeypatch, ma_state="none", is_spike=False, bars_close=16000.0)
+    _patch_foreign_flow(monkeypatch, spot_value=-500.0)
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
+
+    assert result["action"] == "none"
+    assert fake_cls.instances == []

@@ -1,7 +1,9 @@
-"""Unit tests for app.quant.auto_trade_rules (PLAN.md §5.54) — 자동매매 상태
-전이 순수 판정 함수. 네트워크/DB 없음, 신호값 dict + 상태만으로 판정 검증."""
+"""Unit tests for app.quant.auto_trade_rules (PLAN.md §5.54/§5.55) — 자동매매
+상태 전이 순수 판정 함수. 네트워크/DB 없음, 신호값 dict + 상태만으로 판정 검증."""
 
 from __future__ import annotations
+
+import datetime as dt
 
 from app.quant import auto_trade_rules as rules
 
@@ -188,3 +190,219 @@ def test_check_entry_budget_rejects_when_over_max_order_notional():
 
 def test_check_entry_budget_boundary_exact_limits_allowed():
     assert rules.check_entry_budget("idle", 25000, 25000, 50000) is True
+
+
+# ---------------------------------------------------------------------------
+# PLAN.md §5.55 — 안전 규칙 (2026-08-06, 실제 손실 사고 이후)
+# ---------------------------------------------------------------------------
+# §5.55-1: is_entry_blocked_by_time
+# ---------------------------------------------------------------------------
+
+
+def test_entry_time_block_true_during_open_window():
+    assert rules.is_entry_blocked_by_time(dt.time(9, 5)) is True
+
+
+def test_entry_time_block_true_during_close_window():
+    assert rules.is_entry_blocked_by_time(dt.time(15, 25)) is True
+
+
+def test_entry_time_block_boundaries_inclusive():
+    assert rules.is_entry_blocked_by_time(dt.time(9, 0)) is True
+    assert rules.is_entry_blocked_by_time(dt.time(9, 10)) is True
+    assert rules.is_entry_blocked_by_time(dt.time(15, 20)) is True
+    assert rules.is_entry_blocked_by_time(dt.time(15, 30)) is True
+
+
+def test_entry_time_block_false_outside_windows():
+    assert rules.is_entry_blocked_by_time(dt.time(9, 11)) is False
+    assert rules.is_entry_blocked_by_time(dt.time(8, 59)) is False
+    assert rules.is_entry_blocked_by_time(dt.time(10, 0)) is False
+    assert rules.is_entry_blocked_by_time(dt.time(15, 19)) is False
+    assert rules.is_entry_blocked_by_time(dt.time(15, 31)) is False
+
+
+# ---------------------------------------------------------------------------
+# §5.55-3: evaluate_stop_loss threshold_pct / decide_position_action risk_alert_active
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_stop_loss_default_threshold_unaffected():
+    """threshold_pct를 넘기지 않으면 기존 STOP_LOSS_PCT(-1.5%) 그대로 —
+    기존 호출부(watch_stop_loss 등 §5.55 이전 코드)와의 하위호환 확인."""
+    entry = 10000.0
+    assert rules.evaluate_stop_loss(entry, entry * 0.99) is False  # -1% -> 기존 임계값 미달
+    assert rules.evaluate_stop_loss(entry, entry * 0.985) is True  # -1.5% -> 트리거
+
+
+def test_evaluate_stop_loss_tighter_threshold_when_risk_alert():
+    entry = 10000.0
+    current = entry * 0.99  # -1% -> 평상시(-1.5%) 기준으로는 미손절
+    assert rules.evaluate_stop_loss(entry, current) is False
+    assert rules.evaluate_stop_loss(entry, current, rules.STOP_LOSS_PCT_RISK_ALERT) is True  # -0.8% 기준으로는 손절
+
+
+def test_decide_position_action_uses_normal_threshold_by_default():
+    entry = 10000.0
+    current = entry * 0.99  # -1% -> 평상시 손절선(-1.5%) 안 닿음
+    decision = rules.decide_position_action("holding", entry, None, "none", current)
+    assert decision["action"] == "none"
+
+
+def test_decide_position_action_risk_alert_tightens_stop_loss():
+    """리스크 경보 활성 중엔 -1% 하락만으로도(평상시라면 손절 아님) 임시
+    손절선(-0.8%)에 걸려 손절된다 — §5.55-3 핵심 케이스."""
+    entry = 10000.0
+    current = entry * 0.99  # -1%
+    decision = rules.decide_position_action(
+        "holding", entry, None, "none", current, risk_alert_active=True
+    )
+    assert decision["action"] == "stop_loss"
+    assert "리스크 경보" in decision["reason"]
+
+
+def test_decide_position_action_risk_alert_does_not_affect_trail_activate():
+    """리스크 경보가 손절선만 조정할 뿐, 트레일 전환 등 다른 판정에는 영향
+    없어야 한다."""
+    entry = 10000.0
+    current = entry * 1.02  # +2% -> 트레일 전환 조건(+1%↑), 손절과 무관
+    decision = rules.decide_position_action(
+        "holding", entry, None, "none", current, risk_alert_active=True
+    )
+    assert decision["action"] == "trail_activate"
+
+
+# ---------------------------------------------------------------------------
+# §5.55-2(최우선 규칙): evaluate_eod_forced_exit
+# ---------------------------------------------------------------------------
+
+
+def test_eod_forced_exit_not_applicable_outside_time_window():
+    decision = rules.evaluate_eod_forced_exit(
+        now_kst=dt.time(14, 0),
+        status="holding",
+        unrealized_pnl_positive=True,
+        kosdaq_foreign_streak_ok=True,
+        risk_alert_active=False,
+    )
+    assert decision["should_exit"] is False
+
+
+def test_eod_forced_exit_not_applicable_when_idle():
+    decision = rules.evaluate_eod_forced_exit(
+        now_kst=dt.time(15, 25),
+        status="idle",
+        unrealized_pnl_positive=True,
+        kosdaq_foreign_streak_ok=True,
+        risk_alert_active=False,
+    )
+    assert decision["should_exit"] is False
+
+
+def test_eod_forced_exit_risk_alert_forces_exit_unconditionally():
+    """리스크 경보 활성 중이면 나머지 3개 조건이 전부 충족돼도 무조건 청산."""
+    decision = rules.evaluate_eod_forced_exit(
+        now_kst=dt.time(15, 25),
+        status="trailing",
+        unrealized_pnl_positive=True,
+        kosdaq_foreign_streak_ok=True,
+        risk_alert_active=True,
+    )
+    assert decision["should_exit"] is True
+    assert "리스크 경보" in decision["reason"]
+
+
+def test_eod_forced_exit_allows_overnight_when_all_three_conditions_met():
+    decision = rules.evaluate_eod_forced_exit(
+        now_kst=dt.time(15, 25),
+        status="trailing",
+        unrealized_pnl_positive=True,
+        kosdaq_foreign_streak_ok=True,
+        risk_alert_active=False,
+    )
+    assert decision["should_exit"] is False
+
+
+def test_eod_forced_exit_boundary_times_inclusive():
+    for t in (dt.time(15, 20), dt.time(15, 30)):
+        decision = rules.evaluate_eod_forced_exit(
+            now_kst=t,
+            status="holding",
+            unrealized_pnl_positive=True,
+            kosdaq_foreign_streak_ok=True,
+            risk_alert_active=False,
+        )
+        assert decision["should_exit"] is True  # holding(트레일 이력 없음) -> 강제청산
+
+
+def test_eod_forced_exit_negative_pnl_forces_exit():
+    decision = rules.evaluate_eod_forced_exit(
+        now_kst=dt.time(15, 25),
+        status="trailing",
+        unrealized_pnl_positive=False,
+        kosdaq_foreign_streak_ok=True,
+        risk_alert_active=False,
+    )
+    assert decision["should_exit"] is True
+    assert "평가손익" in decision["reason"]
+
+
+def test_eod_forced_exit_kosdaq_foreign_selling_streak_forces_exit():
+    decision = rules.evaluate_eod_forced_exit(
+        now_kst=dt.time(15, 25),
+        status="trailing",
+        unrealized_pnl_positive=True,
+        kosdaq_foreign_streak_ok=False,
+        risk_alert_active=False,
+    )
+    assert decision["should_exit"] is True
+    assert "코스닥 외국인" in decision["reason"]
+
+
+def test_eod_forced_exit_holding_without_trail_history_forces_exit_even_if_pnl_positive():
+    """2026-08-05 실제 손실 사고를 그대로 재현하는 규칙 레벨 케이스 — 장중
+    한 번도 +1%를 못 넘어 trailing으로 전환된 적 없이("holding"인 채로)
+    15:20을 맞으면, 지금 당장은 평가손익이 플러스이고 코스닥 외국인도
+    매도 중이 아니어도(나머지 조건 다 통과) status가 "trailing"이 아니라는
+    이유만으로 강제 청산돼야 한다."""
+    decision = rules.evaluate_eod_forced_exit(
+        now_kst=dt.time(15, 22),
+        status="holding",
+        unrealized_pnl_positive=True,
+        kosdaq_foreign_streak_ok=True,
+        risk_alert_active=False,
+    )
+    assert decision["should_exit"] is True
+    assert "trailing 아님" in decision["reason"]
+
+
+# ---------------------------------------------------------------------------
+# §5.55-4: foreign_flow_sign / evaluate_foreign_flow_reversal_exit
+# ---------------------------------------------------------------------------
+
+
+def test_foreign_flow_sign_encoding():
+    assert rules.foreign_flow_sign(100.0) == "positive"
+    assert rules.foreign_flow_sign(-100.0) == "negative"
+    assert rules.foreign_flow_sign(0.0) is None
+    assert rules.foreign_flow_sign(None) is None
+
+
+def test_foreign_flow_reversal_exit_triggers_on_sign_flip():
+    decision = rules.evaluate_foreign_flow_reversal_exit("positive", "negative")
+    assert decision["should_exit"] is True
+    assert "반전" in decision["reason"]
+
+
+def test_foreign_flow_reversal_exit_no_trigger_when_sign_unchanged():
+    decision = rules.evaluate_foreign_flow_reversal_exit("positive", "positive")
+    assert decision["should_exit"] is False
+
+
+def test_foreign_flow_reversal_exit_no_trigger_when_data_missing():
+    """진입 시점 기록이 없거나(None) 현재 값이 없으면(0/None) 반전 여부를
+    판정할 수 없으므로 청산하지 않는다 — 데이터 부족을 "반전"으로 오판하지
+    않기 위해."""
+    assert rules.evaluate_foreign_flow_reversal_exit(None, "negative")["should_exit"] is False
+    assert rules.evaluate_foreign_flow_reversal_exit("positive", None)["should_exit"] is False
+    assert rules.evaluate_foreign_flow_reversal_exit(None, None)["should_exit"] is False

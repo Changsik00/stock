@@ -45,11 +45,16 @@ const EVENT_TYPE_LABEL = {
   trail_activate: '트레일 전환',
   exit_trail: '트레일 청산',
   exit_stop_loss: '손절',
+  // PLAN.md §5.55(2026-08-06, 실제 손실 사고 이후 안전 규칙) 추가분.
+  exit_eod_forced: '장마감 강제청산',
+  exit_flow_reversal: '수급반전 조기청산',
+  entry_blocked_time: '진입 차단(시간)',
+  entry_blocked_risk: '진입 차단(리스크 경보)',
   error: '오류/차단',
 }
 
-// 이 페이지가 보여주는 값들은 전부 PLAN.md §5.54에서 사용자가 직접 확정한 규칙
-// 그대로다 — "이 조합이 좋다"는 판단 문구가 아니라 지금 설정된 규칙 자체를
+// 이 페이지가 보여주는 값들은 전부 PLAN.md §5.54/§5.55에서 사용자가 직접 확정한
+// 규칙 그대로다 — "이 조합이 좋다"는 판단 문구가 아니라 지금 설정된 규칙 자체를
 // 고정 텍스트로 서술한다(house rule §5).
 const STRATEGY_RULES = [
   { label: '대상 종목', value: `${TARGET_NAME} (${TARGET_CODE}) 고정 · 1주` },
@@ -58,7 +63,24 @@ const STRATEGY_RULES = [
     label: '청산(트레일링 스탑)',
     value: '진입가 대비 +1% 도달 시 트레일 모드 전환 → 이후 ma_cross.state == "dead" AND 진입가 대비 +0.5% 이하 도달 시 매도',
   },
-  { label: '손절', value: '상태 무관, 진입가 대비 -1.5% 이하 도달 시 즉시 매도' },
+  { label: '손절', value: '상태 무관, 진입가 대비 -1.5% 이하 도달 시 즉시 매도(리스크 경보 활성 중엔 -0.8%로 임시 축소)' },
+  {
+    label: '진입 시간 제한 (§5.55-1)',
+    value: '개장 후 10분(09:00~09:10)·마감 전 10분(15:20~15:30) KST엔 신규 진입만 금지 — 손절/청산은 이 시간에도 항상 작동',
+  },
+  {
+    label: '장마감 전 조건부 오버나잇 청산 (§5.55-2)',
+    value:
+      '15:20 KST 이후 보유 중이면: 리스크 경보 활성 시 무조건 청산. 아니면 (평가손익>0) AND (status=="trailing") AND (코스닥 외국인 연속매도 아님) 셋 다 충족해야 오버나잇 허용, 하나라도 실패 시 무조건 청산',
+  },
+  {
+    label: '리스크 경보 연동 (§5.55-3)',
+    value: '서킷브레이커/사이드카/거래량급증/수급가속도 경보 활성 중엔 신규 진입 금지 + 보유 중 손절선 -0.8%로 임시 축소',
+  },
+  {
+    label: '수급 방향 전환 조기청산 (§5.55-4)',
+    value: '진입 시점 외인 현물 누적 순매수 부호가 반전되면(매수→매도 등) 가격 조건과 무관하게 조기 청산',
+  },
 ]
 
 function KillSwitch({ state, onToggle, busy }) {
@@ -157,6 +179,17 @@ function StatusPanel({ state }) {
             <div className="stat-label">주문번호</div>
             <div className="stat-value" style={{ fontSize: 14 }}>
               {state.entry_order_no || '-'}
+            </div>
+          </div>
+          <div>
+            {/* PLAN.md §5.55-4 — 진입 시점 외인 현물 수급 부호. 반전되면 조기청산되는 근거값. */}
+            <div className="stat-label">진입 시점 외인 현물 수급</div>
+            <div className="stat-value" style={{ fontSize: 14 }}>
+              {state.entry_foreign_flow_sign === 'positive'
+                ? '순매수'
+                : state.entry_foreign_flow_sign === 'negative'
+                  ? '순매도'
+                  : '-'}
             </div>
           </div>
         </div>
