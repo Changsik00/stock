@@ -13,7 +13,6 @@ import logging
 import math
 
 import requests
-import yfinance as yf
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +29,15 @@ class CommoditiesError(Exception):
 
 
 def _fetch_yfinance(symbol: str, start: dt.date, end: dt.date) -> list[dict]:
+    # 지연 import(2026-08-07, PLAN.md §5.58) — 이 모듈은 collectors/macro.py 등을
+    # 거쳐 backend 프로세스 기동 경로(app.main -> routers.admin -> register_all())
+    # 에서까지 모듈 레벨로 import된다. yfinance를 모듈 최상단에서 import하면
+    # 앱이 뜰 때마다(호출 여부와 무관하게) yfinance가 로드되는데, 이 임포트
+    # 자체가 좀비 multiprocessing 서브프로세스를 남기는 버그가 있어 CPU 폭주+
+    # 앱 무응답까지 일으켰다(실측). 실제로 yfinance가 필요한 이 함수 안으로
+    # 옮겨 그 경로가 실행될 때만(WTI/Brent 유가 조회 시도 시) import되게 한다.
+    import yfinance as yf
+
     ticker = yf.Ticker(symbol)
     # yfinance's `end` is exclusive, so add a day to include the requested end date.
     df = ticker.history(

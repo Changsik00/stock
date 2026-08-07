@@ -38,8 +38,6 @@ import logging
 
 import requests
 
-from . import commodities
-
 logger = logging.getLogger(__name__)
 
 PRICES_URL = "https://m.stock.naver.com/front-api/marketIndex/prices"
@@ -152,6 +150,17 @@ def fetch_usdkrw(start: dt.date, end: dt.date) -> list[dict]:
         return rows
     except Exception as e:  # naver는 비공식 API라 응답 형태가 언제든 바뀔 수 있음
         logger.warning("naver 환율 조회 실패(%s) — FRED CSV로 폴백합니다", e)
+
+    # 지연 import(2026-08-07, PLAN.md §5.58) — commodities.py는 모듈 레벨에서
+    # `import yfinance`를 한다. 이 파일(naver_fx.py)은 routers/markets.py가
+    # 모듈 레벨로 import하므로, 여기서도 모듈 레벨로 commodities를 import하면
+    # 앱이 뜰 때마다(요청·폴백 발생 여부와 무관하게) yfinance가 로드돼 버린다
+    # (실측: yfinance 임포트 자체가 좀비 multiprocessing 서브프로세스를 남기는
+    # 버그가 있어 CPU 폭주+앱 무응답까지 일으켰다). 이 폴백 경로(naver 실패 시만)
+    # 에서만 실제로 필요하므로 여기로 옮긴다 — `_fetch_fred`는 yfinance를 안
+    # 쓰지만, 모듈 자체를 import하는 순간 그 모듈의 다른 import(yfinance)까지
+    # 같이 실행되는 건 피할 수 없다.
+    from . import commodities
 
     rows = commodities._fetch_fred(FRED_SERIES_ID, start, end)
     for row in rows:

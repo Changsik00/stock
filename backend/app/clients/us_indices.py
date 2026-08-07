@@ -20,8 +20,6 @@ from __future__ import annotations
 import datetime as dt
 import logging
 
-import yfinance as yf
-
 from . import commodities
 
 logger = logging.getLogger(__name__)
@@ -94,6 +92,10 @@ def fetch_nasdaq_futures_intraday(bars: int = 50) -> list[dict]:
     Returns 오름차순(과거→최신) ``[{"time": iso8601, "close": float}, ...]``
     최근 ``bars``개(기본 50 — 5분봉 50개 ≈ 4시간). 빈 응답이면 빈 리스트.
     """
+    # 지연 import — commodities.py의 동일 조치와 같은 이유(PLAN.md §5.58,
+    # 모듈 레벨 `import yfinance`가 backend 기동 경로에 물려 매번 로드되는 문제).
+    import yfinance as yf
+
     ticker = yf.Ticker(NASDAQ_FUTURES_SYMBOL)
     hist = ticker.history(period="1d", interval="5m")
     if hist.empty:

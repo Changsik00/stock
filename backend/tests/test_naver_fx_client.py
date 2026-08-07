@@ -12,7 +12,7 @@ import datetime as dt
 import pytest
 import requests
 
-from app.clients import naver_fx
+from app.clients import commodities, naver_fx
 
 
 class _FakeResponse:
@@ -170,7 +170,7 @@ def test_fetch_usdkrw_falls_back_to_fred_on_naver_failure(monkeypatch):
         fred_calls.append(series_id)
         return [{"date": dt.date(2026, 7, 16), "value": 1491.0}]
 
-    monkeypatch.setattr(naver_fx.commodities, "_fetch_fred", fake_fetch_fred)
+    monkeypatch.setattr(commodities, "_fetch_fred", fake_fetch_fred)
 
     rows = naver_fx.fetch_usdkrw(dt.date(2026, 7, 16), dt.date(2026, 7, 16))
 

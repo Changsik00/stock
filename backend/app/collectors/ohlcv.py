@@ -39,7 +39,6 @@ import logging
 import math
 import time
 
-import yfinance as yf
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -76,6 +75,13 @@ def _to_int(v) -> int | None:
 
 
 def _fetch_yfinance(ticker: str, start: dt.date, end: dt.date) -> list[dict]:
+    # 지연 import(2026-08-07, PLAN.md §5.58) — 이 모듈은 collectors/__init__.py::
+    # register_all()을 통해 backend 기동 경로(app.main -> routers.admin)에서까지
+    # 모듈 레벨로 import된다. 같은 이유로 commodities.py/us_indices.py도 동일하게
+    # 고쳤다(모듈 최상단 import 시 yfinance가 매번 로드돼 좀비 서브프로세스를
+    # 남기는 문제).
+    import yfinance as yf
+
     df = yf.Ticker(ticker).history(
         start=start.isoformat(),
         # yfinance's `end` is exclusive, so add a day to include the requested end date.

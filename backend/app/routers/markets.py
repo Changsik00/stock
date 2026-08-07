@@ -91,7 +91,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..clients import naver_breadth, naver_etf, naver_futures_flow, naver_fx, naver_index, us_indices
+from ..clients import naver_breadth, naver_etf, naver_futures_flow, naver_fx, naver_index
 from ..clients.kiwoom import (
     MINUTE_CHART_INTERVALS,
     KiwoomClient,
@@ -2118,7 +2118,21 @@ async def _fetch_and_cache_nasdaq_futures_live() -> dict:
     경로는 이 함수를 절대 직접 호출하지 않는다(`_warm_nasdaq_futures_live`
     참고, 위 모듈 docstring "2026-08-06 추가 변경" 절). yfinance는 동기
     라이브러리라 `asyncio.to_thread`로 감싼다(`_fetch_breadth_blocking`과
-    동일한 관례)."""
+    동일한 관례).
+
+    **2026-08-07 수정(PLAN.md §5.58)**: `us_indices`(yfinance 의존) import를
+    이 함수 안으로 옮겼다 — 예전엔 파일 맨 위에서 모듈 레벨로 import했는데,
+    그러면 `--reload`가 껐다 켤 때마다(하루 몇 번이든) **요청/크론과 무관하게
+    임포트 시점에** yfinance가 로드됐다. yfinance(정확히는 그 의존 라이브러리)
+    임포트 자체가 백그라운드에서 `multiprocessing.spawn_main` 서브프로세스를
+    남기는 걸 실측으로 확인했다(PLAN.md §5.54-6/§5.56이 고친 건 "호출 빈도"였지
+    "임포트 시점"이 아니었다 — 이번에 그 차이가 실제로 CPU 폭주+앱 무응답을
+    일으키는 걸 직접 겪고 나서 알게 됐다). 이 함수 안으로 옮기면 이 함수가
+    실제로 실행될 때(하루 최대 1회, 07:50 KST)만 import가 일어나 — 나머지
+    23시간 59분+`--reload` 재시작 전부는 yfinance를 아예 메모리에 올리지도
+    않는다."""
+    from ..clients import us_indices
+
     bars = await asyncio.to_thread(us_indices.fetch_nasdaq_futures_intraday, 50)
 
     latest_change_pct = None

@@ -3346,6 +3346,68 @@ from this batch") 핫리로드 무오류 확인. `GET /api/markets/accumulation-
 curl로 정상 응답(아직 크론이 한 번도 안 돌아 `rows: []`, 예상된 동작) 확인.
 전 종목 첫 실제 풀스윕은 다음 평일 20:00 KST 크론 실행 시 로그로 실측 예정.
 
+### Phase 5.58 — yfinance CPU 폭주 재발 근본 원인 재확정: "호출 빈도"가 아니라 "임포트 시점" (2026-08-07)
+
+**증상**: PC가 또 버벅거려 확인하니 `stock-backend-1`이 CPU 100%+를 잡아먹고
+있었다(§5.54-6/§5.56과 같은 `multiprocessing.spawn_main` 좀비 서브프로세스
+패턴). 실거래 포지션이 열려 있어 사용자 확인 후 재시작했는데, 재시작 직후
+다시 재발 — 이번엔 좀비 프로세스만 직접 `kill`해서 컨테이너 재시작 없이
+정리하려 했으나(포지션이 idle이라 안전하다고 판단), **이 kill이 오히려 앱
+전체를 무응답 상태로 만들었다**(멀쩡했던 요청 처리까지 전부 멈춤, health
+check도 응답 없음) — 죽은 서브프로세스를 기다리던 스레드/이벤트루프가
+그대로 멈춰버린 것으로 보인다. `docker restart`로 복구했다(이번에도 실거래
+포지션 없음 확인 후 진행).
+
+**근본 원인 재확정**: §5.56에서 "yfinance 호출을 하루 1회로 제한"했지만,
+그건 "실제로 조회하는 빈도"만 줄인 것이었다 — **"임포트되는 빈도"는 전혀
+줄지 않았다.** `--reload` 개발 서버는 코드 한 줄만 바뀌어도 전체 프로세스를
+재시작하는데, 그때마다 Python이 `app.main`부터 모든 라우터/컬렉터를 새로
+import한다. 그런데 `commodities.py`/`us_indices.py`/`collectors/ohlcv.py`
+세 파일 전부 **모듈 최상단**에 `import yfinance as yf`가 있었고, 이 세
+모듈이 다음 두 경로로 backend 기동 경로에 물려 있었다:
+
+1. `routers/markets.py`가 `us_indices`를 모듈 레벨로 직접 import
+2. `routers/admin.py`가 모듈 레벨에서 `register_all()`을 즉시 호출 —
+   이게 `collectors/__init__.py`를 통해 `collectors/macro.py`를 import하고,
+   `macro.py`가 `commodities`/`us_indices`를 모듈 레벨로 import
+3. `clients/naver_fx.py`(routers/markets.py가 모듈 레벨로 import)도
+   FRED 폴백용으로 `commodities`를 모듈 레벨로 import
+4. `collectors/ohlcv.py`도 `register_all()` 경로로 물려 있음
+
+즉 **"실제로 호출하느냐"와 무관하게, `python -c "import app.main"` 한 줄만
+실행해도 yfinance가 로드됐다** — `--reload`가 하루에 수십 번 재시작되는
+개발 환경에서는 사실상 재시작할 때마다 yfinance 임포트 자체가 좀비
+서브프로세스를 새로 하나씩 남긴 셈이다. `sys.modules` 직접 확인으로 이걸
+실증했다(`python -c "import app.main; print('yfinance' in sys.modules)"`
+→ 수정 전 `True`, 수정 후 `False`).
+
+**조치**: 네 파일(`clients/commodities.py`, `clients/us_indices.py`,
+`clients/naver_fx.py`, `collectors/ohlcv.py`) 전부 `import yfinance as yf`
+(및 `naver_fx.py`의 `from . import commodities`)를 **실제로 그 값을 쓰는
+함수 안으로** 옮겼다 — `commodities._fetch_yfinance`/
+`us_indices.fetch_nasdaq_futures_intraday`/`ohlcv._fetch_yfinance` 안으로
+지연 import. `routers/markets.py`의 `us_indices` 모듈 레벨 import도
+`_fetch_and_cache_nasdaq_futures_live` 함수 안으로 옮겼다(§5.56이 이미
+"호출은 크론만" 해뒀으므로, 이제 "임포트도 그 크론이 실제로 돌 때만"이
+된다). 관련 테스트(`test_naver_fx_client.py`,
+`test_markets_pair_view_and_nasdaq_futures_router.py`)는 `markets.us_indices`/
+`naver_fx.commodities` 같은 간접 참조 대신 `app.clients.us_indices`/
+`app.clients.commodities` 모듈을 직접 import해 patch하도록 수정(같은
+싱글턴 모듈 객체라 patch 효과는 동일).
+
+**검증**: `venv/bin/python -m pytest -q` — 900 passed(무관 실패 1건 제외).
+`python -c "import app.main; print('yfinance' in sys.modules)"` → `False`
+확인(수정 전 `True`였음, 직접 대조). 실 컨테이너 재시작 후 `docker stats`를
+Monitor로 2분간 추적 — CPU가 0.25~0.32%에서 안정적으로 유지됨(중간 60초
+주기 작업으로 인한 정상 스파이크 1회 제외, §5.54-6/§5.56 때와 달리 이번엔
+재시작 후 CPU가 다시 치솟지 않음). `stock-worker-1`도 재시작해 정상 기동
+확인. 킬스위치/포지션 상태(idle) 재시작 전후 그대로 유지 확인.
+
+**교훈**: "호출 빈도를 줄인다"와 "임포트를 지연시킨다"는 서로 다른 문제를
+푸는 조치다 — `--reload` 기반 개발 서버에서 무거운/부작용 있는 서드파티
+라이브러리(yfinance처럼 임포트 자체에 비용이 있는 경우)는 사용 빈도와
+무관하게 **반드시 지연 import**해야 한다는 게 이번에 실측으로 확정됐다.
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)

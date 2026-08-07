@@ -7,8 +7,15 @@ Same no-DB/no-network philosophy as test_markets_hynix_relative_strength_router.
 and test_markets_attention_router.py: 재사용 함수들(`markets._warm_index_tiles_live`,
 `markets._warm_stock_intraday`, `markets.get_stock_series_from_db`,
 `markets.KiwoomClient`, `markets.naver_etf.fetch_etf_list`,
-`markets.us_indices.fetch_nasdaq_futures_intraday`)를 monkeypatch해서 조합
+`us_indices.fetch_nasdaq_futures_intraday`)를 monkeypatch해서 조합
 로직만 검증한다 — 실제 키움/네이버/yfinance 호출 없음.
+
+**2026-08-07(PLAN.md §5.58)**: `_fetch_and_cache_nasdaq_futures_live`가 이제
+`us_indices`를 함수 안에서 지연 import한다(모듈 레벨 import가 앱 기동/`--reload`
+때마다 yfinance를 실제로 로드해 좀비 서브프로세스를 남기는 문제를 고쳤다) —
+그래서 `markets.us_indices`가 아니라 `app.clients.us_indices` 모듈 객체를 직접
+patch한다(같은 싱글턴 모듈 객체라 지연 import든 상단 import든 patch 효과는
+동일하다).
 """
 
 from __future__ import annotations
@@ -16,6 +23,7 @@ from __future__ import annotations
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.clients import us_indices
 from app.db import get_session
 from app.main import app
 from app.routers import markets
@@ -323,7 +331,7 @@ async def test_nasdaq_futures_live_returns_cached_payload_without_fetching(monke
     def _raising_fetch(bars=50):  # pragma: no cover - 호출되면 안 됨
         raise AssertionError("온디맨드 경로가 yfinance를 직접 호출했다 — PLAN.md §5.56 위반")
 
-    monkeypatch.setattr(markets.us_indices, "fetch_nasdaq_futures_intraday", _raising_fetch)
+    monkeypatch.setattr(us_indices, "fetch_nasdaq_futures_intraday", _raising_fetch)
     markets._nasdaq_futures_cache["data"] = {
         "symbol": "NQ=F",
         "bars": [{"time": "2026-08-06T07:50:00+09:00", "close": 20050.0}],
@@ -344,7 +352,7 @@ async def test_nasdaq_futures_live_empty_payload_when_cache_not_warmed_yet(monke
     def _raising_fetch(bars=50):  # pragma: no cover - 호출되면 안 됨
         raise AssertionError("온디맨드 경로가 yfinance를 직접 호출했다 — PLAN.md §5.56 위반")
 
-    monkeypatch.setattr(markets.us_indices, "fetch_nasdaq_futures_intraday", _raising_fetch)
+    monkeypatch.setattr(us_indices, "fetch_nasdaq_futures_intraday", _raising_fetch)
     assert markets._nasdaq_futures_cache["data"] is None  # autouse fixture가 매 테스트 시작 전 리셋
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -366,7 +374,7 @@ async def test_fetch_and_cache_nasdaq_futures_live_computes_latest_change_pct(mo
             {"time": "2026-08-03T09:05:00+09:00", "close": 20100.0},
         ]
 
-    monkeypatch.setattr(markets.us_indices, "fetch_nasdaq_futures_intraday", fake_fetch_nasdaq_futures_intraday)
+    monkeypatch.setattr(us_indices, "fetch_nasdaq_futures_intraday", fake_fetch_nasdaq_futures_intraday)
 
     payload = await markets._fetch_and_cache_nasdaq_futures_live()
 
@@ -380,7 +388,7 @@ async def test_fetch_and_cache_nasdaq_futures_live_propagates_failure(monkeypatc
     def _raise(bars=50):
         raise RuntimeError("yfinance boom")
 
-    monkeypatch.setattr(markets.us_indices, "fetch_nasdaq_futures_intraday", _raise)
+    monkeypatch.setattr(us_indices, "fetch_nasdaq_futures_intraday", _raise)
 
     with pytest.raises(RuntimeError, match="yfinance boom"):
         await markets._fetch_and_cache_nasdaq_futures_live()
