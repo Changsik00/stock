@@ -3408,6 +3408,83 @@ Monitor로 2분간 추적 — CPU가 0.25~0.32%에서 안정적으로 유지됨(
 라이브러리(yfinance처럼 임포트 자체에 비용이 있는 경우)는 사용 빈도와
 무관하게 **반드시 지연 import**해야 한다는 게 이번에 실측으로 확정됐다.
 
+### Phase 5.59 — 전면 재점검: 유사 이슈 색출 + 장 마감 후 폴링 최소화 (2026-08-07)
+
+**계기**: "같은 이슈가 몇 번 발생했어 — 전면 다시 검토해보고 또 다른 이슈가
+있을지 봐봐, 본장 끝나면 polling 최소화해야 해, 자동매매 관리도 그렇고."
+§5.54-6/§5.56/§5.58이 전부 "같은 증상(CPU 폭주)의 다른 원인"이었던 걸 감안해,
+이번엔 개별 버그를 쫓는 대신 **backend 기동 경로 전체**와 **모든 폴링 잡의
+게이트 조건**을 체계적으로 재검토했다.
+
+**방법**: `ast` 모듈로 `app/clients/*.py`·`app/collectors/*.py`의 모든
+파일에서 "함수/클래스 밖(모듈 최상단)에서 실제로 부작용 있는 함수 호출을
+하는 코드"를 기계적으로 스캔(로거 생성·정규식 컴파일·설정값 읽기 같은
+무해한 것들은 제외). 그리고 `collectors/live_refresh.py`의 4개 잡(60초/
+420초/600초/30초) 각각이 실제로 무엇을 언제 게이트하는지 표로 정리했다.
+
+**발견 ①(더 심각한 잠재 이슈, 실제 발현 시점 미확인)**: `clients/pykrx_client.py`가
+모듈 최상단에서 `from pykrx import stock`을 했는데, 이 한 줄이 **실제로
+data.krx.co.kr에 로그인하는 네트워크 HTTP 요청**을 한다(모듈 자체 docstring에
+이미 문서화돼 있었음 — "pykrx가 세션을 모듈 최초 import 시점에 한 번만
+만든다"). 이 파일은 `collectors/market_flow.py` → `collectors/__init__.py::
+register_all()` → `routers/admin.py`(앱 기동 시 즉시 호출) 경로로 backend
+기동 경로에 물려 있어, §5.58에서 고친 yfinance와 완전히 동일한 패턴이면서
+**더 위험하다** — yfinance는 객체 생성 수준이지만 이건 진짜 블로킹 로그인
+요청이라, KRX 서버가 느리거나 응답이 없으면 그 자체로 앱 기동이 멈출 수
+있다. `_fetch_sync` 함수 안으로 지연 import했다(로그인에 필요한 `KRX_ID`/
+`KRX_PW` 환경변수 세팅 자체는 네트워크 호출이 아니라 모듈 레벨에 그대로 둠).
+
+**발견 ②(실제로 매일 발현 중이던 낭비, 자동매매 킬스위치가 켜진 이후 계속)**:
+`collectors/auto_trader.py::run_auto_trade`(60초 잡, `_run_live_refresh` 안)가
+`watch_stop_loss`(30초 잡)와 달리 `is_nxt_closed` 게이트가 **없었다**. 원래
+주석은 "새 외부 호출 없이 이미 확보된 신호만 재사용해서 게이트 안 해도
+된다"였는데, 이건 scalp-tracker/positioning-snapshot에는 맞지만
+`run_auto_trade`엔 안 맞았다 — 이 함수는 `_warm_stock_intraday`로 **매번
+실제 키움 ka10080을 직접 호출**한다(이번 폴링에서 이미 워밍된 지수 캐시
+재사용이 아니라 0167A0 전용 별도 조회). 즉 킬스위치가 켜져 있으면 NXT
+마감(20:00 KST)부터 다음날 개장(08:00 KST)까지 **12시간 동안 매분 키움을
+계속 두드리고 있었다** — 그 시간엔 주문 자체가 불가능해 완전히 낭비였다.
+`is_nxt_closed`로 감싸 `watch_stop_loss`와 동일한 기준으로 맞췄다 — 청산
+로직(§5.55의 EOD 강제청산 등)은 이미 NXT 마감 전(15:20~15:30)에 처리되도록
+설계돼 있어 안전성 손실은 없다.
+
+**스캔 결과, 그 밖엔 없음**: `ast` 스캔으로 `clients/`·`collectors/` 전체를
+훑었을 때 로거 생성·정규식 컴파일·`get_settings()` 외에 모듈 레벨에서 실제
+작업을 하는 코드는 pykrx 하나뿐이었다(yfinance 4곳은 §5.58에서 이미 처리).
+`requirements.txt`의 다른 의존성(fastapi/uvicorn/requests/sqlalchemy/asyncpg/
+alembic/apscheduler/httpx)은 전부 표준 웹 프레임워크 인프라라 이런 임포트
+시점 부작용이 알려진 바 없다.
+
+**폴링 게이트 현황 정리**(재검토 결과, 표로 남겨 다음에 또 헷갈리지 않게):
+
+| 잡 | 주기 | 게이트 | 비고 |
+|---|---|---|---|
+| `_run_live_refresh`(지수/집계 워밍) | 60초 | `is_nxt_closed`(08:00~20:00) | 안쪽에서 지수 전용은 `is_market_closed`(09:00~15:30)로 한 번 더 좁힘 |
+| `_run_live_refresh`(scalp-tracker/positioning-snapshot) | 60초 | 게이트 없음(의도) | 새 외부 호출 없음 — NXT 마감 직후 첫 폴링에 당일 채우기를 완료해야 해서 게이트 밖 유지가 맞다 |
+| `_run_live_refresh`(auto_trader.run_auto_trade) | 60초 | **`is_nxt_closed`(신규, §5.59)** | 새 외부 호출(ka10080) 있음 — 이번에 고침 |
+| `_run_live_refresh_extra`(value-rank) | 7분 | `is_nxt_closed` | 기존부터 정상 |
+| `_run_stock_flow_scan` | 10분 | `is_nxt_closed` | 기존부터 정상 |
+| `_run_auto_trade_watch`(watch_stop_loss) | 30초 | `is_nxt_closed` | 기존부터 정상(처음부터 맞게 설계돼 있었음) |
+| `_run_nasdaq_futures_morning_job` | 1일 1회(07:50 KST) | 크론 자체가 시각 고정 | §5.56/§5.58로 이미 정리됨 |
+| `_run_accumulation_screener_job`(worker) | 1일 1회(20:00 KST) | 크론 자체가 시각 고정 | §5.57 |
+
+즉 "본장(09:00~15:30) 끝나면 최소화"보다 실제로는 이미 대부분 "NXT
+확장세션(08:00~20:00) 끝나면 최소화"로 맞춰져 있었다 — 0167A0가 NXT에서도
+실제로 거래되는 개별 종목이라(market_hours.py 모듈 docstring의 실측 근거)
+그 창을 그대로 쓰는 게 맞고, 이번에 유일하게 빠져 있던 `run_auto_trade`만
+고치면 전체가 일관돼진다.
+
+**검증**: `venv/bin/python -m pytest -q` — 902 passed(무관 기존 실패 1건
+제외, 신규 게이트 테스트 2개 포함:
+`test_run_live_refresh_skips_auto_trader_when_nxt_closed`/
+`test_run_live_refresh_calls_auto_trader_when_nxt_open`). `python -c
+"import app.main; print('pykrx' in sys.modules, 'yfinance' in sys.modules)"`
+→ `False False` 확인. 실 컨테이너 재시작 후 Monitor로 2분 CPU 추적 — 정상
+60초/7분 주기 스파이크 외엔 0.25~0.3%로 안정(재시작 후 다시 치솟지 않음).
+NXT 개장 중(17:45~17:52 KST) 로그로 `run_auto_trade` 정상 계속 실행 확인
+(게이트가 실행 중인 매매를 실수로 막지 않았음을 확인). `stock-worker-1`도
+재시작해 정상 기동 확인. 킬스위치/포지션(idle) 재시작 전후 유지 확인.
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)

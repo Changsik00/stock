@@ -270,16 +270,28 @@ async def _run_live_refresh() -> None:
         # 이 프로젝트 최초로 실제 돈이 자동으로 움직이는 호출이다. `enabled`
         # 킬스위치 기본값이 False라(마이그레이션 시드) 사용자가 전용 탭에서
         # 명시적으로 켜기 전까지는 이 호출이 매 폴링마다 즉시 반환되기만 하고
-        # place_buy_order/place_sell_order를 전혀 호출하지 않는다 — 위
-        # scalp-tracker/positioning-snapshot과 완전히 동일한 이유(새 외부 호출은
-        # 이미 확보된 신호 계산부만 재사용)로 nxt_closed 게이트 밖에서 호출하되,
-        # 이 함수 자체는 내부에서 킬스위치로 스스로를 게이트한다
-        # (collectors/auto_trader.py 모듈 docstring 참고).
-        try:
-            auto_trade_result = await auto_trader.run_auto_trade(session)
-            logger.debug("live-refresh: auto-trader %s", auto_trade_result)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("live-refresh: auto-trader 실패: %s", e)
+        # place_buy_order/place_sell_order를 전혀 호출하지 않는다.
+        #
+        # **2026-08-07 수정(PLAN.md §5.59)**: 예전엔 위 scalp-tracker/
+        # positioning-snapshot과 "같은 이유"로 nxt_closed 게이트 밖에서
+        # 불렀는데, 그 둘과 달리 이 함수는 **새 외부 호출이 있다** —
+        # `_warm_stock_intraday(code, 1)`가 매번 키움 ka10080(분봉)을 직접
+        # 호출한다(이미 이번 폴링에서 워밍된 지수 캐시를 재사용하는 게
+        # 아니라 0167A0 전용 별도 조회). 그래서 킬스위치가 켜져 있으면
+        # NXT 마감(20:00 KST)~다음날 개장(08:00 KST) 사이에도 60초마다
+        # 키움을 계속 두드리고 있었다 — 그 시간대엔 주문도 체결될 수 없어
+        # 완전히 낭비였다(사용자 지적으로 재검토 중 발견, `watch_stop_loss`
+        # 30초 잡은 처음부터 `is_nxt_closed`로 이미 게이트돼 있었는데 이
+        # 60초 잡만 빠져 있었다). `is_nxt_closed`로 감싸 나머지 NXT 연동
+        # 소스들과 동일한 기준을 맞춘다 — 이 시간대엔 매매 자체가 불가능하므로
+        # 안전성 손실은 없다(손절 등 청산 로직도 §5.55부터 NXT 마감 전
+        # 15:20~15:30에 이미 강제 처리되도록 설계돼 있다).
+        if not nxt_closed:
+            try:
+                auto_trade_result = await auto_trader.run_auto_trade(session)
+                logger.debug("live-refresh: auto-trader %s", auto_trade_result)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("live-refresh: auto-trader 실패: %s", e)
 
 
 async def _run_live_refresh_extra() -> None:

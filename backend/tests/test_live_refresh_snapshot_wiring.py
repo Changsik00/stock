@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.collectors import intraday_snapshot, live_refresh, positioning_snapshot, scalp_tracker
+from app.collectors import auto_trader, intraday_snapshot, live_refresh, positioning_snapshot, scalp_tracker
 from app.routers import markets
 
 FLOW_PAYLOAD = {"kospi": None, "kosdaq": None, "market_closed": False, "cached_at": "x"}
@@ -159,6 +159,62 @@ async def test_run_live_refresh_extra_only_warms_value_rank(monkeypatch):
 
 async def _async_return(value):
     return value
+
+
+async def test_run_live_refresh_skips_auto_trader_when_nxt_closed(monkeypatch):
+    """PLAN.md §5.59(2026-08-07) — `run_auto_trade`는 `_warm_stock_intraday`로
+    매번 실제 키움 ka10080을 호출한다(scalp-tracker/positioning-snapshot과
+    달리 "새 외부 호출 없음"이 아니다). 킬스위치가 켜져 있으면 NXT 마감
+    (20:00 KST)~다음날 개장(08:00 KST) 사이에도 60초마다 키움을 계속
+    두드리고 있던 버그를 고쳤다 — 이제 `watch_stop_loss`(30초 잡)와 동일하게
+    `is_nxt_closed`로 게이트된다."""
+    monkeypatch.setattr(live_refresh, "is_nxt_closed", lambda now_kst: True)
+    monkeypatch.setattr(markets, "_warm_breadth_live", lambda session: _async_return(None))
+    monkeypatch.setattr(markets, "_warm_flow_live", lambda session: _async_return(None))
+    monkeypatch.setattr(markets, "_warm_attention", lambda session: _async_return(None))
+    monkeypatch.setattr(markets, "_warm_index_tiles_live", lambda session: _async_return(None))
+    monkeypatch.setattr(markets, "_warm_fx_live", lambda session: _async_return(None))
+
+    called = {"run_auto_trade": False}
+
+    async def _fake_run_auto_trade(session, now_kst=None):  # pragma: no cover - 호출되면 안 됨
+        called["run_auto_trade"] = True
+        return {"enabled": False, "action": "none"}
+
+    monkeypatch.setattr(auto_trader, "run_auto_trade", _fake_run_auto_trade)
+
+    await live_refresh._run_live_refresh()
+
+    assert called["run_auto_trade"] is False
+
+
+async def test_run_live_refresh_calls_auto_trader_when_nxt_open(monkeypatch):
+    """위 테스트의 대조군 — NXT 개장 중(이 파일의 기본 `_force_market_open`
+    상태)에는 여전히 매 폴링 호출돼야 한다(킬스위치 자체 게이트는
+    test_auto_trader_collector.py가 전담)."""
+    from app.routers import basis as basis_router
+    from app.routers import groups as groups_router
+
+    monkeypatch.setattr(markets, "_warm_breadth_live", lambda session: _async_return(None))
+    monkeypatch.setattr(markets, "_warm_flow_live", lambda session: _async_return(None))
+    monkeypatch.setattr(markets, "_warm_attention", lambda session: _async_return(None))
+    monkeypatch.setattr(markets, "_warm_index_tiles_live", lambda session: _async_return(None))
+    monkeypatch.setattr(markets, "_warm_fx_live", lambda session: _async_return(None))
+    monkeypatch.setattr(basis_router, "_warm_basis_live", lambda: _async_return(None))
+    monkeypatch.setattr(groups_router, "_warm_groups_live", lambda group_type: _async_return(None))
+    monkeypatch.setattr(markets, "_warm_futures_flow_live", lambda: _async_return(FUTURES_PAYLOAD))
+
+    called = {"run_auto_trade": False}
+
+    async def _fake_run_auto_trade(session, now_kst=None):
+        called["run_auto_trade"] = True
+        return {"enabled": False, "action": "none"}
+
+    monkeypatch.setattr(auto_trader, "run_auto_trade", _fake_run_auto_trade)
+
+    await live_refresh._run_live_refresh()
+
+    assert called["run_auto_trade"] is True
 
 
 async def test_nasdaq_futures_morning_job_calls_fetch_and_cache_not_warm(monkeypatch):

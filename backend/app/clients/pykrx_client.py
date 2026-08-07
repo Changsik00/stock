@@ -55,8 +55,6 @@ else:
         "See this module's docstring / PLAN.md §2 for details."
     )
 
-from pykrx import stock  # noqa: E402  (must import after KRX_ID/KRX_PW are set)
-
 MIN_CALL_INTERVAL_SEC = 0.5
 
 _MARKET_TO_PYKRX = {"kospi": "KOSPI", "kosdaq": "KOSDAQ"}
@@ -105,7 +103,20 @@ _throttle = _throttle_factory()
 
 
 def _fetch_sync(market: str, target_date: dt.date) -> list[dict]:
-    """블로킹 pykrx 호출 — 반드시 asyncio.to_thread 안에서만 실행할 것."""
+    """블로킹 pykrx 호출 — 반드시 asyncio.to_thread 안에서만 실행할 것.
+
+    지연 import(2026-08-07, PLAN.md §5.58 연장선) — `from pykrx import stock`는
+    모듈 최초 import 시점에 **실제로 data.krx.co.kr에 로그인 세션을 생성하는
+    네트워크 호출**을 한다(위 모듈 docstring 참고). 이 파일은
+    `collectors/market_flow.py`를 거쳐 `collectors/__init__.py::register_all()`
+    (앱 기동 시 `routers/admin.py`가 즉시 호출)에 물려 있어, 예전엔 backend
+    프로세스가 뜰 때마다(`--reload` 재시작 포함, 실제로 이 잡을 쓰는지와
+    무관하게) 매번 KRX 로그인 요청을 날렸다 — yfinance 임포트 문제와 동일한
+    패턴(§5.58)이고, 동기 블로킹 네트워크 호출이라 임포트 자체가 앱 기동을
+    지연/멈추게 할 수 있어 오히려 더 위험하다. 실제로 이 함수가 호출될 때
+    (일별 배치가 시장 수급을 조회할 때)만 로그인하도록 여기로 옮긴다."""
+    from pykrx import stock
+
     pykrx_market = _MARKET_TO_PYKRX[market]
     ymd = target_date.strftime("%Y%m%d")
 
