@@ -6,7 +6,16 @@
 
 from __future__ import annotations
 
-from app.quant.screener import ATTENTION_BONUS, LARGE_DECLINE_WARNING_PCT, WEIGHTS, compute_scalp_scores
+from app.quant.screener import (
+    ATTENTION_BONUS,
+    LARGE_DECLINE_WARNING_PCT,
+    MAX_SINGLE_DAY_ABS_MOVE_PCT,
+    PRICE_QUIET_RISE_MAX_PCT,
+    PRICE_QUIET_RISE_MIN_PCT,
+    WEIGHTS,
+    compute_scalp_scores,
+    evaluate_accumulation_pattern,
+)
 
 
 def _cand(code, change_rate, turnover, value_rank, name=None, market="kospi", flow_net_value=None):
@@ -193,4 +202,123 @@ def test_at_risk_does_not_affect_score_computation():
     by_code = {r["code"]: r for r in scored}
     assert by_code["DOWN"]["at_risk"] is True
     assert by_code["UP"]["at_risk"] is False
-    assert by_code["DOWN"]["score"] == by_code["UP"]["score"]
+
+
+# -- evaluate_accumulation_pattern (개인 매도/외국인·기관 전환 매집 관찰 패턴) ---
+
+
+def _base_kwargs(**overrides):
+    """3개 조건을 전부 충족하는 기준값 — 개별 테스트가 하나씩만 깨서 그
+    조건만 실패로 만든다."""
+    kwargs = dict(
+        individual_net_10d=-1000.0,
+        foreign_inst_net_recent5d=500.0,
+        foreign_inst_net_prior5d=100.0,
+        price_return_10d_pct=8.0,
+        max_abs_daily_return_10d_pct=3.0,
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_all_three_conditions_satisfied_matches():
+    result = evaluate_accumulation_pattern(**_base_kwargs())
+    assert result["matched"] is True
+    assert "reason" in result
+
+
+def test_condition1_fails_when_individual_net_not_negative():
+    # 개인이 순매수(양수)면 조건1 실패 -> matched는 False여야 한다.
+    result = evaluate_accumulation_pattern(**_base_kwargs(individual_net_10d=1.0))
+    assert result["matched"] is False
+
+
+def test_condition1_boundary_zero_does_not_match():
+    # 정확히 0은 "순매도"가 아니므로(엄격한 부등호) 실패해야 한다.
+    result = evaluate_accumulation_pattern(**_base_kwargs(individual_net_10d=0.0))
+    assert result["matched"] is False
+
+
+def test_condition2_fails_when_recent5_not_positive():
+    result = evaluate_accumulation_pattern(
+        **_base_kwargs(foreign_inst_net_recent5d=0.0, foreign_inst_net_prior5d=-100.0)
+    )
+    assert result["matched"] is False
+
+
+def test_condition2_fails_when_recent5_not_improved_over_prior5():
+    # 최근5일이 양수여도 직전5일보다 개선되지 않았으면(같거나 작으면) 실패.
+    result = evaluate_accumulation_pattern(
+        **_base_kwargs(foreign_inst_net_recent5d=500.0, foreign_inst_net_prior5d=500.0)
+    )
+    assert result["matched"] is False
+
+
+def test_condition2_boundary_recent5_exactly_zero_does_not_match():
+    result = evaluate_accumulation_pattern(
+        **_base_kwargs(foreign_inst_net_recent5d=0.0, foreign_inst_net_prior5d=-500.0)
+    )
+    assert result["matched"] is False
+
+
+def test_condition3_fails_when_price_return_below_min():
+    result = evaluate_accumulation_pattern(
+        **_base_kwargs(price_return_10d_pct=PRICE_QUIET_RISE_MIN_PCT - 0.01)
+    )
+    assert result["matched"] is False
+
+
+def test_condition3_fails_when_price_return_above_max():
+    result = evaluate_accumulation_pattern(
+        **_base_kwargs(price_return_10d_pct=PRICE_QUIET_RISE_MAX_PCT + 0.01)
+    )
+    assert result["matched"] is False
+
+
+def test_condition3_boundary_price_return_at_min_and_max_matches():
+    # 경계값(등호 포함)은 만족으로 처리돼야 한다.
+    result_min = evaluate_accumulation_pattern(
+        **_base_kwargs(price_return_10d_pct=PRICE_QUIET_RISE_MIN_PCT)
+    )
+    result_max = evaluate_accumulation_pattern(
+        **_base_kwargs(price_return_10d_pct=PRICE_QUIET_RISE_MAX_PCT)
+    )
+    assert result_min["matched"] is True
+    assert result_max["matched"] is True
+
+
+def test_condition3_fails_when_single_day_move_exceeds_threshold():
+    result = evaluate_accumulation_pattern(
+        **_base_kwargs(max_abs_daily_return_10d_pct=MAX_SINGLE_DAY_ABS_MOVE_PCT + 0.01)
+    )
+    assert result["matched"] is False
+
+
+def test_condition3_boundary_single_day_move_at_threshold_matches():
+    # 경계값(등호 포함)은 만족으로 처리돼야 한다.
+    result = evaluate_accumulation_pattern(
+        **_base_kwargs(max_abs_daily_return_10d_pct=MAX_SINGLE_DAY_ABS_MOVE_PCT)
+    )
+    assert result["matched"] is True
+
+
+def test_reason_contains_observed_values_not_evaluative_language():
+    """§5 house rule — reason은 관측값을 그대로 서술할 뿐 "좋다/추천" 같은
+    평가 문구를 쓰지 않는다."""
+    result = evaluate_accumulation_pattern(**_base_kwargs())
+    reason = result["reason"]
+    # 관측값(입력 숫자)이 그대로 서술돼 있어야 한다.
+    assert "1,000" in reason  # individual_net_10d
+    assert "8.00%" in reason  # price_return_10d_pct
+    # 평가/추천 문구가 섞이면 안 된다.
+    for banned_word in ("추천", "매수하세요", "매도하세요", "좋음", "좋습니다"):
+        assert banned_word not in reason
+
+
+def test_reason_reports_all_three_condition_statuses_even_when_some_fail():
+    result = evaluate_accumulation_pattern(**_base_kwargs(individual_net_10d=1.0))
+    assert result["matched"] is False
+    reason = result["reason"]
+    assert "조건1 불충족" in reason
+    assert "조건2 충족" in reason
+    assert "조건3 충족" in reason

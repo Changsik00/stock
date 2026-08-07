@@ -192,3 +192,72 @@ def compute_scalp_scores(
 
     scored.sort(key=lambda r: (-r["score"], r["value_rank"]))
     return scored
+
+
+# -- 개인 매도 / 외국인·기관 전환 매집 관찰 패턴 --------------------------------
+#
+# 사용자가 유한양행(000100) 실 데이터에서 발견한 패턴이 계기다: 개인이 계속
+# 순매도하는데 외국인/기관이 순매수로 전환하며 가격이 급등 없이 조용히
+# 우상향하는 종목들("개인은 모르고 파는데 프로그램/외국인·기관이 미리 걸린
+# 매도 물량을 받아먹는" 패턴) — 1~2% 스윙을 위한 "관찰용 스크리너"다(매매
+# 신호 아님, 자동매매 아님). house rule(§5) 그대로: "판단"을 새로 만들지
+# 않고 이미 수집 중인 데이터를 명시적 숫자 규칙에 매핑할 뿐이다.
+#
+# 아래 4개 상수는 첫 배정값이며(이 모듈의 WEIGHTS/LARGE_DECLINE_WARNING_PCT와
+# 동일한 관례로) 이름 붙은 상수로 유지한다 — 검증된 값이 아니라 관찰을 시작하기
+# 위한 초기 컷오프다.
+LOOKBACK_TRADING_DAYS = 10
+RECENT_HALF_DAYS = 5  # 최근 절반(전환/가속 판정용) — 나머지 5일이 "직전 절반"
+PRICE_QUIET_RISE_MIN_PCT = 2.0
+PRICE_QUIET_RISE_MAX_PCT = 15.0
+MAX_SINGLE_DAY_ABS_MOVE_PCT = 5.0
+
+
+def evaluate_accumulation_pattern(
+    individual_net_10d: float,
+    foreign_inst_net_recent5d: float,
+    foreign_inst_net_prior5d: float,
+    price_return_10d_pct: float,
+    max_abs_daily_return_10d_pct: float,
+) -> dict:
+    """관찰용 패턴 판정 — 매매 신호 아님. 아래 3개 조건을 전부 충족해야
+    ``matched=True``:
+
+    1. 개인 10거래일 누적 순매도(``individual_net_10d < 0``).
+    2. 외국인+기관계 최근 5거래일 순매수(``foreign_inst_net_recent5d > 0``)이면서
+       그 전 5거래일보다 개선(``foreign_inst_net_recent5d > foreign_inst_net_prior5d``)
+       — 전환/가속 판정.
+    3. 10거래일 누적 등락률이 완만한 상승 구간(``PRICE_QUIET_RISE_MIN_PCT`` 이상
+       ``PRICE_QUIET_RISE_MAX_PCT`` 이하, 양쪽 경계 포함)이면서 그 구간 어떤
+       하루도 급등락이 없음(``max_abs_daily_return_10d_pct`` <=
+       ``MAX_SINGLE_DAY_ABS_MOVE_PCT``).
+
+    인자 단위는 호출부(collectors/accumulation_screener.py)가 넘기는 그대로다
+    — ``*_net_*`` 3개는 stock_flow.net_value와 동일한 백만원 단위,
+    ``*_pct`` 2개는 %.
+
+    Returns ``{"matched": bool, "reason": str}`` — ``reason``은 조건 3개 각각의
+    충족/불충족 여부와 실제 관측값을 그대로 서술한 문장이다(§5 house rule
+    "관찰 기록에 좋다/추천 같은 평가 문구를 쓰지 않는다" — 평가 문구 없음).
+    """
+    cond1 = individual_net_10d < 0
+    cond2 = foreign_inst_net_recent5d > 0 and foreign_inst_net_recent5d > foreign_inst_net_prior5d
+    cond3 = (
+        PRICE_QUIET_RISE_MIN_PCT <= price_return_10d_pct <= PRICE_QUIET_RISE_MAX_PCT
+        and max_abs_daily_return_10d_pct <= MAX_SINGLE_DAY_ABS_MOVE_PCT
+    )
+    matched = cond1 and cond2 and cond3
+
+    reason = (
+        f"개인 10일 순매도 {individual_net_10d:,.0f}백만"
+        f"({'조건1 충족' if cond1 else '조건1 불충족'}: individual_net_10d < 0). "
+        f"외국인+기관계 최근5일 순매수 {foreign_inst_net_recent5d:,.0f}백만, "
+        f"직전5일 {foreign_inst_net_prior5d:,.0f}백만"
+        f"({'조건2 충족' if cond2 else '조건2 불충족'}: 최근5일 > 0 AND 최근5일 > 직전5일). "
+        f"10일 누적 등락률 {price_return_10d_pct:.2f}%, 일중 최대 등락률(절대값) "
+        f"{max_abs_daily_return_10d_pct:.2f}%"
+        f"({'조건3 충족' if cond3 else '조건3 불충족'}: "
+        f"{PRICE_QUIET_RISE_MIN_PCT}~{PRICE_QUIET_RISE_MAX_PCT}% 구간, "
+        f"일중 최대 등락폭 {MAX_SINGLE_DAY_ABS_MOVE_PCT}% 이하)."
+    )
+    return {"matched": matched, "reason": reason}

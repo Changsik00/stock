@@ -3294,6 +3294,58 @@ yfinance는 하루 최대 1회(07:50 KST)만 호출된다 — 이번에 재현�
 `enabled: false`/포지션 `idle` 상태는 DB 저장이라 재시작 전후 그대로
 유지됨을 확인). 코드 변경 후 pytest 전체 통과 확인 예정(아래 검증 결과).
 
+### Phase 5.57 — 개인 매도/외국인·기관 전환 매집 관찰 스크리너 (2026-08-07)
+
+**계기**: 사용자가 유한양행(000100) 실 데이터를 확인해보니 최근 2주 개인은
+계속 순매도(-157억 누적)하는데 외국인은 08/03부터 4일 연속 순매수로 전환
+(누적 -908 → +3,449백만), 기관도 08/06 순매수 전환 — 그 사이 가격은 급등
+없이 조용히 우상향했다. "개인은 모르고 파는데 프로그램/외국인·기관이 미리
+걸린 매도 물량을 받아먹는" 패턴을 찾아 1~2% 스윙을 노리고 싶다는 요청.
+
+호가창(ka10004)에는 투자자 유형 귀속 정보가 없어 이 패턴을 직접 못 준다 —
+이미 수집 중인 종목별 투자자기관별 순매수(ka10059, `StockFlow`)가 정확한
+소스인데, 기존 10분 스윕(`_run_stock_flow_scan`)은 거래대금 상위 200종목만
+돌아 유한양행처럼 조용히 눌려있던 종목은 항상 커버된다는 보장이 없었다.
+그래서 **전체 시장(코스피+코스닥 ETF 제외 약 4,300종목)을 매일 훑는 새 배치**를
+추가했다(사용자 확인: 매일 전체 종목, ~70~90분 소요 감수. 프론트 UI는 이번
+단계 제외, 백엔드/DB까지만).
+
+**판정 규칙**(`quant/screener.py::evaluate_accumulation_pattern`, 순수 함수,
+3개 전부 충족해야 매칭 — 새 판단 없이 이미 수집된 수치를 명시적 규칙에
+매핑할 뿐):
+1. 개인 10거래일 누적 순매도 (`individual_net_10d < 0`)
+2. 외국인+기관계 최근 5거래일 순매수 AND 직전 5거래일보다 개선(전환/가속)
+3. 10거래일 누적 등락률이 완만한 상승 구간(+2%~+15%) AND 그 안에 일별
+   등락폭 5% 초과하는 날 없음(급등 제외, "조용한" 상승만)
+
+**구현**:
+- `collectors/accumulation_screener.py`(신규) — `stocks`(ETF 제외) 전 종목을
+  단일 `KiwoomClient` 인스턴스로 순회, 종목당 ka10059 1콜 → 기존
+  `routers.stocks._parse_ka10059_rows`/`_upsert_flow_rows` 재사용으로
+  `stock_flow` upsert → 그 직후 5개 값 계산해 판정 → 매칭 시
+  `AccumulationPick`에 upsert. 코드 하나 실패해도 스윕 전체를 막지 않음.
+- `AccumulationPick` 테이블(`models.py`, 신규 마이그레이션 `04332be31aba`) —
+  `(date, code)` PK, `ScalpPick`과 동일한 관찰 기록 패턴.
+- 스케줄링: 18:00 KST 본배치(REGISTRY 전체 순회)에 넣으면 70~90분짜리 잡
+  때문에 그날 나머지 배치 전부가 밀려서, `_EXCLUDED_FROM_DAILY_BATCH`로
+  제외하고 **평일 20:00 KST 전용 크론**(`_run_accumulation_screener_job`)
+  하나만 신설 — 18:00 본배치·19:30 flow_rank 캐치업과 안 겹치는 시간대.
+- `GET /api/markets/accumulation-screener`(`routers/flow_rank.py`, 이 파일이
+  이미 "시장 스크리너 홈") — DB 전용 조회, `scalp.py`와 동일한 "참고용
+  스크리닝이지 매매 신호가 아니다" 디스클레이머 포함.
+
+**검증**: `venv/bin/python -m pytest -q` 직접 실행 — 900 passed(무관한 기존
+실패 1건 제외). 구현 중 발견해 직접 수정한 것: 서브에이전트가 새 테스트를
+추가하며 기존 `test_flow_rank_response_rows_include_market`의 마지막 단언
+(`assert matching_dates[0]["rows"][0]["market"] == "kospi"`)을 실수로
+삭제했었다 — 복원 후 재검증. `venv/bin/alembic upgrade head` 적용 확인(실제
+Postgres에 `accumulation_pick` 테이블 컬럼까지 직접 조회해 모델과 일치
+확인). `stock-backend-1`/`stock-worker-1` 재시작 후 로그로 20:00 KST 크론이
+정상 등록되고("18 jobs registered: [...], accumulation_screener excluded
+from this batch") 핫리로드 무오류 확인. `GET /api/markets/accumulation-screener`
+curl로 정상 응답(아직 크론이 한 번도 안 돌아 `rows: []`, 예상된 동작) 확인.
+전 종목 첫 실제 풀스윕은 다음 평일 20:00 KST 크론 실행 시 로그로 실측 예정.
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)

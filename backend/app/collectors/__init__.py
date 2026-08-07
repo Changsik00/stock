@@ -13,6 +13,12 @@ from __future__ import annotations
 
 
 def register_all() -> None:
+    # accumulation_screener는 REGISTRY에는 등록되지만(admin.py 수동 트리거 +
+    # collect_log 배선을 위해 필요) 전 종목(수천 개) 순회라 예상 70~90분 걸리는
+    # 잡이다 — scheduler.py의 18:00 본배치(_run_all_jobs, REGISTRY 전체 순회)에는
+    # 그 배치가 통째로 밀리는 걸 막기 위해 명시적으로 제외돼 있고, 전용 20:00 KST
+    # 크론에서만 돈다(scheduler.py 모듈 docstring 참고).
+    from . import accumulation_screener as _accumulation_screener_collector  # noqa: F401
     from . import breadth as _breadth_collector  # noqa: F401
     from . import etf_master as _etf_master_collector  # noqa: F401
     from . import flow_path as _flow_path_collector  # noqa: F401

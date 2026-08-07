@@ -4,6 +4,14 @@ out(유출) 토글 (PLAN.md §4.5/§6 3.5-3, 유출 확장은 §4.6 3.6-4).
 GET /api/markets/value-rank — 거래대금 상위 종목("돈이 모이는 곳") 스냅샷 (PLAN.md §4.6 3.6-1).
 GET /api/markets/sentiment — 시장 종합 매수세/매도세 게이지(-100~+100) (PLAN.md §4.6 3.6-4).
 GET /api/markets/etf-weight-changes — ETF 비중 변화 감별 스크리너 (PLAN.md §5.25, 알테오젠 사례).
+GET /api/markets/accumulation-screener — 개인 매도/외국인·기관 전환 매집 관찰
+스크리너(2026-08-07 추가). **참고용 스크리닝이지 매매 신호가 아니다** — 사용자가
+유한양행(000100) 실 데이터에서 발견한 패턴("개인이 계속 순매도하는데 외국인/기관이
+순매수로 전환하며 가격이 급등 없이 조용히 우상향")에 맞는 종목을
+``collectors/accumulation_screener.py``(평일 20:00 KST 전용 크론)가 매일
+``accumulation_pick``에 upsert해 두고, 이 엔드포인트는 그 결과를 그대로 읽기만
+한다(판정 자체는 ``quant/screener.py::evaluate_accumulation_pattern`` — 새 판단을
+만들지 않고 이미 수집된 수치를 명시적 규칙에 매핑할 뿐이다).
 이 라우터가 이미 "ETF 관련 시장 스크리너"의 홈이라(flow-path·sentiment의 etf 요소 등)
 별도 라우터 파일을 새로 만들지 않고 여기에 추가했다(작업 지시가 남긴 판단 재량).
 
@@ -112,7 +120,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..clients import naver_rank, naver_value_rank
 from ..db import get_session
 from ..market_hours import KST, is_nxt_closed
-from ..models import EtfStat, FlowPath, FlowRank, MarketBreadth, MarketFlow, Stock, ValueRank
+from ..models import (
+    AccumulationPick,
+    EtfStat,
+    FlowPath,
+    FlowRank,
+    MarketBreadth,
+    MarketFlow,
+    Stock,
+    ValueRank,
+)
 from ..quant import etf_weight_changes
 from ..quant.flow_baseline import compute_flow_market_baseline
 from ..sentiment import breadth_score, compute_sentiment, etf_score, flow_live_score, flow_score
@@ -440,6 +457,66 @@ async def value_rank_top(
                 "turnover": float(r.turnover) if r.turnover is not None else None,
             }
             for rank, r in row_ranks
+        ],
+    }
+
+
+@router.get("/api/markets/accumulation-screener")
+async def accumulation_screener_picks(
+    days: int = Query(1, ge=1, description="이 창 안의 accumulation_pick.date 전부를 반환"),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """개인 매도/외국인·기관 전환 매집 관찰 스크리너 (2026-08-07 추가).
+
+    **참고용 스크리닝이지 매매 신호가 아니다** — 여기 나열된 종목은 "개인
+    10거래일 누적 순매도, 외국인+기관계 최근 5거래일 순매수 전환/가속, 완만한
+    (급등 없는) 10거래일 누적 상승"이라는 3개 조건을 모두 만족했다는 관측
+    사실일 뿐, 매수/매도 추천이 아니다(``quant/screener.py::evaluate_
+    accumulation_pattern`` 참고 — house rule대로 새 판단을 만들지 않고 이미
+    수집된 수치를 명시적 규칙에 매핑한 결과다).
+
+    DB 전용 조회다(이 라우터의 다른 엔드포인트들과 동일하게 §5.4 "DB 캐싱
+    우선" — 외부 호출 없음). ``collectors/accumulation_screener.py``(평일
+    20:00 KST 전용 크론, 전 종목 순회)가 매일 적재해 둔 ``accumulation_pick``에서
+    ``days`` 창 안의 행을 최신 날짜부터 반환한다. 이 스크리너가 아직 한 번도
+    돌지 않았거나 그 기간에 매칭된 종목이 없으면(정상 — 3개 조건 전부 충족은
+    드문 케이스일 수 있음) 빈 리스트를 반환한다.
+    """
+    since = dt.date.today() - dt.timedelta(days=days)
+    stmt = (
+        select(AccumulationPick)
+        .where(AccumulationPick.date >= since)
+        .order_by(AccumulationPick.date.desc(), AccumulationPick.code.asc())
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+
+    return {
+        "days": days,
+        "disclaimer": "참고용 스크리닝이지 매매 신호가 아니다.",
+        "rows": [
+            {
+                "date": r.date.isoformat(),
+                "code": r.code,
+                "name": r.name,
+                "market": r.market,
+                "individual_net_10d": float(r.individual_net_10d)
+                if r.individual_net_10d is not None
+                else None,
+                "foreign_inst_net_recent5d": float(r.foreign_inst_net_recent5d)
+                if r.foreign_inst_net_recent5d is not None
+                else None,
+                "foreign_inst_net_prior5d": float(r.foreign_inst_net_prior5d)
+                if r.foreign_inst_net_prior5d is not None
+                else None,
+                "price_return_10d_pct": float(r.price_return_10d_pct)
+                if r.price_return_10d_pct is not None
+                else None,
+                "max_abs_daily_return_10d_pct": float(r.max_abs_daily_return_10d_pct)
+                if r.max_abs_daily_return_10d_pct is not None
+                else None,
+                "reason": r.reason,
+            }
+            for r in rows
         ],
     }
 

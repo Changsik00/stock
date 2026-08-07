@@ -20,7 +20,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import async_session_factory, engine
-from app.models import FlowRank, ValueRank
+from app.models import AccumulationPick, FlowRank, ValueRank
 from app.routers import flow_rank as flow_rank_module
 from app.routers.flow_rank import router
 
@@ -44,6 +44,9 @@ async def _clear_test_rows() -> None:
     async with async_session_factory() as session:
         await session.execute(ValueRank.__table__.delete().where(ValueRank.date.in_([TEST_DATE, OLDER_DATE])))
         await session.execute(FlowRank.__table__.delete().where(FlowRank.date.in_([TEST_DATE, OLDER_DATE])))
+        await session.execute(
+            AccumulationPick.__table__.delete().where(AccumulationPick.date.in_([TEST_DATE, OLDER_DATE]))
+        )
         await session.commit()
 
 
@@ -192,3 +195,113 @@ async def test_flow_rank_response_rows_include_market(seeded_flow_rank):
     matching_dates = [d for d in body["dates"] if d["date"] == TEST_DATE.isoformat()]
     assert len(matching_dates) == 1
     assert matching_dates[0]["rows"][0]["market"] == "kospi"
+
+
+# -- GET /api/markets/accumulation-screener (2026-08-07 추가) ----------------
+#
+# 개인 매도/외국인·기관 전환 매집 관찰 스크리너 — DB 전용 조회(collectors/
+# accumulation_screener.py가 미리 적재한 accumulation_pick을 그대로 읽는다),
+# 참고용 스크리닝이지 매매 신호가 아니다.
+
+
+@pytest.fixture
+async def seeded_accumulation_pick():
+    await _clear_test_rows()
+    async with async_session_factory() as session:
+        rows = [
+            (TEST_DATE, "000100", "유한양행", "KOSPI"),
+            (OLDER_DATE, "005930", "삼성전자", "KOSPI"),
+        ]
+        for date, code, name, market in rows:
+            stmt = pg_insert(AccumulationPick).values(
+                date=date,
+                code=code,
+                name=name,
+                market=market,
+                individual_net_10d=-1572.0,
+                foreign_inst_net_recent5d=823.0,
+                foreign_inst_net_prior5d=-120.0,
+                price_return_10d_pct=8.32,
+                max_abs_daily_return_10d_pct=3.1,
+                reason="개인 10일 순매도 -1,572백만(조건1 충족...). ...",
+            )
+            await session.execute(stmt)
+        await session.commit()
+    yield
+    await _clear_test_rows()
+
+
+async def test_accumulation_screener_returns_seeded_row_within_days_window(
+    monkeypatch, seeded_accumulation_pick
+):
+    class _FixedDate(dt.date):
+        @classmethod
+        def today(cls):
+            return TEST_DATE
+
+    monkeypatch.setattr(flow_rank_module.dt, "date", _FixedDate)
+
+    app = _make_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/markets/accumulation-screener", params={"days": 1})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["days"] == 1
+    assert "매매 신호" in body["disclaimer"]
+    codes = [r["code"] for r in body["rows"]]
+    assert codes == ["000100"]  # OLDER_DATE(005930)는 1일 창 밖
+
+    row = body["rows"][0]
+    assert row["date"] == TEST_DATE.isoformat()
+    assert row["name"] == "유한양행"
+    assert row["market"] == "KOSPI"
+    assert row["individual_net_10d"] == -1572.0
+    assert row["foreign_inst_net_recent5d"] == 823.0
+    assert row["foreign_inst_net_prior5d"] == -120.0
+    assert row["price_return_10d_pct"] == 8.32
+    assert row["max_abs_daily_return_10d_pct"] == 3.1
+    assert row["reason"]
+
+
+async def test_accumulation_screener_wider_window_includes_older_row(
+    monkeypatch, seeded_accumulation_pick
+):
+    class _FixedDate(dt.date):
+        @classmethod
+        def today(cls):
+            return TEST_DATE
+
+    monkeypatch.setattr(flow_rank_module.dt, "date", _FixedDate)
+
+    days = (TEST_DATE - OLDER_DATE).days + 1
+    app = _make_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/markets/accumulation-screener", params={"days": days})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    codes = {r["code"] for r in body["rows"]}
+    assert codes == {"000100", "005930"}
+
+
+async def test_accumulation_screener_returns_empty_rows_when_no_data_in_window(monkeypatch):
+    await _clear_test_rows()
+
+    class _FixedDate(dt.date):
+        @classmethod
+        def today(cls):
+            return TEST_DATE
+
+    monkeypatch.setattr(flow_rank_module.dt, "date", _FixedDate)
+
+    app = _make_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/markets/accumulation-screener", params={"days": 1})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["rows"] == []

@@ -42,6 +42,23 @@ collect_flow_rank``)는 이미 정직하게 동작 중**임을 확인했다 — 
 섹션 참고 — 이벤트 루프가 몇 분만 늦어도 그레이스가 짧으면 조용히 스킵된다)로
 동일하게 3600초를 준다.
 
+**2026-08-07 네 번째 cron 추가(개인 매도/외국인·기관 전환 매집 관찰 스크리너,
+평일 20:00 KST)**: ``collectors/accumulation_screener.py``는 ``stocks``
+전 종목(코스피+코스닥, ETF 제외 — 실측 기준 수천 개)을 순회하며 종목마다
+키움 ka10059를 1콜씩 호출한다 — 1req/s 리미터 기준 예상 70~90분짜리 잡이다.
+``_run_all_jobs``(18:00 REGISTRY 전체 순회)에 그대로 두면 이 한 잡 때문에
+그날 배치의 나머지 잡 전부가 70~90분 밀린다 — 그래서 ``_EXCLUDED_FROM_DAILY_
+BATCH``로 18:00 배치에서 명시적으로 제외하고, 위 macro/flow_rank catch-up과
+동일한 패턴("REGISTRY 전체가 아니라 이 잡 하나만 run_job")으로 전용 20:00 KST
+크론에서만 돌린다. accumulation_screener는 여전히 ``collectors/__init__.py::
+register_all()``을 통해 REGISTRY에는 등록돼 있다 — admin.py의 수동 트리거
+(``POST /api/admin/collect/accumulation_screener``)와 이 20:00 크론 둘 다
+``REGISTRY.get("accumulation_screener")``로 찾아 쓰므로, REGISTRY 등록 자체는
+빠지면 안 된다(빠지면 두 경로 다 잡을 못 찾는다). 20:00을 고른 이유:
+18:00 본배치·19:30 flow_rank catch-up과 겹치지 않으면서도(둘 다 짧게 끝남)
+70~90분이 걸려도 자정 전에 넉넉히 끝난다. ``misfire_grace_time``도 위 세
+크론과 동일하게 3600초.
+
 **2026-07-24 두 번째 cron 추가(미국장 조기 수집, PLAN.md §5.22)**: 사용자가
 "나스닥/다우 어제자 정보가 아침에 안 맞는다"고 지적했다. 원인은 타임존: 미국
 정규장은 한국시간 밤 22:30~23:30에 열려 다음날 새벽 05:00~06:00에 마감한다
@@ -97,11 +114,20 @@ logger = logging.getLogger(__name__)
 
 _scheduler: AsyncIOScheduler | None = None
 
+# 2026-08-07 — accumulation_screener는 REGISTRY에는 등록돼 있지만(admin.py 수동
+# 트리거 + 전용 20:00 크론이 REGISTRY.get으로 찾아 써야 하므로) 18:00 본배치
+# (_run_all_jobs)에는 절대 넣지 않는다 — 전 종목 순회라 예상 70~90분 걸려서
+# 이 한 잡 때문에 그날 나머지 잡 전부가 밀리기 때문이다(모듈 docstring
+# "2026-08-07 네 번째 cron 추가" 절 참고). 대신 아래 _run_accumulation_
+# screener_job이 전용 20:00 KST 크론에서 이 잡 하나만 run_job으로 실행한다.
+_EXCLUDED_FROM_DAILY_BATCH = {"accumulation_screener"}
+
 
 async def _run_all_jobs() -> None:
     target_date = dt.date.today()
-    logger.info("scheduled batch starting for %s (%d jobs)", target_date, len(REGISTRY))
-    for job_name, collect_fn in REGISTRY.items():
+    jobs = [(name, fn) for name, fn in REGISTRY.items() if name not in _EXCLUDED_FROM_DAILY_BATCH]
+    logger.info("scheduled batch starting for %s (%d jobs)", target_date, len(jobs))
+    for job_name, collect_fn in jobs:
         await run_job(job_name, target_date, collect_fn)
 
 
@@ -159,6 +185,34 @@ async def _run_flow_rank_catchup_job() -> None:
     await run_job("flow_rank", target_date, collect_fn)
 
 
+async def _run_accumulation_screener_job() -> None:
+    """평일 20:00 KST 전용 실행분 — 개인 매도/외국인·기관 전환 매집 관찰
+    스크리너(``collectors/accumulation_screener.py``, 관찰용, 매매 신호 아님).
+    전 종목(코스피+코스닥, ETF 제외) 순회라 예상 70~90분 걸려 18:00 본배치에
+    넣으면 그 배치 전체가 밀린다 — 그래서 위 macro/flow_rank catch-up과 동일한
+    패턴으로 REGISTRY 전체가 아니라 "accumulation_screener" 잡 하나만
+    ``run_job``으로 실행한다(모듈 docstring "2026-08-07 네 번째 cron 추가"
+    절 참고).
+    """
+    target_date = dt.date.today()
+    collect_fn = REGISTRY.get("accumulation_screener")
+    if collect_fn is None:
+        # register_all()이 collectors/accumulation_screener.py를 import하지
+        # 않았다면(비정상 상황) KeyError로 스케줄러 잡 자체를 죽이는 대신 경고만
+        # 남기고 넘어간다 — 이 잡은 스케줄러 프로세스 안에서 반복 실행되므로,
+        # 한 번 실패했다고 이후 실행까지 막히면 안 된다.
+        logger.warning(
+            "accumulation_screener job not found in REGISTRY (registered: %s) — skipping 20:00 run",
+            sorted(REGISTRY),
+        )
+        return
+    logger.info(
+        "scheduled accumulation-screener batch starting for %s (전 종목 순회, 70~90분 예상)",
+        target_date,
+    )
+    await run_job("accumulation_screener", target_date, collect_fn)
+
+
 def start_scheduler() -> AsyncIOScheduler:
     """Create, start, and return the module-level scheduler (idempotent)."""
     global _scheduler
@@ -194,12 +248,24 @@ def start_scheduler() -> AsyncIOScheduler:
         # 준다 — 이 잡도 하루 한 번뿐이라 "늦게라도 반드시 돈다"가 "정시"보다 중요하다.
         misfire_grace_time=3600,
     )
+    scheduler.add_job(
+        _run_accumulation_screener_job,
+        CronTrigger(day_of_week="mon-fri", hour=20, minute=0, timezone="Asia/Seoul"),
+        id="accumulation_screener_evening",
+        replace_existing=True,
+        # 18:00/07:30/19:30 잡과 같은 이유(모듈 docstring의 2026-07-22 버그 참고)로
+        # 넉넉히 준다 — 이 잡도 하루 한 번뿐이라 "늦게라도 반드시 돈다"가 "정시"보다
+        # 중요하다.
+        misfire_grace_time=3600,
+    )
     scheduler.start()
     _scheduler = scheduler
     logger.info(
-        "scheduler started: weekday 18:00 Asia/Seoul daily batch (%d jobs registered: %s) "
+        "scheduler started: weekday 18:00 Asia/Seoul daily batch (%d jobs registered: %s, "
+        "accumulation_screener excluded from this batch) "
         "+ weekday 07:30 Asia/Seoul macro-only catch-up (PLAN.md §5.22) "
-        "+ weekday 19:30 Asia/Seoul flow_rank-only catch-up (PLAN.md §5.46)",
+        "+ weekday 19:30 Asia/Seoul flow_rank-only catch-up (PLAN.md §5.46) "
+        "+ weekday 20:00 Asia/Seoul accumulation_screener-only run",
         len(REGISTRY),
         sorted(REGISTRY),
     )

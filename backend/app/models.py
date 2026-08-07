@@ -369,6 +369,39 @@ class ScalpPick(Base):
     change_rate_eod: Mapped[float | None] = mapped_column(Numeric(8, 4))
 
 
+class AccumulationPick(Base):
+    """개인 매도 / 외국인·기관 전환 매집 관찰 기록 — 관찰용 스크리너, 매매 신호
+    아님(quant/screener.py::evaluate_accumulation_pattern 참고).
+
+    사용자가 유한양행(000100) 실 데이터에서 발견한 패턴("개인은 계속 팔고
+    외국인/기관이 순매수로 전환하며 가격이 조용히 우상향")에 맞는 종목만
+    ``collectors/accumulation_screener.py``가 매일 저장한다(PK: date+code,
+    같은 날 재실행해도 upsert로 안전). ``date``는 그 관찰이 기준으로 삼은
+    stock_flow의 가장 최근 거래일이다(잡을 실제로 실행한 날짜가 아닐 수 있음
+    — 소스가 아직 그날 수급을 반영하지 못했으면 그 이전 거래일이 될 수 있다).
+
+    나머지 5개 수치 컬럼(``individual_net_10d``~``max_abs_daily_return_10d_pct``)은
+    ``evaluate_accumulation_pattern``에 그대로 넘겼던 입력값을 그대로 보존한 것
+    — 재계산 없이 그 시점 판정 근거를 그대로 다시 확인할 수 있게 한다.
+    ``reason``도 그 호출이 반환한 문장을 그대로 저장한다(평가 문구 없음, 관측값
+    서술만).
+    """
+
+    __tablename__ = "accumulation_pick"
+
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    market: Mapped[str | None] = mapped_column(String(10))
+    individual_net_10d: Mapped[float | None] = mapped_column(Numeric(18, 0))
+    foreign_inst_net_recent5d: Mapped[float | None] = mapped_column(Numeric(18, 0))
+    foreign_inst_net_prior5d: Mapped[float | None] = mapped_column(Numeric(18, 0))
+    price_return_10d_pct: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    max_abs_daily_return_10d_pct: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    reason: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class ShortSellingMarket(Base):
     """시장 전체(코스피/코스닥) 공매도 거래 현황 (PLAN.md §5.32) — KRX 정보데이터
     시스템 공매도 통계 포털(``clients/krx_short_selling.py`` 모듈 docstring
