@@ -316,22 +316,34 @@ def _parse_ka10059_rows(data: dict) -> list[dict]:
 
 
 async def _upsert_flow_rows(session: AsyncSession, code: str, rows: list[dict]) -> int:
-    count = 0
-    for row in rows:
-        stmt = pg_insert(StockFlow).values(
-            code=code,
-            date=row["date"],
-            investor=row["investor"],
-            net_value=row["net_value"],
-            net_volume=row["net_volume"],
-        )
-        stmt = stmt.on_conflict_do_update(
-            index_elements=[StockFlow.code, StockFlow.date, StockFlow.investor],
-            set_={"net_value": stmt.excluded.net_value, "net_volume": stmt.excluded.net_volume},
-        )
-        await session.execute(stmt)
-        count += 1
-    return count
+    """PLAN.md §5.60(2026-08-08) — 예전엔 row마다 `session.execute()`를 따로
+    호출했다(즉 최대 `FLOW_BACKFILL_DAYS`(90)일치 x 투자자 13종 ≈ 최대 780개
+    개별 DB 왕복). 종목 상세를 온디맨드로 한 번 여는 정도면 무해했지만,
+    `collectors/accumulation_screener.py`(§5.57, 전 종목 순회)가 이 함수를
+    코드마다 반복 호출하면서 실측으로 드러났다 — 2026-08-07 첫 실행이 예상
+    70~90분이 아니라 3시간 35분 걸렸다. 원인을 벤치마크로 직접 재현·확인:
+    같은 780행을 개별 execute로 upsert하면 1.557초, 하나의 다중값 INSERT ..
+    ON CONFLICT로 배치하면 0.172초(약 9배) — 실측치를 그대로 여기 남긴다.
+    동작(on_conflict_do_update 결과)은 완전히 동일하고 왕복 횟수만 준다."""
+    if not rows:
+        return 0
+    values = [
+        {
+            "code": code,
+            "date": row["date"],
+            "investor": row["investor"],
+            "net_value": row["net_value"],
+            "net_volume": row["net_volume"],
+        }
+        for row in rows
+    ]
+    stmt = pg_insert(StockFlow).values(values)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[StockFlow.code, StockFlow.date, StockFlow.investor],
+        set_={"net_value": stmt.excluded.net_value, "net_volume": stmt.excluded.net_volume},
+    )
+    await session.execute(stmt)
+    return len(rows)
 
 
 async def _ensure_flows_cached(session: AsyncSession, code: str) -> None:
