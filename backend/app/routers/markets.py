@@ -562,10 +562,21 @@ async def _warm_breadth_live(session: AsyncSession | None = None) -> dict:
 
     **2026-07-20 버그 수정**: 장 마감이면(``is_market_closed``) 네이버를 아예
     호출하지 않는다 — 예전에는 이 게이트가 없어 새벽에 탭을 열어둔 채로 폴링하면
-    계속 네이버를 두드리는 낭비가 있었다. 장 마감 시엔 ``session``이 있으면
-    market_breadth DB 확정치로 응답하고(``market_closed: true``), 세션이 없거나
-    DB에도 아직 없으면(배치 미실행) 빈 값 + ``market_closed: true``로 응답한다
-    (502가 아니다 — "소스 장애"와 "장 마감이라 아직 없음"은 다른 상태)."""
+    계속 네이버를 두드리는 낭비가 있었다.
+
+    **2026-08-10 버그 수정(PLAN.md 참고, 사용자 지적 — 장마감 후 18:00 배치 전까지
+    최대 3일 지난 정보가 나옴)**: 위 2026-07-20 수정이 "장 마감이면 무조건 DB
+    확정치"로 너무 광범위했다 — 정규장(15:30)은 끝났지만 그날 18:00 배치가 아직 안
+    돌았으면 market_breadth DB 확정치는 여전히 이전 거래일이다(주말이 끼면 최대
+    사흘 전으로 보인다). `_warm_index_tiles_live`의 2026-08-03 수정과 동일한
+    근거로(라이브 소스는 정규장 마감 뒤에도 그날 마지막 값을 그대로 유지함을 실측
+    확인) 장 마감이어도 DB 확정치의 date가 아직 오늘이 아닌 시장에 한해 네이버
+    라이브를 한 번 더 시도한다 — 확정치가 이미 오늘 날짜인 시장은(배치가 이미
+    돌았음) 라이브를 다시 부르지 않는다. 시장별로 독립 판단한다(코스피는 배치가
+    이미 돌았는데 코스닥만 안 돌았을 수도 있음). 세션이 없거나 확정치도 없고
+    라이브 재시도도 실패하면(배치 미실행 + 소스 장애) 빈 값 + ``market_closed:
+    true``로 응답한다(502가 아니다 — "소스 장애"와 "장 마감이라 아직 없음"은 다른
+    상태)."""
     now = time.monotonic()
     async with _live_cache_lock:
         cached = _live_cache["data"]
@@ -574,10 +585,21 @@ async def _warm_breadth_live(session: AsyncSession | None = None) -> dict:
 
         now_kst = dt.datetime.now(KST)
         if _market_closed_kst(now_kst):
+            today_str = now_kst.date().isoformat()
             result: dict[str, object] = {}
             if session is not None:
                 for market in ("kospi", "kosdaq"):
-                    result[market] = await _fetch_breadth_confirmed_for_market(session, market)
+                    confirmed = await _fetch_breadth_confirmed_for_market(session, market)
+                    if confirmed is not None and confirmed["date"] == today_str:
+                        result[market] = confirmed
+                        continue
+                    try:
+                        result[market] = await asyncio.to_thread(_fetch_breadth_blocking, market)
+                    except Exception as e:  # noqa: BLE001 - 라이브 재시도 실패는 확정치(또는 None)로 폴백
+                        logger.warning(
+                            "market_breadth_live: 장마감 라이브 재시도 실패(%s), 확정치 폴백: %s", market, e
+                        )
+                        result[market] = confirmed
             payload = {
                 "kospi": result.get("kospi"),
                 "kosdaq": result.get("kosdaq"),
@@ -616,8 +638,10 @@ async def market_breadth_live(session: AsyncSession = Depends(get_session)):
     60초 메모리 캐시로 감싼다. **market_breadth 테이블에는 절대 쓰지 않는다**
     (§3.5 "장중 값은 DB에 쌓지 않는다" 원칙 — 캐시는 프로세스 메모리에만 존재,
     읽기 전용 DB 폴백은 예외). 실제 캐시 채우기는 `_warm_breadth_live(session)`가
-    담당한다(live_refresh 스케줄러와 공유) — 장 마감이면 DB 확정치로 폴백하고
-    네이버는 호출하지 않는다(2026-07-20 버그 수정, 함수 docstring 참고).
+    담당한다(live_refresh 스케줄러와 공유) — 장 마감이면 우선 DB 확정치를 시장별로
+    확인해, 그 date가 이미 오늘이면 그대로 쓰고 아직 오늘이 아니면(18:00 배치
+    미실행) 네이버 라이브를 한 번 더 시도한 뒤 실패 시 확정치로 폴백한다
+    (2026-08-10 버그 수정, 함수 docstring 참고).
 
     Returns ``{"kospi": {...} | None, "kosdaq": {...} | None, "market_closed": bool,
     "cached_at": iso8601}``. 한 시장 조회가 실패하면 그 시장만 None, 다른 시장은
@@ -677,10 +701,21 @@ async def _warm_flow_live(session: AsyncSession) -> dict:
     자체적으로 연 세션을 전달한다.
 
     **2026-07-20 버그 수정**: 장 마감이면(``market_closed``) 키움 라이브 호출을
-    아예 시도하지 않고 곧바로 DB 확정치 폴백으로 진행한다 — 예전에는
+    아예 시도하지 않고 곧바로 DB 확정치 폴백으로 진행했다 — 예전에는
     ``market_closed``를 응답 메타데이터로만 쓰고 실제로는 장 마감 여부와 무관하게
     항상 키움을 먼저 호출했다(새벽에 탭을 열어두면 계속 키움을 두드리는 낭비/리스크).
-    장중이면 기존 동작 그대로(회귀 없음)."""
+
+    **2026-08-10 버그 수정(PLAN.md 참고, 사용자 지적 — 장마감 후 18:00 배치 전까지
+    최대 3일 지난 정보가 나옴)**: 위 2026-07-20 수정이 "장 마감이면 무조건 DB
+    확정치"로 너무 광범위했다 — 정규장(15:30)은 끝났지만 그날 18:00 배치가 아직 안
+    돌았으면 market_flow DB 확정치는 여전히 이전 거래일이다(주말이 끼면 최대 사흘
+    전으로 보인다). `_warm_index_tiles_live`의 2026-08-03 수정과 동일한 근거로
+    (라이브 소스는 정규장 마감 뒤에도 그날 마지막 값을 그대로 유지함을 실측 확인)
+    장 마감이어도 DB 확정치의 date가 아직 오늘이 아닌 시장에 한해 키움 라이브를
+    한 번 더 시도한다 — 확정치가 이미 오늘 날짜인 시장은(배치가 이미 돌았음)
+    라이브를 다시 부르지 않는다. 시장별로 독립 판단하되, 라이브가 필요한 시장이
+    하나라도 있으면 KiwoomClient 인스턴스 하나만 열어 재사용한다(이 파일의
+    "인스턴스 하나만 열고 재사용" 관례). 장중이면 기존 동작 그대로(회귀 없음)."""
     now = time.monotonic()
     async with _flow_live_cache_lock:
         cached = _flow_live_cache["data"]
@@ -693,15 +728,33 @@ async def _warm_flow_live(session: AsyncSession) -> dict:
 
         result: dict[str, dict | None] = {"kospi": None, "kosdaq": None}
         errors: dict[str, str] = {}
+        markets_needing_live: list[str] = ["kospi", "kosdaq"]
         if market_closed:
-            logger.debug(
-                "market_flow_live: 장 마감(%s KST) — 키움 라이브 호출 생략, DB 폴백으로 진행",
-                now_kst.isoformat(),
-            )
-        else:
+            today_str = today_kst.isoformat()
+            markets_needing_live = []
+            for market in ("kospi", "kosdaq"):
+                confirmed = await _fetch_flow_confirmed_for_market(session, market)
+                if confirmed is not None and confirmed["date"] == today_str:
+                    result[market] = confirmed
+                else:
+                    markets_needing_live.append(market)
+            if not markets_needing_live:
+                logger.debug(
+                    "market_flow_live: 장 마감(%s KST) — 두 시장 모두 확정치가 이미 오늘 날짜, "
+                    "키움 라이브 재시도 생략",
+                    now_kst.isoformat(),
+                )
+            else:
+                logger.debug(
+                    "market_flow_live: 장 마감(%s KST)이지만 확정치 미갱신 시장(%s) 키움 라이브 재시도",
+                    now_kst.isoformat(),
+                    markets_needing_live,
+                )
+
+        if markets_needing_live:
             try:
                 async with KiwoomClient() as client:
-                    for market in ("kospi", "kosdaq"):
+                    for market in markets_needing_live:
                         try:
                             result[market] = await _fetch_flow_live_for_market(client, market, today_kst)
                         except Exception as e:  # noqa: BLE001 - 한 시장 실패가 다른 시장을 막지 않도록
@@ -748,9 +801,10 @@ async def market_flow_live(session: AsyncSession = Depends(get_session)):
     캐시로 감싼다(모듈 docstring 참고 — ka10063 대신 이 TR을 쓰는 이유). 시장별로
     독립 처리해 한쪽이 실패해도 다른 쪽은 정상 반환하고, 라이브 호출이 실패한
     시장은 market_flow DB의 최신 확정치로 폴백한다(``provisional: false``).
-    두 시장 다 라이브·폴백 전부 실패하면 502. **장 마감이면 키움 호출 자체를
-    생략하고 곧바로 DB 확정치로 응답한다**(2026-07-20 버그 수정,
-    `_warm_flow_live` docstring 참고). 실제 캐시 채우기는
+    두 시장 다 라이브·폴백 전부 실패하면 502. **장 마감이면 DB 확정치의 date가
+    이미 오늘인 시장만 키움 호출을 생략**하고, 아직 오늘이 아닌 시장(18:00 배치
+    미실행)은 키움 라이브를 한 번 더 시도한 뒤 실패 시 확정치로 폴백한다
+    (2026-08-10 버그 수정, `_warm_flow_live` docstring 참고). 실제 캐시 채우기는
     `_warm_flow_live(session)`가 담당한다(live_refresh 스케줄러와 공유).
 
     Returns ``{"kospi": {...}|None, "kosdaq": {...}|None, "market_closed": bool,
@@ -1019,10 +1073,16 @@ async def _warm_fx_live(session: AsyncSession | None = None) -> dict:
     동일한 패턴). macro_series 테이블에는 절대 쓰지 않는다(§3.5 원칙 — EOD
     확정치는 collectors/macro.py 일별 배치가 그대로 담당).
 
-    장 마감이면 네이버 호출을 생략하고(다른 1분 티어 warm 함수와 동일한
-    원칙) macro_series DB 최신 확정치로 응답한다. 라이브 호출이 실패해도(네이버
-    비공식 API라 언제든 형태가 바뀔 수 있음) 같은 DB 폴백으로 넘어간다 —
-    breadth/live와 달리 두 경로 모두 세션이 필요하므로 세션이 없으면(호출자가
+    **2026-08-10 버그 수정(PLAN.md 참고, 사용자 지적 — 장마감 후 18:00 배치
+    전까지 최대 3일 지난 정보가 나옴)**: 이 함수는 원래 "장 마감이면 네이버 호출을
+    무조건 생략"이었다 — 이 docstring이 스스로 적어뒀듯 FX는 KRX 정규장과 무관한
+    시장이라 저녁 시간대엔 이 게이트가 과도하게 막을 수 있는 알려진 한계가 있었다.
+    `_warm_index_tiles_live`의 2026-08-03 수정과 동일한 근거로(라이브 소스는
+    정규장 마감 뒤에도 마지막 값을 그대로 유지함을 실측 확인) 장 마감이어도
+    macro_series 확정치의 date가 아직 오늘이 아니면(18:00 배치 미실행) 네이버
+    라이브를 한 번 더 시도한다 — 확정치가 이미 오늘 날짜면(배치가 이미 돌았음)
+    라이브를 다시 부르지 않는다. 라이브 재시도가 실패해도(네이버 비공식 API라
+    언제든 형태가 바뀔 수 있음) 같은 DB 폴백으로 넘어간다 — 세션이 없으면(호출자가
     안 넘긴 경우) 폴백 없이 usdkrw: None으로 응답한다."""
     now = time.monotonic()
     async with _fx_live_cache_lock:
@@ -1032,7 +1092,20 @@ async def _warm_fx_live(session: AsyncSession | None = None) -> dict:
 
         now_kst = dt.datetime.now(KST)
         if _market_closed_kst(now_kst):
-            usdkrw = await _fetch_fx_confirmed(session) if session is not None else None
+            confirmed = await _fetch_fx_confirmed(session) if session is not None else None
+            today_str = now_kst.date().isoformat()
+            if confirmed is not None and confirmed["date"] == today_str:
+                usdkrw = confirmed
+            else:
+                try:
+                    row = await asyncio.to_thread(_fetch_fx_latest_blocking)
+                except Exception as e:  # noqa: BLE001 - 비공식 API, 실패해도 DB 폴백으로 진행
+                    row = None
+                    logger.warning("fx_live: 장마감 라이브 재시도 실패, 확정치 폴백: %s", e)
+                if row is not None:
+                    usdkrw = {"date": row["date"].isoformat(), "value": row["value"], "source": "naver"}
+                else:
+                    usdkrw = confirmed
             payload = {
                 "usdkrw": usdkrw,
                 "market_closed": True,
@@ -1070,8 +1143,10 @@ async def market_fx_live(session: AsyncSession = Depends(get_session)):
     clients/naver_fx.py의 m.stock.naver.com front-api를 오늘 하루 구간으로
     온디맨드 재조회해 60초 메모리 캐시로 감싼다(macro_series DB에는 쓰지
     않는다 — §3.5 원칙, EOD 확정치는 collectors/macro.py 일별 배치가 그대로
-    담당). 장 마감이면 네이버 호출을 생략하고 macro_series 최신 확정치로
-    폴백한다(`_warm_fx_live` docstring 참고).
+    담당). 장 마감이면 먼저 macro_series 확정치를 확인해, 그 date가 이미 오늘이면
+    그대로 쓰고 아직 오늘이 아니면(18:00 배치 미실행) 네이버 라이브를 한 번 더
+    시도한 뒤 실패 시 확정치로 폴백한다(2026-08-10 버그 수정, `_warm_fx_live`
+    docstring 참고).
 
     Returns ``{"usdkrw": {"date", "value", "source"} | None, "market_closed":
     bool, "cached_at": iso8601}``.

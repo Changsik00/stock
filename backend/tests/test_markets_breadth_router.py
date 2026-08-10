@@ -228,27 +228,121 @@ async def test_market_breadth_live_502_when_both_markets_fail(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 장 마감 게이트 (2026-07-20 버그 수정) — 장 마감이면 naver_breadth를 아예 호출하지
-# 않고 market_breadth DB 확정치(있으면)로 폴백한다. 이 절의 테스트는 위
+# 장 마감 게이트 (2026-07-20 버그 수정, 2026-08-10 재수정) — 장 마감이면 먼저
+# market_breadth DB 확정치를 시장별로 확인한다. 확정치 date가 이미 오늘이면
+# (그날 18:00 배치가 이미 돌았음) 그대로 쓰고 naver_breadth를 다시 부르지
+# 않는다. 확정치 date가 아직 오늘이 아니면(배치 미실행, 사용자가 겪은 버그 —
+# "장마감 했는데 지수가 7일 전 정보") naver_breadth 라이브를 한 번 더 시도하고,
+# 그마저 실패하면 옛 확정치(또는 None)로 최종 폴백한다. 이 절의 테스트는 위
 # `_force_market_open` autouse fixture를 명시적으로 되돌려(monkeypatch로 실제
 # 게이트 로직을 다시 씌워) "닫힘"을 강제한다.
 # ---------------------------------------------------------------------------
 
 
-async def test_market_breadth_live_market_closed_uses_db_fallback(monkeypatch):
+def _today_kst_date() -> dt.date:
+    return dt.datetime.now(markets.KST).date()
+
+
+async def test_market_breadth_live_market_closed_skips_live_when_confirmed_is_today(monkeypatch):
+    """장 마감 + DB 확정치 date가 이미 오늘이면(그날 배치가 이미 돌았음) 두
+    시장 모두 naver_breadth 라이브를 다시 부르지 않는다."""
     monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: True)
 
     def fake_fetch(market):  # pragma: no cover - 불리면 안 됨
-        raise AssertionError("naver_breadth should not be called when market is closed")
+        raise AssertionError(f"naver_breadth should not be called for {market} when confirmed is already today's")
 
     monkeypatch.setattr(markets, "_fetch_breadth_blocking", fake_fetch)
 
-    kospi_rows = [
-        MarketBreadth(market="kospi", date=dt.date(2026, 7, 17), adv=400, dec=470, flat=38, limit_up=5, limit_down=1)
-    ]
-    # 순서: kospi max(date) -> kospi rows -> kosdaq max(date, 없음).
+    today = _today_kst_date()
+    kospi_rows = [MarketBreadth(market="kospi", date=today, adv=400, dec=470, flat=38, limit_up=5, limit_down=1)]
+    kosdaq_rows = [MarketBreadth(market="kosdaq", date=today, adv=500, dec=600, flat=50, limit_up=3, limit_down=2)]
+    # 순서: kospi max -> kospi rows -> kosdaq max -> kosdaq rows.
     results = [
-        _FakeScalarResult(dt.date(2026, 7, 17)),
+        _FakeScalarResult(today),
+        _FakeResult(kospi_rows),
+        _FakeScalarResult(today),
+        _FakeResult(kosdaq_rows),
+    ]
+    app.dependency_overrides[get_session] = _session_with_queue(results)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/breadth/live")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["market_closed"] is True
+    assert body["kospi"] == {
+        "date": today.isoformat(),
+        "adv": 400,
+        "dec": 470,
+        "flat": 38,
+        "limit_up": 5,
+        "limit_down": 1,
+    }
+    assert body["kosdaq"] == {
+        "date": today.isoformat(),
+        "adv": 500,
+        "dec": 600,
+        "flat": 50,
+        "limit_up": 3,
+        "limit_down": 2,
+    }
+
+
+async def test_market_breadth_live_market_closed_retries_live_when_confirmed_is_stale(monkeypatch):
+    """2026-08-10 버그 수정 — 사용자 지적("장마감 했는데 대시보드 지수가 7일
+    전 정보다"). 장 마감 + 확정치가 오늘 날짜가 아니면(18:00 배치 미실행) 곧바로
+    옛 확정치로 폴백하지 않고 naver_breadth 라이브를 한 번 더 시도해야 한다 —
+    라이브가 성공하면 옛 확정치가 아니라 라이브 값을 응답에 반영한다."""
+    monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: True)
+
+    def fake_fetch(market):
+        return KOSPI_LIVE if market == "kospi" else KOSDAQ_LIVE
+
+    monkeypatch.setattr(markets, "_fetch_breadth_blocking", fake_fetch)
+
+    stale_date = dt.date(2026, 7, 17)
+    kospi_rows = [MarketBreadth(market="kospi", date=stale_date, adv=1, dec=1, flat=1, limit_up=0, limit_down=0)]
+    kosdaq_rows = [MarketBreadth(market="kosdaq", date=stale_date, adv=2, dec=2, flat=2, limit_up=0, limit_down=0)]
+    results = [
+        _FakeScalarResult(stale_date),
+        _FakeResult(kospi_rows),
+        _FakeScalarResult(stale_date),
+        _FakeResult(kosdaq_rows),
+    ]
+    app.dependency_overrides[get_session] = _session_with_queue(results)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/breadth/live")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["market_closed"] is True
+    # 라이브 경로로 채워졌어야 한다 — 옛 확정치(adv=1/2)가 아니라 라이브 값이어야 한다.
+    assert body["kospi"] == KOSPI_LIVE
+    assert body["kosdaq"] == KOSDAQ_LIVE
+
+
+async def test_market_breadth_live_market_closed_stale_confirmed_falls_back_when_live_also_fails(monkeypatch):
+    """확정치도 옛날 날짜고 라이브 재시도도 실패하면(예: 정말 휴장일이라 오늘치
+    데이터가 아예 없음) 마지막 안전망으로 옛 확정치를 그대로 보여준다 — 502가
+    아니라 최선의 근사치."""
+    monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: True)
+
+    def fake_fetch(market):
+        raise RuntimeError("naver boom")
+
+    monkeypatch.setattr(markets, "_fetch_breadth_blocking", fake_fetch)
+
+    stale_date = dt.date(2026, 7, 17)
+    kospi_rows = [
+        MarketBreadth(market="kospi", date=stale_date, adv=400, dec=470, flat=38, limit_up=5, limit_down=1)
+    ]
+    # 순서: kospi max -> kospi rows(확정치는 이 값 그대로 재사용, 재조회 없음) ->
+    # kosdaq max(없음). 라이브 재시도가 실패하면 이미 들고 있던 확정치로 즉시
+    # 폴백하므로(재조회 없음) 큐는 시장당 정확히 한 번의 확정치 조회만 필요하다.
+    results = [
+        _FakeScalarResult(stale_date),
         _FakeResult(kospi_rows),
         _FakeScalarResult(None),
     ]
@@ -264,24 +358,47 @@ async def test_market_breadth_live_market_closed_uses_db_fallback(monkeypatch):
     assert body["kosdaq"] is None
 
 
-async def test_market_breadth_live_market_closed_no_db_returns_empty_not_502(monkeypatch):
+async def test_market_breadth_live_market_closed_no_db_and_live_fails_returns_none_not_502(monkeypatch):
+    """확정치도 없고(배치 한 번도 안 돎) 라이브 재시도도 실패하면 502가 아니라
+    None으로 응답한다 — "소스 장애"와 "장 마감이라 아직 없음"은 다른 상태."""
     monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: True)
 
-    def fake_fetch(market):  # pragma: no cover - 불리면 안 됨
-        raise AssertionError("naver_breadth should not be called when market is closed")
+    def fake_fetch(market):
+        raise RuntimeError("naver boom")
 
     monkeypatch.setattr(markets, "_fetch_breadth_blocking", fake_fetch)
 
-    # 배치가 한 번도 안 돌았다고 가정 — 두 시장 다 max(date)가 None.
+    # 배치가 한 번도 안 돌았다고 가정 — 두 시장 다 max(date)가 None(rows 조회 없음),
+    # 확정치는 시장당 한 번만 조회(재시도 실패 시 재조회 없이 그대로 폴백).
     results = [_FakeScalarResult(None), _FakeScalarResult(None)]
     app.dependency_overrides[get_session] = _session_with_queue(results)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/markets/breadth/live")
 
-    # 장 마감 + DB도 없음은 "소스 장애"가 아니라 "아직 없음"이므로 502가 아니다.
     assert resp.status_code == 200
     body = resp.json()
     assert body["market_closed"] is True
     assert body["kospi"] is None
     assert body["kosdaq"] is None
+
+
+async def test_market_breadth_live_market_open_unaffected_by_closed_gate(monkeypatch):
+    """장중(``market_closed=False``)이면 이번 수정과 무관하게 기존 동작 그대로
+    (회귀 없음) — 확정치 조회 자체를 건너뛰고 바로 라이브를 부른다."""
+    monkeypatch.setattr(markets, "_market_closed_kst", lambda now_kst: False)
+
+    def fake_fetch(market):
+        return KOSPI_LIVE if market == "kospi" else KOSDAQ_LIVE
+
+    monkeypatch.setattr(markets, "_fetch_breadth_blocking", fake_fetch)
+    app.dependency_overrides[get_session] = _unused_session_override()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/markets/breadth/live")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["market_closed"] is False
+    assert body["kospi"] == KOSPI_LIVE
+    assert body["kosdaq"] == KOSDAQ_LIVE
