@@ -1592,6 +1592,25 @@ header h1 {
   margin-top: 16px;
 }
 
+.stock-detail-program-trade-summary {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 2px 0 10px;
+}
+
+.stock-detail-program-trade-summary strong,
+.stock-detail-program-trade-summary span {
+  font-variant-numeric: tabular-nums;
+}
+
+.stock-detail-program-trade-summary .up {
+  color: var(--up);
+}
+
+.stock-detail-program-trade-summary .down {
+  color: var(--down);
+}
+
 .stock-detail-program-trade-list {
   display: flex;
   flex-direction: column;

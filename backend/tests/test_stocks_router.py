@@ -483,6 +483,14 @@ async def test_series_includes_program_trade_and_second_request_hits_cache(
     assert by_date[target_end.strftime("%Y%m%d")]["arb_net"] is None
     assert by_date[target_end.strftime("%Y%m%d")]["non_arb_net"] is None
 
+    # program_trade_summary: prev_day(+182002) -> target_end(-676861) 순으로
+    # 부호가 바뀌므로 스트릭은 -1(연속 순매도 1일). 두 행뿐이라 5/10일 누적 둘 다
+    # 두 값의 합과 같다.
+    summary = body1["program_trade_summary"]
+    assert summary["streak"] == -1
+    assert summary["cumulative_net_5d"] == 182002 + (-676861)
+    assert summary["cumulative_net_10d"] == 182002 + (-676861)
+
     # -- 두 번째 요청: DB 캐시가 최신(장 마감)이므로 ka90013을 다시 부르지 않는다 --
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp2 = await client.get(f"/api/stocks/{TEST_CODE}/series", params={"days": 30})
@@ -490,6 +498,7 @@ async def test_series_includes_program_trade_and_second_request_hits_cache(
     assert resp2.status_code == 200
     assert calls["program_trade_n"] == 1  # unchanged -> cache hit
     assert resp2.json()["program_trade"] == body1["program_trade"]
+    assert resp2.json()["program_trade_summary"] == body1["program_trade_summary"]
 
 
 async def test_series_program_trade_fetch_failure_is_partial_success_200(
@@ -530,6 +539,12 @@ async def test_series_program_trade_fetch_failure_is_partial_success_200(
     assert len(body["prices"]) == 1  # 캔들은 정상
     assert body["program_trade"] == []
     assert "program_trade_error" in body["meta"]
+    # program_trade가 빈 리스트면 요약도 "데이터 없음" 기본값이어야 한다.
+    assert body["program_trade_summary"] == {
+        "streak": 0,
+        "cumulative_net_5d": None,
+        "cumulative_net_10d": None,
+    }
 
 
 # -- 종목별 공매도 (KRX 정보데이터시스템, PLAN.md §5.32-3) ------------------------

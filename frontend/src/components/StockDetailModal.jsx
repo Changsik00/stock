@@ -347,7 +347,46 @@ function EtfWeightChangeSection({ data }) {
 // 집계, ka90010)과 소스/집계 단위가 다르다는 걸 오해하지 않도록 toggle-hint로
 // 명시한다. EtfWeightChangeSection과 동일한 관례로, 데이터가 없으면(신규 종목이라
 // 아직 백필 전이거나 조회 실패) 섹션 자체를 렌더하지 않는다.
-function ProgramTradeSection({ rows }) {
+// 프로그램매매 추세 요약(PLAN.md 참고 — 알테오젠(196170) 상세에서 사용자가
+// 지적한 "프로그램이 매수로 보이면 외인이 산 걸로 나온다" 패턴을 매 행을 하루씩
+// 읽지 않고 한눈에 보기 위한 요약 지표). 서버(`_compute_program_trade_summary`)가
+// 이미 계산해서 내려주는 값을 그대로 표시만 한다 — streak/누적 판정 로직을
+// 프런트에서 다시 만들지 않는다. 스트릭 부호(순매수=+/순매도=-)를 색상에
+// 그대로 반영하기 위해 eokClass를 재사용한다(원래 금액용이지만 부호만 보는
+// 순수 함수라 스트릭 정수에도 그대로 쓸 수 있다). house rule: 판단/추천 문구
+// 없이 관측값만 서술한다("매수 추천" 등 절대 넣지 않음).
+function ProgramTradeSummaryLine({ summary }) {
+  if (!summary) return null
+  const { streak, cumulative_net_5d, cumulative_net_10d } = summary
+  const streakLabel =
+    streak > 0
+      ? `연속 ${streak}일 순매수`
+      : streak < 0
+        ? `연속 ${Math.abs(streak)}일 순매도`
+        : '연속 순매수/순매도 없음'
+  const has5d = cumulative_net_5d !== null && cumulative_net_5d !== undefined
+  const has10d = cumulative_net_10d !== null && cumulative_net_10d !== undefined
+
+  return (
+    <div className="stock-detail-program-trade-summary">
+      <strong className={eokClass(streak)}>{streakLabel}</strong>
+      {has5d && (
+        <span>
+          {' '}
+          · 최근 5거래일 누적 <span className={eokClass(cumulative_net_5d)}>{eok(cumulative_net_5d)}</span>
+        </span>
+      )}
+      {has10d && (
+        <span>
+          {' '}
+          · 10거래일 누적 <span className={eokClass(cumulative_net_10d)}>{eok(cumulative_net_10d)}</span>
+        </span>
+      )}
+    </div>
+  )
+}
+
+function ProgramTradeSection({ rows, summary }) {
   const withData = (rows || []).filter((r) => r.total_net !== null && r.total_net !== undefined)
   if (withData.length === 0) return null
 
@@ -360,6 +399,7 @@ function ProgramTradeSection({ rows }) {
         합계만 제공됩니다 — 위 대시보드의 "프로그램 차익/비차익 순매수" 타일은 시장 전체 집계(ka90010)로 별개
         소스입니다.
       </div>
+      <ProgramTradeSummaryLine summary={summary} />
       <ul className="stock-detail-program-trade-list">
         {recent.map((r) => (
           <li className="stock-detail-program-trade-row" key={r.date}>
@@ -792,7 +832,7 @@ export default function StockDetailModal({ code, initial }) {
         </div>
       )}
 
-      <ProgramTradeSection rows={series?.program_trade} />
+      <ProgramTradeSection rows={series?.program_trade} summary={series?.program_trade_summary} />
 
       <ShortSellingSection rows={series?.short_selling} />
 

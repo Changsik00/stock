@@ -10,7 +10,11 @@
   캐시하고, 이미 최신 거래일 데이터가 있으면 외부 호출을 생략한다 — 같은 code를
   반복 요청해도 두 번째부터는 DB만 읽는다. ka90013은 차익/비차익 분리를 주지 않아
   (collectors/program_stock.py 모듈 docstring 참고) 응답의 `program_trade`
-  행은 `total_net`만 채워지고 `arb_net`/`non_arb_net`는 항상 null이다. 공매도
+  행은 `total_net`만 채워지고 `arb_net`/`non_arb_net`는 항상 null이다. 응답의
+  `program_trade_summary`는 `program_trade`를 요약한 추세 지표
+  (`quant/regime_backtest.py::next_streak`을 그대로 재사용한 연속 순매수/
+  순매도 일수 `streak`, 최근 5/10거래일 누적 순매수 `cumulative_net_5d`/
+  `cumulative_net_10d`) — 판단/추천이 아니라 관측값만 담는다. 공매도
   (`short_selling`)는 `clients/krx_short_selling.py` 모듈 docstring 참고 —
   대차잔고(대시보드 "대차잔고" 타일, macro_series.lending_balance)와는 별개
   지표다. `include_flow_percentile=true`(옵트인, PLAN.md §5.38)이면 응답에
@@ -81,6 +85,7 @@ from ..models import (
 )
 from ..quant.flow_percentile import compute_flow_percentiles
 from ..quant.investor_warning_status import classify_investor_warning_status
+from ..quant.regime_backtest import next_streak
 from ..quant.signals import (
     compute_vwap,
     detect_breakout,
@@ -415,26 +420,32 @@ async def _read_flows(session: AsyncSession, code: str, days: int) -> dict[str, 
 
 
 async def _upsert_program_trade_rows(session: AsyncSession, rows: list[dict]) -> int:
-    count = 0
-    for row in rows:
-        stmt = pg_insert(ProgramTrade).values(
-            code=row["code"],
-            date=row["date"],
-            arb_net=row["arb_net"],
-            non_arb_net=row["non_arb_net"],
-            total_net=row["total_net"],
-        )
-        stmt = stmt.on_conflict_do_update(
-            index_elements=[ProgramTrade.code, ProgramTrade.date],
-            set_={
-                "arb_net": stmt.excluded.arb_net,
-                "non_arb_net": stmt.excluded.non_arb_net,
-                "total_net": stmt.excluded.total_net,
-            },
-        )
-        await session.execute(stmt)
-        count += 1
-    return count
+    """PLAN.md §5.60(2026-08-08) — `_upsert_flow_rows`와 동일한 배치화(row마다
+    개별 `session.execute()` 대신 다중값 INSERT .. ON CONFLICT 하나로 묶는다,
+    동작(on_conflict_do_update 결과)은 완전히 동일)."""
+    if not rows:
+        return 0
+    values = [
+        {
+            "code": row["code"],
+            "date": row["date"],
+            "arb_net": row["arb_net"],
+            "non_arb_net": row["non_arb_net"],
+            "total_net": row["total_net"],
+        }
+        for row in rows
+    ]
+    stmt = pg_insert(ProgramTrade).values(values)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[ProgramTrade.code, ProgramTrade.date],
+        set_={
+            "arb_net": stmt.excluded.arb_net,
+            "non_arb_net": stmt.excluded.non_arb_net,
+            "total_net": stmt.excluded.total_net,
+        },
+    )
+    await session.execute(stmt)
+    return len(rows)
 
 
 async def _ensure_program_trade_cached(session: AsyncSession, code: str) -> None:
@@ -503,29 +514,71 @@ async def _read_program_trade(session: AsyncSession, code: str, days: int) -> li
     ]
 
 
-async def _upsert_short_selling_rows(session: AsyncSession, code: str, rows: list[dict]) -> int:
-    count = 0
+def _compute_program_trade_summary(rows: list[dict]) -> dict:
+    """program_trade 행 리스트(``_read_program_trade`` 출력, 날짜 오름차순)에서
+    연속 순매수/순매도 일수(스트릭)와 최근 5/10거래일 누적 순매수를 계산한다 —
+    사용자가 알테오젠(196170) 상세에서 지적한 "프로그램이 매수로 보이면 외인이
+    산 걸로 나온다" 패턴을 요약 지표로 보여주기 위함(PLAN.md 참고).
+
+    스트릭은 시장 전체 수급 스트릭과 동일한 판정 알고리즘인
+    ``quant/regime_backtest.py::next_streak``를 그대로 재사용한다(부호가 이전과
+    같으면 한 칸 더 누적, 바뀌면 ±1로 새로 시작, total_net이 None인 날은
+    건너뛴다) — 새 판단 로직을 따로 만들지 않는다.
+
+    Returns ``{"streak": int, "cumulative_net_5d": int|None, "cumulative_net_10d": int|None}``.
+    - streak: rows 전체(주어진 창 안)에 next_streak을 순서대로 적용한 최종값.
+      양수=연속 N일 순매수, 음수=연속 N일 순매도, 0=데이터 없음/누적 없음.
+    - cumulative_net_5d/10d: 가장 최근 5/10개 행(rows 끝에서부터)의 total_net
+      합계 — total_net이 전부 None이면 None, 일부만 None이면 있는 값만 합산한다.
+      rows가 5/10개보다 적으면 있는 만큼만 합산한다.
+    """
+    streak = 0
     for row in rows:
-        stmt = pg_insert(ShortSellingStock).values(
-            code=code,
-            date=row["date"],
-            volume=row["volume"],
-            value=row["value"],
-            balance_qty=row["balance_qty"],
-            balance_value=row["balance_value"],
-        )
-        stmt = stmt.on_conflict_do_update(
-            index_elements=[ShortSellingStock.code, ShortSellingStock.date],
-            set_={
-                "volume": stmt.excluded.volume,
-                "value": stmt.excluded.value,
-                "balance_qty": stmt.excluded.balance_qty,
-                "balance_value": stmt.excluded.balance_value,
-            },
-        )
-        await session.execute(stmt)
-        count += 1
-    return count
+        streak = next_streak(streak, row.get("total_net"))
+
+    def _sum_recent(n: int) -> int | None:
+        window = rows[-n:]
+        values = [r["total_net"] for r in window if r.get("total_net") is not None]
+        if not values:
+            return None
+        return sum(values)
+
+    return {
+        "streak": streak,
+        "cumulative_net_5d": _sum_recent(5),
+        "cumulative_net_10d": _sum_recent(10),
+    }
+
+
+async def _upsert_short_selling_rows(session: AsyncSession, code: str, rows: list[dict]) -> int:
+    """PLAN.md §5.60(2026-08-08) — `_upsert_flow_rows`와 동일한 배치화(row마다
+    개별 `session.execute()` 대신 다중값 INSERT .. ON CONFLICT 하나로 묶는다,
+    동작(on_conflict_do_update 결과)은 완전히 동일)."""
+    if not rows:
+        return 0
+    values = [
+        {
+            "code": code,
+            "date": row["date"],
+            "volume": row["volume"],
+            "value": row["value"],
+            "balance_qty": row["balance_qty"],
+            "balance_value": row["balance_value"],
+        }
+        for row in rows
+    ]
+    stmt = pg_insert(ShortSellingStock).values(values)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[ShortSellingStock.code, ShortSellingStock.date],
+        set_={
+            "volume": stmt.excluded.volume,
+            "value": stmt.excluded.value,
+            "balance_qty": stmt.excluded.balance_qty,
+            "balance_value": stmt.excluded.balance_value,
+        },
+    )
+    await session.execute(stmt)
+    return len(rows)
 
 
 async def _ensure_short_selling_cached(session: AsyncSession, code: str) -> None:
@@ -924,6 +977,7 @@ async def stock_series(
         meta["program_trade_error"] = str(e)[:300]
 
     program_trade = await _read_program_trade(session, code, days)
+    program_trade_summary = _compute_program_trade_summary(program_trade)
 
     try:
         await _ensure_short_selling_cached(session, code)
@@ -948,6 +1002,7 @@ async def stock_series(
         "meta": meta,
         "turnover": turnover,
         "program_trade": program_trade,
+        "program_trade_summary": program_trade_summary,
         "short_selling": short_selling,
         "investor_warning": investor_warning,
         **({"volume_profile": volume_profile_result} if include_volume_profile else {}),
