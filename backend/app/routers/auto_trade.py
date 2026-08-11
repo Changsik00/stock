@@ -1,11 +1,19 @@
 """GET/POST /api/auto-trade/* — 완전자동매매 엔진(SOL AI반도체TOP2플러스,
-0167A0, 트레일링 스탑) 상태 조회 · 킬스위치 · 매매일지 (PLAN.md §5.54).
+0167A0, 트레일링 스탑) 상태 조회 · 킬스위치 · 매매일지 · 수동 매수/매도
+(PLAN.md §5.54, §5.56).
 
-**이 라우터 자체는 주문을 내지 않는다** — 실제 주문(`place_buy_order`/
-`place_sell_order`)은 오직 `collectors/auto_trader.run_auto_trade`(60초 폴링,
-`collectors/live_refresh.py`에 배선)만 호출한다. 이 라우터는 그 엔진의 상태를
-조회하고(`GET /state`), 킬스위치를 켜고 끄고(`POST /toggle`), 감사 로그를
-읽는(`GET /log`) 세 가지만 한다.
+주기적 자동 감지·실행(`place_buy_order`/`place_sell_order` 호출)은 여전히
+오직 `collectors/auto_trader.run_auto_trade`/`watch_stop_loss`(60초/30초 폴링,
+`collectors/live_refresh.py`에 배선)만 담당한다 — 이 자동 감지 엔진 자체는
+이 라우터가 건드리지 않는다. 이 라우터는 그 엔진의 상태를 조회하고
+(`GET /state`), 킬스위치를 켜고 끄고(`POST /toggle`), 감사 로그를 읽고
+(`GET /log`), **추가로(PLAN.md §5.56, 2026-08-11)** 사용자가 대시보드에서
+직접 매수/매도를 실행할 수 있는 수동 개입 경로(`POST /manual-buy`,
+`POST /manual-sell`)를 제공한다 — 자동 감지를 대체하는 게 아니라 그 위에
+얹는 수동 버튼이다. `manual-buy`/`manual-sell` 둘 다 자동 엔진과 동일한
+`_position_lock`을 잡고, 동일한 안전장치(킬스위치는 진입에만 적용, 예산 가드,
+`_best_fill_price`/`_execute_sell` 재사용)를 그대로 따른다 — 아래 각 엔드포인트
+docstring 참고.
 
 `AutoTradeState`는 id=1 고정 싱글턴 행(마이그레이션이 `enabled=False`로 시드).
 행이 어떤 이유로든 없으면(마이그레이션 실행 전 등) 안전한 기본값(꺼짐)으로
@@ -13,14 +21,28 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+import datetime as dt
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..collectors.auto_trader import STATE_ID
+from ..clients.kiwoom import MAX_ORDER_NOTIONAL_KRW, KiwoomClient
+from ..collectors import intraday_snapshot
+from ..collectors.auto_trader import (
+    AUTO_TRADE_TOTAL_BUDGET_KRW,
+    STATE_ID,
+    TARGET_CODE,
+    TARGET_QTY,
+    _best_fill_price,
+    _execute_sell,
+    _log,
+    _position_lock,
+)
 from ..db import get_session
 from ..models import AutoTradeLog, AutoTradeState
+from ..quant.auto_trade_rules import check_entry_budget, foreign_flow_sign
 from .stocks import _warm_stock_intraday
 
 router = APIRouter(prefix="/api/auto-trade", tags=["auto-trade"])
@@ -111,6 +133,188 @@ async def toggle_auto_trade(body: AutoTradeToggle, session: AsyncSession = Depen
     await session.commit()
     await session.refresh(row)
     return _serialize_state(row, current_price=None)
+
+
+@router.post("/manual-buy")
+async def manual_buy_auto_trade(session: AsyncSession = Depends(get_session)) -> dict:
+    """사용자가 대시보드에서 직접 매수 버튼을 눌러 실행하는 수동 진입
+    (PLAN.md §5.54 위에 얹는 수동 개입 — 자동 감지 엔진 `run_auto_trade`/
+    `watch_stop_loss` 자체는 건드리지 않는다). 자동 진입 경로(`_handle_idle`)와
+    **동일한 안전장치(킬스위치, 예산 가드)를 전부 통과해야 하고, 동일한
+    `_position_lock`을 잡아 동시 자동 진입/청산과 경합하지 않는다.**
+
+    킬스위치가 꺼진 채로 수동 매수를 허용하면, 이후 그 포지션을 감시할
+    `run_auto_trade`/`watch_stop_loss`(둘 다 맨 첫 줄에서 `state.enabled`를
+    확인하고 꺼져 있으면 손절 판정조차 하지 않는다)도 함께 꺼진 상태가 돼
+    포지션이 무방비로 남는다 — 그래서 킬스위치가 꺼져 있으면 수동 매수도
+    거부한다(우회 경로 없음).
+
+    검증 순서(하나라도 실패하면 주문 시도 자체를 하지 않고 에러 응답):
+    1. 킬스위치 꺼짐 -> 409.
+    2. status가 "idle"이 아님(이미 보유 중) -> 409.
+    3. 현재가 조회 실패 -> 502.
+    4. `check_entry_budget`(누적 예산 25,000원 + 주문 1건 캡 5만원 둘 다) 실패 -> 400.
+    5. 키움 주문 자체가 실패(예외) -> 502, 상태는 갱신하지 않고 `event_type="error"` 로그만 남김.
+
+    통과하면 `_best_fill_price`(매도 1호가)로 지정가를 산출해 `place_buy_order`를
+    호출하고, `_handle_idle`이 매수 성공 후 하는 것과 동일하게 state를 갱신한다
+    (status="holding", entry_price/entry_qty/entry_at/entry_order_no,
+    entry_foreign_flow_sign까지). `AutoTradeLog`에 `event_type="manual_entry"`로
+    기록한다.
+
+    Returns 갱신된 state(`GET /state`와 동일한 직렬화 형태)."""
+    async with _position_lock:
+        state = await _get_or_create_state(session)
+
+        if not state.enabled:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "킬스위치가 꺼져 있어 신규 진입 불가 — 수동 매수도 킬스위치를 우회하지 "
+                    "않습니다(킬스위치가 꺼진 채로 진입하면 이후 자동 손절/청산 감시도 함께 "
+                    "꺼진 상태라 포지션이 무방비로 남기 때문). 먼저 킬스위치를 켜세요."
+                ),
+            )
+        if state.status != "idle":
+            raise HTTPException(
+                status_code=409,
+                detail=f"이미 보유 중(status={state.status!r})이라 수동 매수 불가 — 한 번에 포지션 하나만 허용합니다.",
+            )
+
+        code = state.code or TARGET_CODE
+
+        try:
+            intraday = await _warm_stock_intraday(code, 1)
+        except Exception as e:  # noqa: BLE001 - 조회 실패는 명확한 에러로 응답, 주문 시도 안 함
+            raise HTTPException(status_code=502, detail=f"현재가 조회 실패: {e}") from e
+
+        bars = intraday.get("bars") if intraday else None
+        if not bars:
+            raise HTTPException(status_code=502, detail="현재가 데이터 없음(장 마감 등) — 수동 매수 불가")
+
+        current_price = bars[-1]["close"]
+        notional = TARGET_QTY * current_price
+        if not check_entry_budget(state.status, notional, AUTO_TRADE_TOTAL_BUDGET_KRW, MAX_ORDER_NOTIONAL_KRW):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"예산 가드 실패: notional={notional}(qty={TARGET_QTY} x price={current_price}), "
+                    f"budget={AUTO_TRADE_TOTAL_BUDGET_KRW}, max_order_notional={MAX_ORDER_NOTIONAL_KRW}"
+                ),
+            )
+
+        try:
+            async with KiwoomClient() as client:
+                order_price = await _best_fill_price(client, code, "buy")
+                if order_price is None:
+                    raise RuntimeError("매도호가를 확인할 수 없어 주문가를 정할 수 없음")
+                order_response = await client.place_buy_order(code, TARGET_QTY, int(order_price))
+        except Exception as e:  # noqa: BLE001 - 주문 실패는 상태 변경 없이 로그만
+            await _log(
+                session,
+                event_type="error",
+                code=code,
+                price=current_price,
+                reason=f"수동 매수 주문 시도 실패: {e}",
+                signal_snapshot={"current_price": current_price, "source": "manual"},
+            )
+            raise HTTPException(status_code=502, detail=f"매수 주문 실패: {e}") from e
+
+        now = dt.datetime.now(dt.timezone.utc)
+        state.status = "holding"
+        state.entry_price = order_price
+        state.entry_qty = TARGET_QTY
+        state.entry_at = now
+        state.entry_order_no = str(order_response.get("ord_no")) if order_response.get("ord_no") else None
+        state.peak_price = None
+
+        # `_handle_idle`과 동일 — 진입 시점 외인 현물 누적 순매수 부호를 기록해
+        # 둔다(이후 반전 감지용). 조회 실패해도 진입 자체는 이미 체결됐으니 막지 않는다.
+        try:
+            foreign_series = await intraday_snapshot.get_foreign_position_series(session, days=1)
+            spot_points = foreign_series.get("spot") or []
+            entry_flow_value = spot_points[-1]["value"] if spot_points else None
+        except Exception:  # noqa: BLE001 - 조회 실패는 기록 생략, 진입 자체는 계속 진행
+            entry_flow_value = None
+        state.entry_foreign_flow_sign = foreign_flow_sign(entry_flow_value)
+
+        await session.commit()
+        await session.refresh(state)
+
+        await _log(
+            session,
+            event_type="manual_entry",
+            code=code,
+            price=order_price,
+            reason=(
+                f"사용자가 대시보드에서 수동으로 매수 주문을 실행함(지정가 {order_price}원, "
+                f"{TARGET_QTY}주), 진입 시점 외인 현물 수급 부호={state.entry_foreign_flow_sign!r}"
+            ),
+            signal_snapshot={"current_price": current_price, "source": "manual"},
+            order_response=order_response,
+        )
+
+        return _serialize_state(state, current_price=order_price)
+
+
+@router.post("/manual-sell")
+async def manual_sell_auto_trade(session: AsyncSession = Depends(get_session)) -> dict:
+    """사용자가 대시보드에서 직접 매도 버튼을 눌러 실행하는 수동 청산. **킬스위치
+    상태는 확인하지 않는다** — 매도(청산)는 이 프로젝트의 절대 원칙대로 항상
+    최우선/무조건 허용된다(킬스위치가 꺼져 있어도 보유 포지션은 팔 수 있어야
+    한다). `_position_lock`을 잡아 자동 손절/트레일청산과 동시에 중복 매도가
+    나가지 않게 한다.
+
+    검증: status가 "holding"/"trailing"이 아니면 -> 409(보유 중이 아님).
+
+    통과하면 손절/트레일청산/강제청산이 전부 공유하는 `_execute_sell`을 그대로
+    호출한다(재구현 없음) — `event_type="exit_manual"`, reason은 평가 문구 없는
+    사실 서술만. 주문 자체가 실패하면(`_execute_sell` 내부에서 이미
+    `event_type="error"` 로그를 남기고 상태는 건드리지 않는다) 502로 응답한다.
+
+    Returns 갱신된 state(`GET /state`와 동일한 직렬화 형태)."""
+    async with _position_lock:
+        state = await _get_or_create_state(session)
+
+        if state.status not in ("holding", "trailing"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"보유 중이 아님(status={state.status!r})이라 수동 매도 불가",
+            )
+
+        code = state.code or TARGET_CODE
+
+        # 자동매매 폴링과 동일한 방식으로 현재가를 조회한다(로그/스냅샷 용도 —
+        # 실제 매도 주문가는 _execute_sell 내부의 _best_fill_price가 별도로
+        # 실시간 호가를 조회해 정한다). 조회 실패해도 매도 자체는 막지 않는다
+        # (매도는 항상 최우선 허용 원칙 — 가격 조회 실패로 매도가 막히면 안 됨).
+        current_price = None
+        try:
+            intraday = await _warm_stock_intraday(code, 1)
+            bars = intraday.get("bars") if intraday else None
+            current_price = bars[-1]["close"] if bars else None
+        except Exception:  # noqa: BLE001 - 조회 실패해도 매도는 계속 진행
+            current_price = None
+        if current_price is None:
+            current_price = float(state.entry_price) if state.entry_price is not None else 0.0
+
+        signal_snapshot = {"current_price": current_price, "source": "manual"}
+        result: dict = {}
+        await _execute_sell(
+            session,
+            state,
+            code,
+            current_price,
+            "exit_manual",
+            "사용자가 대시보드에서 수동으로 매도 주문을 실행함",
+            signal_snapshot,
+            result,
+        )
+        if result.get("action") == "sell_failed":
+            raise HTTPException(status_code=502, detail=f"매도 주문 실패: {result.get('error')}")
+
+        await session.refresh(state)
+        return _serialize_state(state, current_price=None)
 
 
 @router.get("/log")

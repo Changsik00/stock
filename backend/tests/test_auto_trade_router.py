@@ -18,10 +18,12 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 
+from app.collectors import auto_trader as auto_trader_module
 from app.collectors.auto_trader import STATE_ID
 from app.db import async_session_factory, engine
 from app.models import AutoTradeLog, AutoTradeState
 from app.routers import auto_trade
+from tests.test_auto_trader_collector import FAKE_QUOTE_RAW, _FakeKiwoomClient
 
 
 def _make_app() -> FastAPI:
@@ -38,6 +40,21 @@ async def _current_max_log_id() -> int:
 
 @pytest.fixture(autouse=True)
 async def _snapshot_and_restore_state():
+    """싱글턴 AutoTradeState(id=1) 행을 스냅샷/복원한다(test_auto_trader_collector.py와
+    동일한 패턴).
+
+    **2026-08-11 안전장치 추가(실사고 직후)**: `test_toggle_on_preserves_existing_
+    holding_position`은 "킬스위치를 켜도 보유 포지션이 보존되는지" 검증하려고
+    실제 `POST /toggle {"enabled": true}`를 호출해 이 싱글턴 행에
+    `enabled=True` + `status="holding"`을 실제로 커밋한다 — 이 저장소는 실
+    배포된 백엔드 컨테이너가 60초/30초 간격으로 계속 폴링하는 바로 그 dev
+    Postgres를 테스트도 그대로 쓴다. 진짜 킬스위치가 켜진 채로 이 파일을
+    돌리면 그 커밋 찰나에 운영 중인 백그라운드 잡이 이를 진짜 포지션으로 읽고
+    실제 매도 주문을 시도할 수 있다 — 2026-08-11 실측으로 정확히 재현됐다
+    (그 시점 실계좌가 0주 보유라 키움이 "매도가능수량 부족"으로 거부해 실피해는
+    없었지만, 계좌가 실제로 포지션을 들고 있었다면 진짜 손절/청산이 나갔을
+    것이다). 그래서 테스트 시작 전 실제 킬스위치가 켜져 있으면 아예 테스트를
+    거부한다 — 조용히 넘어가면 다음에 또 같은 사고가 날 수 있다."""
     async with async_session_factory() as session:
         row = await session.get(AutoTradeState, STATE_ID)
         snapshot = (
@@ -54,6 +71,17 @@ async def _snapshot_and_restore_state():
             }
             if row is not None
             else None
+        )
+
+    if snapshot is not None and snapshot["enabled"]:
+        pytest.fail(
+            "실제 킬스위치(AutoTradeState.enabled)가 켜져 있는 상태로는 이 테스트 파일을 "
+            "돌릴 수 없습니다 — test_toggle_on_preserves_existing_holding_position이 실제 "
+            "이 싱글턴 행에 enabled=True + status=holding을 커밋하는 순간, 실 배포된 "
+            "백엔드가 이를 진짜 포지션으로 읽고 실제 주문을 시도할 위험이 있습니다"
+            "(2026-08-11 실측으로 재현된 사고). 먼저 "
+            "`POST /api/auto-trade/toggle {\"enabled\": false}`로 킬스위치를 끄고 다시 "
+            "실행하세요."
         )
 
     start_max_log_id = await _current_max_log_id()
@@ -110,6 +138,45 @@ async def _set_state(**kwargs) -> None:
         for k, v in defaults.items():
             setattr(row, k, v)
         await session.commit()
+
+
+async def _get_state() -> AutoTradeState:
+    async with async_session_factory() as session:
+        return await session.get(AutoTradeState, STATE_ID)
+
+
+async def _log_rows_since(start_max_log_id: int) -> list[AutoTradeLog]:
+    async with async_session_factory() as session:
+        result = await session.execute(
+            select(AutoTradeLog).where(AutoTradeLog.id > start_max_log_id).order_by(AutoTradeLog.id)
+        )
+        return list(result.scalars().all())
+
+
+def _patch_kiwoom_client(monkeypatch) -> type[_FakeKiwoomClient]:
+    """**중요**: `manual-buy`는 `app.routers.auto_trade` 모듈 안에서 직접
+    `KiwoomClient()`를 호출하지만, `manual-sell`은 `collectors/auto_trader.py`의
+    기존 `_execute_sell`을 그대로 재사용한다 — 그 함수 몸체는 자기 모듈
+    (`app.collectors.auto_trader`)의 전역 네임스페이스에 바인딩된 `KiwoomClient`를
+    참조하므로, 라우터 모듈만 몽키패치하면 `manual-sell` 경로는 여전히 실제
+    `KiwoomClient`(실거래 API)를 호출한다. 두 모듈 모두 패치해야 어느 경로로
+    테스트하든 절대 실제 키움 API를 건드리지 않는다."""
+    _FakeKiwoomClient.instances = []
+    monkeypatch.setattr(auto_trade, "KiwoomClient", _FakeKiwoomClient)
+    monkeypatch.setattr(auto_trader_module, "KiwoomClient", _FakeKiwoomClient)
+    return _FakeKiwoomClient
+
+
+def _raising_kiwoom_client_factory(*args, **kwargs):  # pragma: no cover - 호출되면 안 됨
+    raise AssertionError(
+        "KiwoomClient()가 호출됐다 — 검증 단계에서 거부돼야 할 요청이 주문 시도까지 이어졌다"
+    )
+
+
+def _patch_raising_kiwoom_client(monkeypatch) -> None:
+    """`_patch_kiwoom_client`와 동일한 이유로 두 모듈 모두 패치한다."""
+    monkeypatch.setattr(auto_trade, "KiwoomClient", _raising_kiwoom_client_factory)
+    monkeypatch.setattr(auto_trader_module, "KiwoomClient", _raising_kiwoom_client_factory)
 
 
 # ---------------------------------------------------------------------------
@@ -254,3 +321,315 @@ async def test_get_log_respects_limit():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/auto-trade/log?limit=2")
     assert len(resp.json()["rows"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# POST /api/auto-trade/manual-buy (PLAN.md §5.56 — 자동 감지 엔진 위에 얹는
+# 수동 매수 버튼. 자동 진입 경로(_handle_idle)와 동일한 안전장치를 검증한다.)
+# ---------------------------------------------------------------------------
+
+
+async def test_manual_buy_rejected_when_kill_switch_off(monkeypatch):
+    """수동 매수도 킬스위치를 우회하지 않는다 — 꺼져 있으면 가격 조회/주문
+    시도 자체를 하지 않는다(KiwoomClient 인스턴스화 자체가 없음으로 검증)."""
+    await _set_state(enabled=False, status="idle")
+    # `_default_intraday_fails` autouse 픽스처가 이미 _warm_stock_intraday를 항상
+    # 실패하도록 몽키패치해 둔다 — 킬스위치 검증이 그보다 먼저 걸려야 하므로
+    # 이 함수가 호출되면 애초에 이 테스트가 다른 이유(가격 조회 실패)로 실패한다.
+    _patch_raising_kiwoom_client(monkeypatch)
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/auto-trade/manual-buy")
+
+    assert resp.status_code == 409
+    assert "킬스위치" in resp.json()["detail"]
+    state = await _get_state()
+    assert state.status == "idle"
+    assert state.entry_price is None
+
+
+async def test_manual_buy_rejected_when_already_holding(monkeypatch):
+    await _set_state(enabled=True, status="holding", entry_price=16000, entry_qty=1)
+    _patch_raising_kiwoom_client(monkeypatch)
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/auto-trade/manual-buy")
+
+    assert resp.status_code == 409
+    assert "이미 보유" in resp.json()["detail"]
+
+
+async def test_manual_buy_rejected_when_budget_exceeded(monkeypatch):
+    await _set_state(enabled=True, status="idle")
+    from app.collectors.auto_trader import AUTO_TRADE_TOTAL_BUDGET_KRW
+
+    high_price = AUTO_TRADE_TOTAL_BUDGET_KRW + 5000
+
+    async def fake_intraday(code, interval):
+        return {"bars": [{"close": float(high_price)}]}
+
+    monkeypatch.setattr(auto_trade, "_warm_stock_intraday", fake_intraday)
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/auto-trade/manual-buy")
+
+    assert resp.status_code == 400
+    assert "예산 가드" in resp.json()["detail"]
+    assert fake_cls.instances == []  # 주문 시도 자체가 없어야 함
+
+    state = await _get_state()
+    assert state.status == "idle"
+
+
+async def test_manual_buy_success_places_order_and_updates_state(monkeypatch):
+    await _set_state(enabled=True, status="idle")
+
+    async def fake_intraday(code, interval):
+        assert code == "0167A0"
+        return {"bars": [{"close": 16000.0}]}
+
+    monkeypatch.setattr(auto_trade, "_warm_stock_intraday", fake_intraday)
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    start_max_log_id = await _current_max_log_id()
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/auto-trade/manual-buy")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "holding"
+    assert body["entry_price"] == pytest.approx(16100.0)  # 매도1호가(FAKE_QUOTE_RAW)로 지정가 매수
+
+    fake = fake_cls.instances[-1]
+    assert fake.buy_calls == [("0167A0", 1, 16100)]
+    assert fake.sell_calls == []
+
+    state = await _get_state()
+    assert state.status == "holding"
+    assert float(state.entry_price) == pytest.approx(16100.0)
+    assert state.entry_qty == 1
+    assert state.entry_order_no == "0099001"
+
+    logs = await _log_rows_since(start_max_log_id)
+    assert len(logs) == 1
+    assert logs[0].event_type == "manual_entry"
+    assert "사용자가 대시보드에서 수동으로 매수" in logs[0].reason
+
+
+async def test_manual_buy_order_failure_keeps_state_idle(monkeypatch):
+    await _set_state(enabled=True, status="idle")
+
+    async def fake_intraday(code, interval):
+        return {"bars": [{"close": 16000.0}]}
+
+    monkeypatch.setattr(auto_trade, "_warm_stock_intraday", fake_intraday)
+
+    class _FailingBuyClient(_FakeKiwoomClient):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.buy_error = RuntimeError("kiwoom 500")
+
+    _FakeKiwoomClient.instances = []
+    monkeypatch.setattr(auto_trade, "KiwoomClient", _FailingBuyClient)
+
+    start_max_log_id = await _current_max_log_id()
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/auto-trade/manual-buy")
+
+    assert resp.status_code == 502
+    state = await _get_state()
+    assert state.status == "idle"
+    assert state.entry_price is None
+
+    logs = await _log_rows_since(start_max_log_id)
+    assert len(logs) == 1
+    assert logs[0].event_type == "error"
+
+
+# ---------------------------------------------------------------------------
+# POST /api/auto-trade/manual-sell — 매도는 킬스위치 상태와 무관하게 항상
+# 허용된다는 절대 원칙을 검증하는 케이스가 핵심.
+# ---------------------------------------------------------------------------
+
+
+async def test_manual_sell_rejected_when_idle(monkeypatch):
+    await _set_state(enabled=True, status="idle")
+    _patch_raising_kiwoom_client(monkeypatch)
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/auto-trade/manual-sell")
+
+    assert resp.status_code == 409
+    assert "보유 중이 아님" in resp.json()["detail"]
+
+
+async def test_manual_sell_succeeds_even_when_kill_switch_off(monkeypatch):
+    """핵심 케이스 — 매도는 킬스위치 상태와 무관하게 항상 허용돼야 한다.
+    킬스위치가 꺼져 있어도(따라서 자동 손절/청산 감시도 함께 꺼져 있어도)
+    사용자가 수동으로 보유 포지션을 팔 수 있어야 한다."""
+    await _set_state(enabled=False, status="holding", entry_price=16000, entry_qty=1)
+
+    async def fake_intraday(code, interval):
+        return {"bars": [{"close": 16000.0}]}
+
+    monkeypatch.setattr(auto_trade, "_warm_stock_intraday", fake_intraday)
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    start_max_log_id = await _current_max_log_id()
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/auto-trade/manual-sell")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "idle"
+
+    fake = fake_cls.instances[-1]
+    assert fake.sell_calls == [("0167A0", 1, 16050)]  # 매수1호가로 지정가 매도
+
+    state = await _get_state()
+    assert state.status == "idle"
+    assert state.entry_price is None
+    assert state.enabled is False  # 킬스위치 자체는 매도로 인해 변하지 않음
+
+    logs = await _log_rows_since(start_max_log_id)
+    assert len(logs) == 1
+    assert logs[0].event_type == "exit_manual"
+    assert "사용자가 대시보드에서 수동으로 매도" in logs[0].reason
+
+
+async def test_manual_sell_success_while_trailing_and_enabled(monkeypatch):
+    await _set_state(enabled=True, status="trailing", entry_price=16000, entry_qty=1, peak_price=16500)
+
+    async def fake_intraday(code, interval):
+        return {"bars": [{"close": 16400.0}]}
+
+    monkeypatch.setattr(auto_trade, "_warm_stock_intraday", fake_intraday)
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/auto-trade/manual-sell")
+
+    assert resp.status_code == 200
+    state = await _get_state()
+    assert state.status == "idle"
+    assert state.peak_price is None
+    fake = fake_cls.instances[-1]
+    assert fake.sell_calls == [("0167A0", 1, 16050)]
+
+
+async def test_manual_sell_order_failure_keeps_state_holding(monkeypatch):
+    await _set_state(enabled=True, status="holding", entry_price=16000, entry_qty=1)
+
+    async def fake_intraday(code, interval):
+        return {"bars": [{"close": 16000.0}]}
+
+    monkeypatch.setattr(auto_trade, "_warm_stock_intraday", fake_intraday)
+
+    class _FailingSellClient(_FakeKiwoomClient):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.sell_error = RuntimeError("kiwoom 500")
+
+    _FakeKiwoomClient.instances = []
+    monkeypatch.setattr(auto_trade, "KiwoomClient", _FailingSellClient)
+    monkeypatch.setattr(auto_trader_module, "KiwoomClient", _FailingSellClient)
+
+    start_max_log_id = await _current_max_log_id()
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/auto-trade/manual-sell")
+
+    assert resp.status_code == 502
+    state = await _get_state()
+    assert state.status == "holding"
+    assert float(state.entry_price) == pytest.approx(16000.0)
+
+    logs = await _log_rows_since(start_max_log_id)
+    assert len(logs) == 1
+    assert logs[0].event_type == "error"
+
+
+# ---------------------------------------------------------------------------
+# _position_lock을 실제로 잡는지 검증.
+#
+# **시도했다가 되돌린 접근**: 처음에는 `test_auto_trader_collector.py::
+# test_watch_and_run_auto_trade_do_not_double_sell_concurrently`처럼 두 개의
+# 실제 동시 세션(`asyncio.gather`)이 같은 `_position_lock`을 놓고 실제로
+# 경합하게 만들어 "중복 주문 없음"까지 함께 검증하려 했다. 이 프로세스에서는
+# 그 방식이 이 모듈 레벨 `asyncio.Lock`에 실제 대기자(waiter)를 만들었고,
+# 그 부작용(sqlalchemy 엔진 커넥션 풀 상태 오염, `IllegalStateChangeError`)이
+# 같은 pytest 프로세스에서 나중에 도는 위 collector 테스트(동일한 락으로
+# 동일한 패턴을 검증하는 기존 테스트)를 깨뜨리는 것을 재현 확인했다 — 즉
+# 두 테스트가 같은 전역 락 객체에 대해 각자 독립적으로 경합을 만드는 것
+# 자체가 이 pytest-asyncio 환경에서 안전하지 않았다. 실거래 코드가 걸린
+# 테스트 스위트 전체의 안정성이 이 하나의 "있으면 좋은" 동시성 테스트보다
+# 중요하므로, 실제 경합 대신 아래처럼 락의 `acquire`를 스파이(spy)해서
+# "이 엔드포인트가 이 락을 잡는다"는 사실만 경합 없이 검증한다. 중복 주문
+# 방지 자체는 이미 `_execute_sell`/`_position_lock`을 통째로 재사용하는
+# 설계(재구현 없음)로 collector 테스트가 이미 그 락의 직렬화 동작을
+# 검증해 두었다 — 이 라우터가 같은 락 인스턴스를 잡는지만 확인하면 충분하다.
+# ---------------------------------------------------------------------------
+
+
+def _spy_lock_acquire(monkeypatch) -> list[int]:
+    """`_position_lock.acquire`가 실제로 호출되는지 카운트한다(경합 없이,
+    원래 동작은 그대로 위임) — 새 waiter를 만들지 않으므로 다른 테스트의
+    락 상태에 영향을 주지 않는다."""
+    calls: list[int] = []
+    orig_acquire = auto_trader_module._position_lock.acquire
+
+    async def spy_acquire():
+        calls.append(1)
+        return await orig_acquire()
+
+    monkeypatch.setattr(auto_trader_module._position_lock, "acquire", spy_acquire)
+    return calls
+
+
+async def test_manual_sell_acquires_position_lock(monkeypatch):
+    await _set_state(enabled=True, status="holding", entry_price=16000, entry_qty=1)
+
+    async def fake_intraday(code, interval):
+        return {"bars": [{"close": 16000.0}]}
+
+    monkeypatch.setattr(auto_trade, "_warm_stock_intraday", fake_intraday)
+    _patch_kiwoom_client(monkeypatch)
+    lock_calls = _spy_lock_acquire(monkeypatch)
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/auto-trade/manual-sell")
+
+    assert resp.status_code == 200
+    assert lock_calls == [1]  # 이 엔드포인트가 collectors/auto_trader._position_lock을 잡았다
+
+
+async def test_manual_buy_acquires_position_lock(monkeypatch):
+    await _set_state(enabled=True, status="idle")
+
+    async def fake_intraday(code, interval):
+        return {"bars": [{"close": 16000.0}]}
+
+    monkeypatch.setattr(auto_trade, "_warm_stock_intraday", fake_intraday)
+    _patch_kiwoom_client(monkeypatch)
+    lock_calls = _spy_lock_acquire(monkeypatch)
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/auto-trade/manual-buy")
+
+    assert resp.status_code == 200
+    assert lock_calls == [1]  # 이 엔드포인트가 collectors/auto_trader._position_lock을 잡았다

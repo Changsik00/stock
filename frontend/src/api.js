@@ -667,3 +667,19 @@ export async function toggleAutoTrade(enabled) {
 export async function fetchAutoTradeLog(limit = 200) {
   return getJson(`/api/auto-trade/log?limit=${limit}`)
 }
+
+// POST /api/auto-trade/manual-buy -> 갱신된 state(GET /state와 동일 모양).
+// 자동 감지 엔진(run_auto_trade/watch_stop_loss) 위에 얹는 수동 매수 버튼 —
+// 서버가 킬스위치/status/예산 가드를 전부 다시 검증하므로(우회 경로 없음)
+// 이 함수는 그냥 호출만 한다. 실패 시(킬스위치 꺼짐/이미 보유중/예산 초과/
+// 주문 실패 등) throw된 Error의 message에 서버 detail 문구가 그대로 담긴다.
+export async function manualBuyAutoTrade() {
+  return postJson('/api/auto-trade/manual-buy', {})
+}
+
+// POST /api/auto-trade/manual-sell -> 갱신된 state(GET /state와 동일 모양).
+// 매도는 킬스위치 상태와 무관하게 항상 허용된다(서버가 보장) — 이 함수도
+// 그냥 호출만 한다.
+export async function manualSellAutoTrade() {
+  return postJson('/api/auto-trade/manual-sell', {})
+}

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { fetchAutoTradeLog, fetchAutoTradeState, toggleAutoTrade } from '../api'
+import { fetchAutoTradeLog, fetchAutoTradeState, manualBuyAutoTrade, manualSellAutoTrade, toggleAutoTrade } from '../api'
 
 // 대상 종목(PLAN.md §5.54, 사용자 확정 — quant/auto_trade_rules.py의
 // TARGET_CODE와 동일한 값). 이 페이지의 "전략 규칙 요약" 절에서만 쓰는 표시용
@@ -51,6 +51,9 @@ const EVENT_TYPE_LABEL = {
   entry_blocked_time: '진입 차단(시간)',
   entry_blocked_risk: '진입 차단(리스크 경보)',
   error: '오류/차단',
+  // PLAN.md §5.56(2026-08-11) — 자동 감지 엔진 위에 얹는 수동 매수/매도 버튼.
+  manual_entry: '수동 매수',
+  exit_manual: '수동 매도',
 }
 
 // 이 페이지가 보여주는 값들은 전부 PLAN.md §5.54/§5.55에서 사용자가 직접 확정한
@@ -198,6 +201,85 @@ function StatusPanel({ state }) {
   )
 }
 
+// 자동 감지 엔진(run_auto_trade/watch_stop_loss) 위에 얹는 수동 개입 버튼
+// (PLAN.md §5.56) — 자동 감지를 대체하지 않는다. 매수는 킬스위치가 켜져
+// 있고 status가 idle일 때만 활성화(그 외엔 이유를 짧게 표시), 매도는
+// status가 holding/trailing일 때만 활성화(킬스위치 상태와 무관 — 매도는
+// 항상 허용). 둘 다 실거래 경고가 담긴 확인 대화상자를 거친 뒤에만 호출된다.
+function ManualTradeButtons({ state, onBuy, onSell, buyBusy, sellBusy }) {
+  const enabled = !!state?.enabled
+  const status = state?.status || 'idle'
+  const canBuy = enabled && status === 'idle'
+  const canSell = status === 'holding' || status === 'trailing'
+
+  const buyDisabledReason = !enabled ? '킬스위치 꺼짐' : status !== 'idle' ? '이미 보유 중' : ''
+  const sellDisabledReason = !canSell ? '보유 중이 아님' : ''
+
+  const handleBuyClick = () => {
+    if (!window.confirm('실제 계좌로 1주 매수 주문이 나갑니다. 계속할까요?')) return
+    onBuy()
+  }
+
+  const handleSellClick = () => {
+    if (!window.confirm('실제 계좌로 보유 포지션을 매도합니다. 계속할까요?')) return
+    onSell()
+  }
+
+  return (
+    <section style={{ border: '1px solid var(--border, #333)', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 8 }}>
+        수동 매수/매도 (자동 감지 엔진과 별개로 지금 이 순간 직접 실행 — 대상 종목/수량은
+        전략 규칙과 동일하게 1주 고정)
+      </div>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+        <button
+          type="button"
+          disabled={!canBuy || buyBusy}
+          onClick={handleBuyClick}
+          style={{
+            padding: '10px 20px',
+            fontSize: 15,
+            fontWeight: 700,
+            borderRadius: 8,
+            border: 'none',
+            cursor: !canBuy || buyBusy ? 'default' : 'pointer',
+            color: '#fff',
+            // 한국 증시 관행(상승/매수=빨강 --up, 하락/매도=파랑 --down, memory
+            // chart-color-korean-convention) 그대로 매수 버튼에 --up(빨강) 적용.
+            background: 'var(--up, #d03b3b)',
+            opacity: !canBuy || buyBusy ? 0.5 : 1,
+          }}
+        >
+          {buyBusy ? '매수 처리 중…' : '수동 매수'}
+        </button>
+        {!canBuy && <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>{buyDisabledReason}</span>}
+
+        <button
+          type="button"
+          disabled={!canSell || sellBusy}
+          onClick={handleSellClick}
+          style={{
+            padding: '10px 20px',
+            fontSize: 15,
+            fontWeight: 700,
+            borderRadius: 8,
+            border: 'none',
+            cursor: !canSell || sellBusy ? 'default' : 'pointer',
+            color: '#fff',
+            // 매도 버튼에 --down(파랑) 적용 — 위 매수 버튼과 동일한 한국 증시
+            // 관행 근거.
+            background: 'var(--down, #256abf)',
+            opacity: !canSell || sellBusy ? 0.5 : 1,
+          }}
+        >
+          {sellBusy ? '매도 처리 중…' : '수동 매도'}
+        </button>
+        {!canSell && <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>{sellDisabledReason}</span>}
+      </div>
+    </section>
+  )
+}
+
 function StrategyPanel() {
   return (
     <section style={{ border: '1px solid var(--border, #333)', borderRadius: 12, padding: 16, marginBottom: 16 }}>
@@ -298,6 +380,12 @@ export default function AutoTradePage() {
   const [logLoading, setLogLoading] = useState(true)
   const [logError, setLogError] = useState(null)
 
+  // PLAN.md §5.56 — 자동 감지 엔진 위에 얹는 수동 매수/매도 버튼 상태.
+  const [manualBuyBusy, setManualBuyBusy] = useState(false)
+  const [manualBuyError, setManualBuyError] = useState(null)
+  const [manualSellBusy, setManualSellBusy] = useState(false)
+  const [manualSellError, setManualSellError] = useState(null)
+
   const loadState = () => {
     setStateError(null)
     return fetchAutoTradeState()
@@ -340,6 +428,32 @@ export default function AutoTradePage() {
     }
   }
 
+  const handleManualBuy = async () => {
+    setManualBuyError(null)
+    setManualBuyBusy(true)
+    try {
+      await manualBuyAutoTrade()
+      await Promise.all([loadState(), loadLog()])
+    } catch (err) {
+      setManualBuyError(err.message)
+    } finally {
+      setManualBuyBusy(false)
+    }
+  }
+
+  const handleManualSell = async () => {
+    setManualSellError(null)
+    setManualSellBusy(true)
+    try {
+      await manualSellAutoTrade()
+      await Promise.all([loadState(), loadLog()])
+    } catch (err) {
+      setManualSellError(err.message)
+    } finally {
+      setManualSellBusy(false)
+    }
+  }
+
   return (
     <div>
       <div className="toggle-hint" style={{ marginBottom: 16 }}>
@@ -349,9 +463,18 @@ export default function AutoTradePage() {
 
       {stateError && <div className="state">상태 조회 실패: {stateError}</div>}
       {toggleError && <div className="state">킬스위치 전환 실패: {toggleError}</div>}
+      {manualBuyError && <div className="state">수동 매수 실패: {manualBuyError}</div>}
+      {manualSellError && <div className="state">수동 매도 실패: {manualSellError}</div>}
 
       <KillSwitch state={state} onToggle={handleToggle} busy={toggleBusy} />
       <StatusPanel state={state} />
+      <ManualTradeButtons
+        state={state}
+        onBuy={handleManualBuy}
+        onSell={handleManualSell}
+        buyBusy={manualBuyBusy}
+        sellBusy={manualSellBusy}
+      />
       <StrategyPanel />
       <LogPanel rows={logRows} loading={logLoading} error={logError} />
     </div>

@@ -119,7 +119,23 @@ _test_log_watermark: dict[str, int] = {"id": 0}
 async def _snapshot_and_restore_state():
     """싱글턴 AutoTradeState(id=1) 행을 스냅샷/복원한다 — 이 테이블은 실제
     배포된 엔진이 참조하는 단일 행이라, 테스트가 값을 바꿔도 반드시 원래
-    값으로 되돌려야 한다."""
+    값으로 되돌려야 한다.
+
+    **2026-08-11 안전장치 추가(실사고 직후)**: 일부 테스트(예:
+    `test_toggle_on_preserves_existing_holding_position` 계열)는 "킬스위치를
+    켜도 보유 포지션이 보존되는지" 검증하려고 **실제 이 싱글턴 행에
+    `enabled=True` + `status="holding"`을 실제로 커밋**한다 — 이 저장소는
+    실 배포된 백엔드 컨테이너(`stock-backend-1`)가 60초/30초 간격으로 계속
+    폴링하는 바로 그 dev Postgres를 테스트도 그대로 쓴다. 만약 진짜 킬스위치가
+    켜진 채로 이 테스트 파일을 돌리면, 테스트가 그 조합을 커밋하는 찰나의
+    순간에 운영 중인 백그라운드 잡이 이를 "진짜 보유 포지션"으로 읽고
+    **실제 매도 주문을 시도할 수 있다** — 2026-08-11 실측으로 정확히 이 경로가
+    재현됐다(다행히 그 시점 실계좌가 0주 보유라 키움이 "매도가능수량 부족"으로
+    거부해 실피해는 없었지만, 계좌가 실제로 포지션을 들고 있었다면 진짜
+    손절/청산이 나갔을 수 있다). 그래서 테스트 시작 전 **실제 킬스위치가
+    켜져 있으면 아예 테스트를 거부**한다 — "몰래 안전하게 처리"가 아니라
+    "크게 실패시켜 사람이 먼저 끄게 만드는" 쪽을 택했다(조용히 넘어가면 다음에
+    또 같은 사고가 날 수 있음)."""
     async with async_session_factory() as session:
         row = await session.get(AutoTradeState, STATE_ID)
         snapshot = (
@@ -136,6 +152,16 @@ async def _snapshot_and_restore_state():
             }
             if row is not None
             else None
+        )
+
+    if snapshot is not None and snapshot["enabled"]:
+        pytest.fail(
+            "실제 킬스위치(AutoTradeState.enabled)가 켜져 있는 상태로는 이 테스트 파일을 "
+            "돌릴 수 없습니다 — 이 파일의 일부 테스트가 실제 이 싱글턴 행에 enabled=True + "
+            "status=holding을 커밋하는 순간, 실 배포된 백엔드가 이를 진짜 포지션으로 읽고 "
+            "실제 주문을 시도할 위험이 있습니다(2026-08-11 실측으로 재현된 사고). "
+            "먼저 `POST /api/auto-trade/toggle {\"enabled\": false}`로 킬스위치를 끄고 다시 "
+            "실행하세요."
         )
 
     start_max_log_id = await _current_max_log_id()
