@@ -365,6 +365,18 @@ export async function fetchGroupsLive(type = 'upjong') {
   return getJson(`/api/groups/live?type=${type}`)
 }
 
+// GET /api/groups/theme-picks?limit=10 -> { themes: [{name, rows: [{code, name,
+// change_rate, value}], cached_at} | {name, rows: [], error}], cached_at } — 고정
+// 관심 테마(반도체·2차전지·엔터·방산·바이오·AI 등, backend routers/groups.py
+// CURATED_THEME_NAMES) 8개 각각의 대장 종목 TOP N을 한 번에 모아 반환한다(대시보드
+// "관심 테마 · 대장 종목" 미니 트리맵 그리드 전용). top-stocks와 동일한 캐시(1일/5분
+// TTL)를 재사용하는 로컬 전용 기능이라 STATIC_DATA 대상 아님(fetchGroupTopStocks와
+// 동일한 관례). 테마 하나가 실패해도 그 테마만 rows: []로 채워지고 나머지는 정상
+// 반환되는 부분 실패 응답이다.
+export async function fetchGroupThemePicks(limit = 10) {
+  return getJson(`/api/groups/theme-picks?limit=${limit}`)
+}
+
 // GET /api/markets/basis/live -> { date, futures_close, kospi200_close, basis, basis_pct,
 // backwardation, expiry, market_closed, cached_at } (PLAN.md §4.7 — fchart의 "오늘" 봉이
 // 체결마다 갱신됨을 장중 실측으로 확인해 5~10분 캐시 편입). 로컬 전용 기능, STATIC_DATA

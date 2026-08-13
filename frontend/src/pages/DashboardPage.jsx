@@ -23,6 +23,7 @@ import {
   fetchFxLive,
   fetchGroups,
   fetchGroupsLive,
+  fetchGroupThemePicks,
   fetchGroupTopStocks,
   fetchHynixRelativeStrength,
   fetchIndexTilesLive,
@@ -3105,6 +3106,13 @@ export default function DashboardPage() {
   // 동일해({date, rows}) 별도 병합 없이 그대로 대체해 쓴다(아래 렌더 시
   // `!STATIC_DATA && valueRankLive ? valueRankLive : valueRankTop`).
   const [valueRankLive, setValueRankLive] = useState(null)
+  // 관심 테마 · 대장 종목(사용자 요청 "2차전지/반도체/엔터/방산/바이오/AI 같은 관심
+  // 테마 몇 개 고정으로 골라서 대장 종목 top10을 미니 트리맵 그리드로") — GET
+  // /api/groups/theme-picks 응답 바디를 그대로 담는다({ themes: [{name, rows,
+  // cached_at} | {name, rows: [], error}], cached_at }). 백엔드가 top-stocks와
+  // 동일한 5분 캐시를 쓰므로 아래 EXTRA_LIVE_POLL_MS(7분) 티어에 얹어 재사용한다
+  // (전용 setInterval을 새로 만들지 않는다).
+  const [themePicks, setThemePicks] = useState(null)
   const [flowPathTop, setFlowPathTop] = useState(null)
   // ETF 비중 변화 상위(PLAN.md §5.25, 시장 전체 스크리닝) — code 없이 조회한
   // GET /api/markets/etf-weight-changes 응답을 그대로 담는다({prev_date, curr_date,
@@ -3566,8 +3574,21 @@ export default function DashboardPage() {
         })
     }
 
+    // 관심 테마 · 대장 종목(위 themePicks state 주석 참고) — 백엔드 5분 캐시라 이
+    // 7분 티어에 얹어도 매 사이클 새 값을 놓치지 않는다.
+    function loadThemePicks() {
+      return fetchGroupThemePicks()
+        .then((body) => {
+          if (!cancelled) setThemePicks(body)
+        })
+        .catch(() => {
+          // 실패 시 이전에 받아둔 값을 그대로 둔다(valueRankLive와 달리 EOD 폴백이
+          // 없는 신규 기능이라 null로 되돌리면 화면이 "불러오는 중"에 계속 머문다).
+        })
+    }
+
     function load() {
-      return loadValueRankLive()
+      return Promise.all([loadValueRankLive(), loadThemePicks()])
     }
 
     load()
@@ -4577,6 +4598,55 @@ export default function DashboardPage() {
             setModal({ type: 'groupTopStocks', title: `${name} · 대장 종목`, groupType, name })
           }
         />
+      )}
+
+      {/* 관심 테마 · 대장 종목(사용자 요청 "2차전지/반도체/엔터/방산/바이오/AI 같은
+          관심 테마 몇 개 고정으로 골라서 대장 종목 top10을 미니 트리맵 그리드로",
+          백엔드 GET /api/groups/theme-picks). 위 업종·테마 강약 트리맵과 같은
+          "업종/테마 단위" 관찰이라 바로 아래 인접 배치한다. GroupTreemap에
+          fold={false}를 넘겨 foldItems(보합권 캡션 접기·상승/하락 각 TOP10 박스
+          제한)를 건너뛴다 — 여기 items는 이미 테마당 거래대금 상위 10종목으로
+          추려진 뒤라 10개 중 하나가 |등락률| < 1%(보합권)이어도 캡션으로 밀려나지
+          않고 박스 그대로 그려져야 "10개 다 보인다"는 기대와 맞는다. */}
+      <div className="section-title" style={{ marginTop: 16 }}>관심 테마 · 대장 종목</div>
+      <div className="toggle-hint" style={{ marginBottom: 8 }}>테마당 거래대금 상위 10종목 · 5분 캐시</div>
+      {!themePicks && <div className="state">불러오는 중…</div>}
+      {themePicks && (
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(2, minmax(240px, 1fr))',
+            gap: 12,
+            marginBottom: 16,
+          }}
+        >
+          {themePicks.themes.map((theme) => (
+            <div
+              key={theme.name}
+              style={{
+                background: 'var(--surface)',
+                border: '1px solid var(--border)',
+                borderRadius: 12,
+                padding: '8px 10px',
+              }}
+            >
+              <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>{theme.name}</div>
+              {theme.rows && theme.rows.length > 0 ? (
+                <GroupTreemap
+                  items={theme.rows.map((r) => ({ name: r.name, change_rate: r.change_rate, value: r.value }))}
+                  fold={false}
+                  height={180}
+                  onBoxClick={(stockName) => {
+                    const row = theme.rows.find((r) => r.name === stockName)
+                    if (row) openStockModal(row.code, row.name)
+                  }}
+                />
+              ) : (
+                <div className="state">데이터 없음</div>
+              )}
+            </div>
+          ))}
+        </div>
       )}
 
       {/* 업종 자금 흐름 관찰(PLAN.md §5.33, 2026-07-28 JTBC 뉴스 클립 검토) — 업종·테마

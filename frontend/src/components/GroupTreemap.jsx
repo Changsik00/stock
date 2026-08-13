@@ -378,7 +378,17 @@ function GroupCaption({ groups }) {
 // 동작(데이터 처리/접기/색 스케일)은 그대로이고 렌더 높이만 바뀐다.
 // onBoxClick(name): 박스 클릭 시 그 항목의 name을 넘긴다(선택 — 생략하면 클릭
 // 불가, 기존 시장 탭처럼 순수 시각화로만 쓸 수 있다. PLAN.md §5.12).
-export default function GroupTreemap({ items, sizeBy = 'value', height = 420, onBoxClick }) {
+// fold(기본 true): foldItems의 "보합권 캡션으로 접기 + 상승/하락 각 TOP_N개만
+// 박스" 규칙을 적용할지 여부다. 업종 79개/테마 266개처럼 "눈에 띄는 것만
+// 보여준다"가 목적인 기존 호출부는 기본값 그대로 두면 회귀 없이 동작한다.
+// 반대로 "이미 소수(예: 관심 테마 대장 종목 top 10)로 추려진 항목을 전부
+// 보여준다"가 목적인 새 호출부(관심 테마 미니 트리맵 그리드)는 fold={false}로
+// foldItems를 건너뛰고 items 전체를 그대로 박스로 그린다 — 이 경우
+// captionGroups는 항상 빈 배열이라 GroupCaption도 자연히 아무것도 렌더하지
+// 않는다(별도 분기 불필요). 크기 계산의 최소 면적 하한(applyMinAreaFloor)은
+// fold 여부와 무관하게 항상 적용한다 — 시각적으로 너무 작은 박스가 생기지
+// 않도록.
+export default function GroupTreemap({ items, sizeBy = 'value', height = 420, onBoxClick, fold = true }) {
   // tradeValue: 원본 거래대금을 recharts Treemap의 'value' 필드 덮어쓰기(위 TreemapCell
   // 주석 참고)로부터 지키기 위한 별칭이다 — content/Tooltip 어느 쪽도 props.value를
   // 원본 거래대금으로 신뢰할 수 없으므로 여기서 한 번만 복제해 둔다.
@@ -394,7 +404,7 @@ export default function GroupTreemap({ items, sizeBy = 'value', height = 420, on
     return <div className="state">표시할 데이터가 없습니다.</div>
   }
 
-  const { boxes, captionGroups } = foldItems(rawData)
+  const { boxes, captionGroups } = fold ? foldItems(rawData) : { boxes: applyMinAreaFloor(rawData), captionGroups: [] }
 
   return (
     <div className="group-treemap">
