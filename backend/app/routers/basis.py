@@ -156,9 +156,54 @@ def _fetch_index_series_blocking(market: str, start: dt.date, end: dt.date) -> l
     return naver_index.fetch_index_series(market, start, end)
 
 
-async def _warm_basis_live() -> dict:
+async def _expiry_history(
+    session: AsyncSession | None, d_day: int, today_basis_pct: float | None
+) -> dict | None:
+    """오늘의 ``d_day``에 해당하는 과거 만기 사이클 D-day별 베이시스 관찰치를
+    찾아 ``expiry.history``에 붙일 서브 필드를 만든다(PLAN.md, 2026-08-13
+    사용자 요청 — "지금 베이시스가 과거 같은 D-day 평균 대비 얼마나
+    벗어나 있는지"를 basis/live에 자동으로 포함).
+
+    ``session``이 None이면(``_append_futures_provisional_row``처럼 세션 없이
+    호출하는 기존 경로) 무조건 None을 반환한다 — history가 필요 없는 호출부이고,
+    ``compute_expiry_pattern``은 세션이 있어야만 실행 가능하다.
+
+    ``compute_expiry_pattern``(``quant/expiry_pattern.py``)이 표본 부족으로
+    ``points: []``를 반환하거나, 오늘의 ``d_day``에 해당하는 point가 없으면
+    (``max_lookback_days``보다 먼 D-day 등) 억지로 채우지 않고 None을 반환한다.
+
+    관측값만 담는다 — "이례적이다/위험하다" 같은 판단 문구는 절대 넣지 않는다
+    (``quant/expiry_pattern.py`` 모듈 docstring의 house rule과 동일)."""
+    if session is None:
+        return None
+    pattern = await compute_expiry_pattern(session)
+    point = next((p for p in pattern.get("points") or [] if p["d_day"] == d_day), None)
+    if point is None:
+        return None
+    deviation_pct = (
+        round(today_basis_pct - point["mean_basis_pct"], 4) if today_basis_pct is not None else None
+    )
+    return {
+        "cycle_count": pattern["cycle_count"],
+        "mean_basis_pct": point["mean_basis_pct"],
+        "median_basis_pct": point["median_basis_pct"],
+        "n": point["n"],
+        "deviation_pct": deviation_pct,
+    }
+
+
+async def _warm_basis_live(session: AsyncSession | None = None) -> dict:
     """basis/live 캐시를 채우고 payload를 반환한다 — 라우트 핸들러와
-    collectors/live_refresh.py의 5~10분 인터벌 잡이 공유한다."""
+    collectors/live_refresh.py의 5~10분 인터벌 잡이 공유한다.
+
+    **2026-08-13 추가**: ``session``이 주어지면(라우트 핸들러/live_refresh.py
+    둘 다 이제 세션을 넘긴다) ``expiry.history``에 오늘 D-day의 과거 만기
+    사이클 베이시스 평균/중앙값 대비 오늘 실측치의 편차를 함께 담는다
+    (``_expiry_history`` 참고). ``session``이 None이면(``_append_futures_
+    provisional_row``처럼 history가 필요 없는 호출부) ``expiry.history``는
+    그냥 None — 크래시하지 않는다. 60초 캐시 안에서만 계산하므로(캐시 히트
+    시엔 이미 계산된 값을 그대로 재사용) ``compute_expiry_pattern``의
+    무거운 전체 히스토리 쿼리가 매 요청마다 돌지 않는다."""
     now = time.monotonic()
     async with _basis_live_cache_lock:
         cached = _basis_live_cache["data"]
@@ -170,6 +215,9 @@ async def _warm_basis_live() -> dict:
             if cached is not None:
                 payload = {**cached, "market_closed": True}
             else:
+                today = now_kst.date()
+                d_day = days_to_expiry(today)
+                history = await _expiry_history(session, d_day, None)
                 payload = {
                     "date": None,
                     "futures_close": None,
@@ -178,7 +226,7 @@ async def _warm_basis_live() -> dict:
                     "basis_pct": None,
                     "backwardation": None,
                     "futures_today": None,
-                    "expiry": _build_expiry(now_kst.date()),
+                    "expiry": _build_expiry_with_history(today, history),
                     "market_closed": True,
                     "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                 }
@@ -220,15 +268,19 @@ async def _warm_basis_live() -> dict:
             "volume": futures_row["volume"],
         }
 
+        basis_pct_rounded = round(basis_pct, 4) if basis_pct is not None else None
+        d_day = days_to_expiry(today)
+        history = await _expiry_history(session, d_day, basis_pct_rounded)
+
         payload = {
             "date": futures_row["date"].isoformat(),
             "futures_close": futures_row["close"],
             "kospi200_close": spot_row["close"],
             "basis": round(basis, 2),
-            "basis_pct": round(basis_pct, 4) if basis_pct is not None else None,
+            "basis_pct": basis_pct_rounded,
             "backwardation": basis < 0,
             "futures_today": futures_today,
-            "expiry": _build_expiry(today),
+            "expiry": _build_expiry_with_history(today, history),
             "market_closed": False,
             "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         }
@@ -244,6 +296,17 @@ def _build_expiry(today: dt.date) -> dict:
         "d_day": days_to_expiry(today),
         "quadruple": is_quadruple_witching(expiry_date),
     }
+
+
+def _build_expiry_with_history(today: dt.date, history: dict | None) -> dict:
+    """``_build_expiry``에 ``history`` 서브 필드(2026-08-13 추가, ``_expiry_
+    history`` 참고)를 덧붙인다 — ``basis/live`` 전용 헬퍼. ``_build_expiry``
+    자체는 건드리지 않는다: ``/api/markets/basis``(``basis_series``)도 같은
+    ``_build_expiry``를 쓰는데, 그 응답의 ``expiry``는 기존에 ``{"date",
+    "d_day", "quadruple"}`` 3개 키만 갖는다고 tests/test_basis_router.py가
+    ``set(...) == {...}``로 정확히 검증하고 있어(history가 필요 없는
+    엔드포인트) 거기에 새 키가 새어 들어가면 안 된다."""
+    return {**_build_expiry(today), "history": history}
 
 
 @router.get("/api/markets/basis")
@@ -362,7 +425,7 @@ async def basis_expiry_pattern(session: AsyncSession = Depends(get_session)) -> 
 
 
 @router.get("/api/markets/basis/live")
-async def basis_live() -> dict:
+async def basis_live(session: AsyncSession = Depends(get_session)) -> dict:
     """K200 선물-현물 베이시스 장중 라이브(PLAN.md §4.7, 2026-07-20 실측 편입).
 
     fchart siseJson의 "오늘" 봉을 온디맨드로 재조회해 7분 메모리 캐시로 감싼다
@@ -372,5 +435,18 @@ async def basis_live() -> dict:
     ``{date, open, high, low, close, volume}``(PLAN.md §5.21, 모듈 docstring
     "futures_today 필드 추가" 절 참고) — `routers/markets.py`가 선물 일봉 차트에
     "오늘 잠정치" 캔들을 붙이는 데 재사용한다.
+
+    ``expiry``는 이제 ``{date, d_day, quadruple, history}`` 4개 키를 갖는다
+    (2026-08-13 추가, 사용자 요청 — "지금 이 순간 베이시스가 과거 같은 D-day
+    평균 대비 얼마나 벗어나 있는지"를 매번 수동 대조하지 않아도 되게). ``history``는
+    ``quant/expiry_pattern.compute_expiry_pattern``이 집계한 과거 만기 사이클
+    중 오늘과 같은 ``d_day``의 관찰치를 찾아 ``{cycle_count, mean_basis_pct,
+    median_basis_pct, n, deviation_pct}``로 담는다 — ``deviation_pct``는 오늘
+    실측 ``basis_pct - mean_basis_pct``(오늘 ``basis_pct``가 None이면, 예:
+    장마감 캐시 없음, 이 값도 None). 과거 표본이 부족하거나(``compute_expiry_
+    pattern``의 ``MIN_CYCLES`` 미만) 오늘 ``d_day``에 해당하는 point가 없으면
+    (``max_lookback_days``보다 먼 D-day) ``history`` 전체가 None — 억지로
+    채우지 않는다. 순수 관측값만 담을 뿐 "이례적이다/위험하다" 같은 판단 문구는
+    없다(house rule, ``quant/expiry_pattern.py`` 모듈 docstring 참고).
     """
-    return await _warm_basis_live()
+    return await _warm_basis_live(session)

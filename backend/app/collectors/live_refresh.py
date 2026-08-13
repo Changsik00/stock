@@ -212,13 +212,20 @@ async def _run_live_refresh() -> None:
             except Exception as e:  # noqa: BLE001
                 logger.warning("live-refresh: fx 워밍 실패: %s", e)
 
-        # §5.6 회귀 수정으로 7분 잡에서 옮겨왔다 — DB 세션이 필요 없는 3개라
-        # 위 session 블록 밖에서 호출한다(basis/groups/futures-flow 모두 세션 미사용).
-        try:
-            await basis_router._warm_basis_live()
-        except Exception as e:  # noqa: BLE001
-            logger.warning("live-refresh: basis 워밍 실패: %s", e)
+            # 2026-08-13 추가 — basis도 이제 만기 패턴 히스토리 대조
+            # (expiry.history, routers/basis.py::_expiry_history)를 위해
+            # compute_expiry_pattern(session) 호출이 필요해져 세션이 있어야
+            # 한다. §5.6 회귀 수정 당시엔 세션이 필요 없어 이 블록 밖(아래
+            # groups/futures-flow와 함께)에 있었는데, basis만 이 session
+            # 블록 안으로 옮긴다(groups/futures-flow는 여전히 세션 미사용).
+            try:
+                await basis_router._warm_basis_live(session)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("live-refresh: basis 워밍 실패: %s", e)
 
+        # §5.6 회귀 수정으로 7분 잡에서 옮겨왔다 — DB 세션이 필요 없는 2개(groups/
+        # futures-flow)라 위 session 블록 밖에서 호출한다(basis는 2026-08-13부터
+        # 세션이 필요해져 위 session 블록 안으로 옮겼다, 바로 위 주석 참고).
         for group_type in ("upjong", "theme"):
             try:
                 await groups_router._warm_groups_live(group_type)

@@ -3669,6 +3669,48 @@ manual-buy/manual-sell 테스트 19개 포함). 같은 명령을 연속 2회 실
 `enabled: false, status: idle`(사용자가 다시 켤지는 직접 판단할 사안이라
 그대로 꺼둔 채로 둠).
 
+### Phase 5.64 — basis/live에 만기 D-day 과거평균 대조(`expiry.history`) 추가 (2026-08-13)
+
+**계기**: 오늘(2026-08-13)이 실제 K200 옵션+개별주식선물 월간 만기일(D-0,
+8월은 분기월 아니라 네 마녀의 날은 아님)이라 사용자가 이 프로젝트가 이미
+가진 것을 확인해봤다 — `basis/live`가 이미 오늘을 `expiry.d_day=0`으로 정확히
+잡고 있었고, 과거 35회 만기 사이클의 D-day별 베이시스 평균(§5.42 "만기 수렴
+패턴")과 대조하면 오늘 베이시스가 과거보다 꽤 벗어나 있다는 걸 발견했다.
+"이 비교를 매번 두 엔드포인트를 수동으로 대조하지 않고 자동으로 보여달라"는
+요청으로 시작.
+
+**구현**: `routers/basis.py`에 `_expiry_history(session, d_day,
+today_basis_pct)` 추가 — 기존 `quant/expiry_pattern.compute_expiry_pattern`
+(재구현 없이 그대로 재사용)에서 오늘과 같은 `d_day`의 point를 찾아
+`{cycle_count, mean_basis_pct, median_basis_pct, n, deviation_pct}`를 만든다
+(`deviation_pct = 오늘 실측 basis_pct - mean_basis_pct`, 관측값만 — "이례적
+이다" 같은 판단 문구 없음, 표본 부족/D-day 불일치 시 `history: None`, 억지로
+안 채움). `_warm_basis_live`가 이제 선택적 `session`을 받아(기존 `_warm_fx_
+live`류와 동일 관례) 60초 캐시 안에서만 계산(`compute_expiry_pattern`이
+`index_ohlcv` 전체를 읽는 무거운 쿼리라 캐시 히트 시엔 재계산 안 함).
+`_build_expiry` 자체는 건드리지 않고 `_build_expiry_with_history`를 별도
+헬퍼로 분리(`/api/markets/basis`가 `_build_expiry`의 3-key 응답을 정확히
+검증하는 기존 테스트가 있어 `history: None`이 그쪽에 새어 들어가면 안 됨).
+`collectors/live_refresh.py`의 60초 잡에서 이 호출을 세션이 필요 없던
+groups/futures-flow 묶음에서 분리해 세션 블록 안으로 이동.
+
+**검증 중 확인한 것**: 서브에이전트가 테스트를 짜다가 §5.63에서 추가한
+"실 킬스위치 켜짐 감지 시 pytest.fail" 가드가 실제로 발동하는 걸 목격했다
+(그 시점 실 킬스위치가 다시 켜져 있었음, 이 작업과 무관) — 가드가 의도대로
+작동해 `test_auto_trader_collector.py`를 통째로 막아준 덕분에 이번엔 실거래
+사고 없이 안전하게 진행됐다(그 실패가 인접 파일의 커넥션 풀을 오염시키는
+부수 문제만 있었고, 이건 `_dispose_engine_per_test`를 setup에서도 도는 걸로
+고침). 나(메인 세션)도 검증을 위해 직접 킬스위치를 껐다가(`POST /toggle
+{"enabled": false}`) 전체 테스트를 통과시킨 뒤, 사용자가 실제로 다시 켜둔
+상태(`enabled: true`)로 정확히 복원했다 — §5.63에서 확립한 절차("이 두 파일
+실행 전엔 항상 킬스위치 확인") 그대로.
+
+**검증**: `venv/bin/python -m pytest -q`(킬스위치 끈 상태) — 936 passed(무관
+기존 실패 1건 제외). 실 컨테이너에서 `curl .../basis/live` 직접 확인 —
+`expiry.history.deviation_pct`(0.2124)가 `basis_pct`(0.2786) - `mean_basis_pct`
+(0.0662)와 정확히 일치. 킬스위치를 사용자의 원래 값(`enabled: true`)으로
+복원 확인, `auto_trade_log` 잔여 행 없음, 실계좌 미체결 없음 재확인.
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
