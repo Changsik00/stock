@@ -23,7 +23,6 @@ import {
   fetchFxLive,
   fetchGroups,
   fetchGroupsLive,
-  fetchGroupThemePicks,
   fetchGroupTopStocks,
   fetchHynixRelativeStrength,
   fetchIndexTilesLive,
@@ -62,6 +61,7 @@ import PeriodPicker from '../components/PeriodPicker'
 import RiskAlertBanner from '../components/RiskAlertBanner'
 import SentimentGauge from '../components/SentimentGauge'
 import StockDetailModal from '../components/StockDetailModal'
+import StockHeatmap from '../components/StockHeatmap'
 import StockSearch from '../components/StockSearch'
 import ValueRankTable from '../components/ValueRankTable'
 import {
@@ -2862,6 +2862,11 @@ function ScalpCandidatesFullModal({ onSelectStock }) {
 // 불러온다. 기준은 거래대금 내림차순(시가총액 컬럼이 소스에 없음, naver_group.py
 // 모듈 docstring 참고)이라 "대장 종목"은 순위 나열이지 매매 추천이 아니다(§5 "중립
 // 계기판" 원칙 — 문구에 매수/추천 뉘앙스를 넣지 않는다).
+// 렌더는 StockHeatmap(균일 크기 격자, 색=등락률)을 쓴다 — 사용자 피드백 "트리맵이
+// 아니라 히트맵으로"(266개 테마 전체를 이 모달 하나로 커버하는 드릴인이라, 어제
+// 만들었던 8개 고정 트리맵 그리드는 제거하고 이 드릴인으로 통합했다). onSelectStock은
+// 기존 호출부가 row 객체 전체를 기대하므로, StockHeatmap의 onCellClick(code, name)에서
+// rows.find로 원래 row를 되찾아 넘긴다.
 function GroupTopStocksModal({ groupType, name, onSelectStock }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -2895,22 +2900,14 @@ function GroupTopStocksModal({ groupType, name, onSelectStock }) {
       </div>
       {loading && <div className="state">불러오는 중…</div>}
       {error && <div className="state error">{error}</div>}
-      {!loading && !error && rows.length === 0 && <div className="state">표시할 데이터가 없습니다.</div>}
-      {!loading && !error && rows.length > 0 && (
-        <div>
-          {rows.map((row, i) => (
-            <Top5RowTile key={row.code} clickable={!STATIC_DATA} onClick={() => onSelectStock(row)}>
-              <span className="top5-row-name">
-                <span className="top5-row-label">
-                  {i + 1}. {row.name || row.code}
-                </span>
-              </span>
-              <span className={`top5-row-value ${rateClass(row.change_rate)}`}>
-                {rateLabel(row.change_rate)} · {eokLabel(row.value)}
-              </span>
-            </Top5RowTile>
-          ))}
-        </div>
+      {!loading && !error && (
+        <StockHeatmap
+          items={rows}
+          onCellClick={STATIC_DATA ? undefined : (code) => {
+            const row = rows.find((r) => r.code === code)
+            if (row) onSelectStock(row)
+          }}
+        />
       )}
     </div>
   )
@@ -3106,13 +3103,6 @@ export default function DashboardPage() {
   // 동일해({date, rows}) 별도 병합 없이 그대로 대체해 쓴다(아래 렌더 시
   // `!STATIC_DATA && valueRankLive ? valueRankLive : valueRankTop`).
   const [valueRankLive, setValueRankLive] = useState(null)
-  // 관심 테마 · 대장 종목(사용자 요청 "2차전지/반도체/엔터/방산/바이오/AI 같은 관심
-  // 테마 몇 개 고정으로 골라서 대장 종목 top10을 미니 트리맵 그리드로") — GET
-  // /api/groups/theme-picks 응답 바디를 그대로 담는다({ themes: [{name, rows,
-  // cached_at} | {name, rows: [], error}], cached_at }). 백엔드가 top-stocks와
-  // 동일한 5분 캐시를 쓰므로 아래 EXTRA_LIVE_POLL_MS(7분) 티어에 얹어 재사용한다
-  // (전용 setInterval을 새로 만들지 않는다).
-  const [themePicks, setThemePicks] = useState(null)
   const [flowPathTop, setFlowPathTop] = useState(null)
   // ETF 비중 변화 상위(PLAN.md §5.25, 시장 전체 스크리닝) — code 없이 조회한
   // GET /api/markets/etf-weight-changes 응답을 그대로 담는다({prev_date, curr_date,
@@ -3574,21 +3564,8 @@ export default function DashboardPage() {
         })
     }
 
-    // 관심 테마 · 대장 종목(위 themePicks state 주석 참고) — 백엔드 5분 캐시라 이
-    // 7분 티어에 얹어도 매 사이클 새 값을 놓치지 않는다.
-    function loadThemePicks() {
-      return fetchGroupThemePicks()
-        .then((body) => {
-          if (!cancelled) setThemePicks(body)
-        })
-        .catch(() => {
-          // 실패 시 이전에 받아둔 값을 그대로 둔다(valueRankLive와 달리 EOD 폴백이
-          // 없는 신규 기능이라 null로 되돌리면 화면이 "불러오는 중"에 계속 머문다).
-        })
-    }
-
     function load() {
-      return Promise.all([loadValueRankLive(), loadThemePicks()])
+      return loadValueRankLive()
     }
 
     load()
@@ -4600,54 +4577,41 @@ export default function DashboardPage() {
         />
       )}
 
-      {/* 관심 테마 · 대장 종목(사용자 요청 "2차전지/반도체/엔터/방산/바이오/AI 같은
-          관심 테마 몇 개 고정으로 골라서 대장 종목 top10을 미니 트리맵 그리드로",
-          백엔드 GET /api/groups/theme-picks). 위 업종·테마 강약 트리맵과 같은
-          "업종/테마 단위" 관찰이라 바로 아래 인접 배치한다. GroupTreemap에
-          fold={false}를 넘겨 foldItems(보합권 캡션 접기·상승/하락 각 TOP10 박스
-          제한)를 건너뛴다 — 여기 items는 이미 테마당 거래대금 상위 10종목으로
-          추려진 뒤라 10개 중 하나가 |등락률| < 1%(보합권)이어도 캡션으로 밀려나지
-          않고 박스 그대로 그려져야 "10개 다 보인다"는 기대와 맞는다. */}
-      <div className="section-title" style={{ marginTop: 16 }}>관심 테마 · 대장 종목</div>
-      <div className="toggle-hint" style={{ marginBottom: 8 }}>테마당 거래대금 상위 10종목 · 5분 캐시</div>
-      {!themePicks && <div className="state">불러오는 중…</div>}
-      {themePicks && (
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(2, minmax(240px, 1fr))',
-            gap: 12,
-            marginBottom: 16,
-          }}
-        >
-          {themePicks.themes.map((theme) => (
-            <div
-              key={theme.name}
-              style={{
-                background: 'var(--surface)',
-                border: '1px solid var(--border)',
-                borderRadius: 12,
-                padding: '8px 10px',
-              }}
-            >
-              <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>{theme.name}</div>
-              {theme.rows && theme.rows.length > 0 ? (
-                <GroupTreemap
-                  items={theme.rows.map((r) => ({ name: r.name, change_rate: r.change_rate, value: r.value }))}
-                  fold={false}
-                  height={180}
-                  onBoxClick={(stockName) => {
-                    const row = theme.rows.find((r) => r.name === stockName)
-                    if (row) openStockModal(row.code, row.name)
-                  }}
-                />
-              ) : (
-                <div className="state">데이터 없음</div>
-              )}
-            </div>
-          ))}
+      {/* 코스피/코스닥 상위 종목 히트맵(사용자 원 요청 "코스피, 코스닥 상위 종목" —
+          테마와 무관한 시장 전체 상위 종목). 새 fetch/새 폴링을 만들지 않고 위
+          "종목 랭킹 요약"의 "거래대금 상위" 카드가 이미 쓰는 effectiveValueRank
+          (live 활성이면 valueRankLive, 아니면 valueRankTop — loadValueRankLive()가
+          이미 최신으로 유지)를 그대로 재사용한다. filterRowsByMarket으로 시장별로
+          나누면 이미 거래대금 내림차순이라 slice(0, 20)만으로 상위 20종목이 된다.
+          업종·테마 강약 트리맵 바로 아래 인접 배치(사용자가 "tree/heat chart 부분"으로
+          두 개념을 같이 언급했다). */}
+      <div className="section-title" style={{ marginTop: 16 }}>코스피 / 코스닥 상위 종목</div>
+      <div className="toggle-hint" style={{ marginBottom: 8 }}>거래대금 상위 20종목 · 색 = 등락률</div>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+          gap: 16,
+          marginBottom: 16,
+        }}
+      >
+        <div>
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>코스피 상위 종목</div>
+          <StockHeatmap
+            items={(filterRowsByMarket(effectiveValueRank?.rows, 'kospi') || []).slice(0, 20)}
+            minCellWidth={80}
+            onCellClick={STATIC_DATA ? undefined : (code, name) => openStockModal(code, name)}
+          />
         </div>
-      )}
+        <div>
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>코스닥 상위 종목</div>
+          <StockHeatmap
+            items={(filterRowsByMarket(effectiveValueRank?.rows, 'kosdaq') || []).slice(0, 20)}
+            minCellWidth={80}
+            onCellClick={STATIC_DATA ? undefined : (code, name) => openStockModal(code, name)}
+          />
+        </div>
+      </div>
 
       {/* 업종 자금 흐름 관찰(PLAN.md §5.33, 2026-07-28 JTBC 뉴스 클립 검토) — 업종·테마
           트리맵 바로 아래 배치(같은 "업종 단위" 관찰이라 인접 배치가 자연스럽다는 작업

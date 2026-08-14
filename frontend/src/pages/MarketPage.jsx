@@ -5,6 +5,7 @@ import {
   fetchBreadthLive,
   fetchFlowPath,
   fetchFlowRank,
+  fetchGroupTopStocks,
   fetchGroups,
   fetchMacroSeries,
   fetchMarketIntraday,
@@ -23,6 +24,7 @@ import Modal from '../components/Modal'
 import PeriodPicker from '../components/PeriodPicker'
 import SentimentGauge from '../components/SentimentGauge'
 import StockDetailModal from '../components/StockDetailModal'
+import StockHeatmap from '../components/StockHeatmap'
 import ValueRankTable from '../components/ValueRankTable'
 import { INTRADAY_OPTIONS, MARKET_FUND_IDS, MARKETS } from '../constants'
 import { formatDate } from '../format'
@@ -45,6 +47,51 @@ const VALUE_RANK_MARKET_OPTIONS = [
   { key: 'kospi', label: '코스피' },
   { key: 'kosdaq', label: '코스닥' },
 ]
+
+// 업종·테마 트리맵 박스 클릭 → 대장 종목 TOP10 드릴인(PLAN.md §5.12, DashboardPage.jsx의
+// GroupTopStocksModal과 동일한 목적이나 그 컴포넌트는 export되어 있지 않아 이 페이지
+// 전용으로 가볍게 다시 둔다). 모달이 열릴 때(마운트 시) 자기 데이터를 불러오는
+// 자기완결 컴포넌트 — /api/groups/top-stocks 기존 캐시를 그대로 쓴다(새 엔드포인트
+// 없음). 렌더는 StockHeatmap(균일 크기 격자, 색=등락률)을 쓴다.
+function GroupTopStocksHeatmap({ groupType, name, onSelectStock }) {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    fetchGroupTopStocks(groupType, name, 10)
+      .then((body) => {
+        if (!cancelled) setData(body)
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e.message)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [groupType, name])
+
+  const rows = data?.rows || []
+
+  return (
+    <div>
+      <div className="toggle-hint" style={{ marginBottom: 8 }}>
+        거래대금 상위 10종목 · 참고용 순위 (시가총액 데이터 없음, 매매 추천 아님)
+      </div>
+      {loading && <div className="state">불러오는 중…</div>}
+      {error && <div className="state error">{error}</div>}
+      {!loading && !error && (
+        <StockHeatmap items={rows} onCellClick={STATIC_DATA ? undefined : (code, name2) => onSelectStock(code, name2)} />
+      )}
+    </div>
+  )
+}
 
 // 코스피/코스닥/선물: 지수 캔들+거래량(CandleChart, lightweight-charts) 아래에 투자자별
 // 수급(FlowChart)을 이어 붙인다 (PLAN.md §5.1/§6 1-5). market_flow가 비어 있으면
@@ -94,6 +141,14 @@ export default function MarketPage() {
   // DashboardPage.jsx의 모달은 타입이 여러 개(candle/sentiment/…)라 { type, ... } 객체를
   // 쓰지만, 여기서는 종목 상세 하나뿐이라 { code, name, market, is_etf } | null로 충분하다.
   const [stockModal, setStockModal] = useState(null)
+  // 업종·테마 트리맵 박스 클릭 → 대장 종목 히트맵 드릴인(PLAN.md §5.12) — 이 페이지
+  // 최초의 그룹 드릴인이다. stockModal과 마찬가지로 { groupType, name } | null만
+  // 담는 최소 상태(Dashboard처럼 여러 타입을 아우르는 단일 modal 객체를 새로 만들
+  // 필요는 없다 — 이 페이지는 종목 상세/그룹 드릴인 두 종류뿐이라 독립 상태 두 개로
+  // 충분하다). 드릴인 안에서 종목을 클릭하면 그룹 모달을 닫고 종목 모달을 여는 식으로
+  // (아래 onSelectStock) 한 번에 하나만 열리게 한다(Dashboard의 단일 modal state가
+  // "새 타입으로 덮어쓰면 곧 교체"되는 것과 동일한 효과).
+  const [groupModal, setGroupModal] = useState(null)
   // 분봉 토글(PLAN.md §5.1/§5.5-1) — 'daily'면 아래 fetchMarketSeries 로직을 그대로
   // 쓰고, 정수 분이면 이 state들이 CandleChart를 대체한다. 기본값은 1분(§5.5-1
   // "지수 차트 1D 통일" — 이전엔 분봉 토글을 만들어놓고 기본은 여전히 일봉이었다).
@@ -541,7 +596,13 @@ export default function MarketPage() {
       </div>
       {groupLoading && <div className="state">불러오는 중…</div>}
       {groupError && <div className="state error">{groupError}</div>}
-      {!groupLoading && !groupError && <GroupTreemap items={groupItems} sizeBy="value" />}
+      {!groupLoading && !groupError && (
+        <GroupTreemap
+          items={groupItems}
+          sizeBy="value"
+          onBoxClick={(name) => setGroupModal({ groupType, name })}
+        />
+      )}
 
       <div className="section-title">거래대금 상위</div>
       <div className="toggle-row">
@@ -598,6 +659,23 @@ export default function MarketPage() {
         title={stockModal ? `${stockModal.name || stockModal.code} · 종목 상세` : undefined}
       >
         {stockModal && <StockDetailModal code={stockModal.code} initial={stockModal} />}
+      </Modal>
+
+      <Modal
+        open={Boolean(groupModal)}
+        onClose={() => setGroupModal(null)}
+        title={groupModal ? `${groupModal.name} · 대장 종목` : undefined}
+      >
+        {groupModal && (
+          <GroupTopStocksHeatmap
+            groupType={groupModal.groupType}
+            name={groupModal.name}
+            onSelectStock={(code, name) => {
+              setGroupModal(null)
+              setStockModal({ code, name })
+            }}
+          />
+        )}
       </Modal>
     </div>
   )

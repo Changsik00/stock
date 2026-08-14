@@ -3750,6 +3750,54 @@ warning 5건 제외). 실 컨테이너에서 `curl .../groups/theme-picks` 직�
 3~7개만 반환 — 정상, 버그 아님). 확인 후 실계좌 포지션 상태(진입가/주문번호
 불변) 그대로 유지됨을 재확인 — 이번 검증은 킬스위치를 전혀 건드리지 않았다.
 
+### Phase 5.66 — 업종·테마 트리맵 드릴인 히트맵 + 코스피/코스닥 상위종목 히트맵 (2026-08-14)
+
+**계기**: §5.65에서 만든 "8개 고정 테마 미니 트리맵 그리드"를 본 사용자
+피드백 — "업종 · 테마 강약 이쪽으로 들어 갈 수 있게 하고 heatmap 으로
+만들어 보는건 어때? 그리고 코스피, 코스닥 상위 종목이 없어." 즉 (1) 고정
+8개 대신 기존 "업종·테마 강약" 메인 트리맵(266개 테마 + 79개 업종 전체)의
+아무 박스나 클릭해서 그 구성 종목으로 드릴인하는 방식으로 통합, (2) 드릴인
+결과 화면은 트리맵(박스 크기=거래대금)이 아니라 히트맵(균일 크기 격자,
+색=등락률)으로, (3) 애초 요청에서 빠졌던 시장 전체(코스피/코스닥) 상위
+종목 히트맵 추가. AskUserQuestion으로 확인: §5.65의 고정 8개 그리드는
+제거하고 드릴인 하나로 통합, 코스피/코스닥 히트맵은 거래대금 기준 각 20종목.
+
+**구현**:
+- §5.65에서 추가한 `CURATED_THEME_NAMES`/`GET /api/groups/theme-picks`
+  (`routers/groups.py`), `test_groups_theme_picks_router.py`,
+  `fetchGroupThemePicks`(`api.js`), `GroupTreemap.jsx`의 `fold` prop,
+  `DashboardPage.jsx`의 "관심 테마 · 대장 종목" 섹션을 전부 되돌림 — 고정
+  8개 제한을 없애기 위한 정리.
+- `frontend/src/components/StockHeatmap.jsx` 신규 — 균일 크기 CSS grid
+  히트맵(recharts 불필요, 순수 CSS). 색상은 `GroupTreemap.jsx`가 export하는
+  `colorForChangeRate`/`changeRateMixStrength`를 그대로 import해서 재사용
+  (재구현 없음 — 트리맵과 히트맵 간 색 스케일이 항상 일치).
+- 메인 "업종·테마 강약" 트리맵 박스 클릭 시 뜨는 모달
+  (`DashboardPage.jsx`의 `GroupTopStocksModal`, `MarketPage.jsx`의 신규
+  `GroupTopStocksHeatmap`)의 데이터 소스는 기존 `GET /api/groups/top-stocks`
+  그대로(새 백엔드 없음), 렌더만 종목 리스트에서 `StockHeatmap`으로 교체.
+  `MarketPage.jsx`는 이 트리맵에 `onBoxClick`이 아예 없었어서 이번에 처음
+  배선(신규 `groupModal` state) — 클릭 시 히트맵에서 종목 클릭하면 그룹
+  모달을 닫고 기존 `StockDetailModal`을 연다.
+- "코스피 상위 종목"/"코스닥 상위 종목" 신규 섹션(`DashboardPage.jsx`,
+  업종·테마 강약 섹션 근처) — 새 백엔드/새 fetch 없이 기존
+  `effectiveValueRank`(`GET /api/markets/value-rank/live` 7분 폴링,
+  라이브 실패 시 EOD 폴백)를 기존 `filterRowsByMarket` 헬퍼로 시장별로
+  나눈 뒤 거래대금순 상위 20개만 `.slice(0, 20)`으로 잘라 `StockHeatmap`
+  두 개로 렌더. 클릭 시 기존 `openStockModal` 재사용.
+
+**검증**: 실계좌 킬스위치 `enabled: true, status: idle`(포지션 없음) 확인 후
+`test_auto_trader_collector.py`/`test_auto_trade_router.py` 제외하고
+`pytest -q` 실행 — 877 passed(§5.65의 `theme-picks` 테스트 6개 삭제로 감소,
+회귀 아님), 무관한 기존 실패 1건 그대로. `npm run build`/`npx oxlint`
+클린(기존 무관 warning 5건 제외, `StockHeatmap.jsx` 자체 warning 없음).
+실 컨테이너 curl 확인: `/api/groups/theme-picks` 404(정상 제거),
+`/api/groups/top-stocks?type=theme&name=2차전지` 정상 응답(회귀 없음),
+`/api/markets/value-rank/live`에 `market`/`code`/`change_rate`/`value`
+필드 정상 존재. `auto_trade_log` 최근 5건이 전부 이번 검증 이전 실거래
+이력(마지막 청산 2026-08-13)뿐임을 재확인 — 검증 과정에서 킬스위치/포지션
+상태 변경 없음.
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)

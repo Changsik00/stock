@@ -48,26 +48,6 @@ SECONDS``) 캐시한다 — 트리맵을 반복 클릭해도 네이버에 매번
 Returns ``{"type": ..., "name": ..., "rows": [{"code","name","change_rate",
 "value"}, ...], "cached_at": iso8601}``. 목록에 없는 이름이면 404, 상세 조회
 자체가 실패하면(NaverGroupError) 502.
-
-## GET /api/groups/theme-picks (사용자 요청 "관심 테마 몇 개 고정으로 골라서
-대장 종목 top 10을 미니 트리맵 그리드로", 2026-08-13)
-
-고정 관심 테마(CURATED_THEME_NAMES) 8개 각각의 대장 종목 TOP N을 한 번에
-모아 반환한다 — 프런트가 테마별 미니 트리맵 그리드(예: 2열 x 4행)를 한 번의
-요청으로 그리기 위한 전용 엔드포인트다. 위 top-stocks 엔드포인트와 완전히
-동일한 캐시(``_warm_group_name_to_no`` 1일 TTL, ``_warm_top_stocks`` 5분 TTL)를
-그대로 재사용한다 — 새 캐시 계층도, 그룹당 새 외부 호출 로직도 없다.
-
-top-stocks 단일 조회와 달리 이 엔드포인트는 여러 테마를 한 번에 모으는
-용도라 **부분 실패를 허용**한다 — 테마 하나가 목록 매핑에 없거나(단일 조회의
-404 상황) 상세 조회가 실패해도(단일 조회의 502 상황) 그 테마만
-``{"name": name, "rows": [], "error": "..."}``로 채우고 나머지 7개는 정상
-반환한다(전체를 502로 실패시키지 않는다).
-
-이름→no 매핑은 ``_warm_group_name_to_no("theme")``를 한 번만 호출해 얻고,
-8개 테마는 순차로 ``_warm_top_stocks`` 호출한다(캐시 히트면 사실상 즉시
-반환, 캐시 미스인 테마만 실제로 네이버를 호출 — 순차로 충분해 병렬화하지
-않는다).
 """
 
 from __future__ import annotations
@@ -88,21 +68,6 @@ from ..models import GroupSnapshot
 router = APIRouter(tags=["groups"])
 
 GROUP_TYPES = {"upjong", "theme"}
-
-# 고정 관심 테마 8개(GET /api/groups/theme-picks 전용, 사용자 요청 "2차전지/반도체/
-# 엔터/방산/바이오/AI 같은 관심 테마를 몇 개 고정으로"). group_snapshot 테이블에
-# 실제로 존재함을 확인한 정확한 문자열 그대로 쓴다(오타나 유사 이름이면 이름→no
-# 매핑에 없어 그 테마만 조용히 rows: [] 처리된다).
-CURATED_THEME_NAMES = [
-    "2차전지",
-    "반도체 대표주(생산)",
-    "엔터테인먼트",
-    "방위산업/전쟁 및 테러",
-    "바이오시밀러(복제 바이오의약품)",
-    "지능형로봇/인공지능(AI)",
-    "조선",
-    "자동차 대표주",
-]
 
 # 1분 장중 라이브 캐시 TTL — collectors/live_refresh.py의 60초 인터벌 잡과 맞춘다.
 # 2026-07-21(§5.5-2) 7분→1분: 목록 페이지 1~2회 조회뿐인 가벼운 호출이라 값 비용
@@ -312,36 +277,3 @@ async def group_top_stocks(
         raise HTTPException(404, f"group not found: type={type} name={name!r}")
 
     return await _warm_top_stocks(type, name, no, limit)
-
-
-@router.get("/api/groups/theme-picks")
-async def group_theme_picks(limit: int = Query(10, ge=1, le=20)) -> dict:
-    """고정 관심 테마(CURATED_THEME_NAMES) 각각의 대장 종목 TOP N을 한 번에
-    반환 — 프런트가 테마별 미니 트리맵 그리드를 그리기 위한 전용 엔드포인트.
-    기존 top-stocks와 완전히 동일한 캐시(_warm_group_name_to_no, 1일 TTL /
-    _warm_top_stocks, 5분 TTL)를 그대로 재사용한다 — 새 캐시 계층 없음, 그룹당
-    새 외부 호출 로직도 없음(재구현 금지). 테마 하나가 목록에 없거나(404
-    상황) 상세 조회가 실패해도(502 상황) 그 테마만 rows: []로 두고 나머지는
-    정상 반환한다(부분 실패 허용 — top-stocks 단일 조회의 404/502 발생 방식과
-    달리, 이 엔드포인트는 여러 테마를 한 번에 모으는 용도라 하나 실패로 전체를
-    502 내지 않는다).
-
-    Returns ``{"themes": [{"name", "rows": [...], "cached_at"} |
-    {"name", "rows": [], "error"}, ...], "cached_at": iso8601}``.
-    """
-    name_to_no = await _warm_group_name_to_no("theme")
-
-    themes: list[dict] = []
-    for name in CURATED_THEME_NAMES:
-        no = name_to_no.get(name)
-        if no is None:
-            themes.append({"name": name, "rows": [], "error": f"group not found: name={name!r}"})
-            continue
-        try:
-            payload = await _warm_top_stocks("theme", name, no, limit)
-        except HTTPException as e:
-            themes.append({"name": name, "rows": [], "error": str(e.detail)})
-            continue
-        themes.append(payload)
-
-    return {"themes": themes, "cached_at": dt.datetime.now(dt.timezone.utc).isoformat()}
