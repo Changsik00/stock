@@ -4582,11 +4582,13 @@ export default function DashboardPage() {
           "종목 랭킹 요약"의 "거래대금 상위" 카드가 이미 쓰는 effectiveValueRank
           (live 활성이면 valueRankLive, 아니면 valueRankTop — loadValueRankLive()가
           이미 최신으로 유지)를 그대로 재사용한다. filterRowsByMarket으로 시장별로
-          나누면 이미 거래대금 내림차순이라 slice(0, 20)만으로 상위 20종목이 된다.
-          업종·테마 강약 트리맵 바로 아래 인접 배치(사용자가 "tree/heat chart 부분"으로
-          두 개념을 같이 언급했다). */}
+          나누면 이미 거래대금 내림차순 — ETF는 배지 없이 개별 종목과 셀 하나로
+          섞이면 "상위 종목"이 개별 종목이 아닌 ETF로 채워질 수 있어(코스피 거래대금
+          상위엔 KODEX/TIGER류가 흔함) is_etf 행을 걸러낸 뒤 slice(0, 20)으로 개별
+          종목만 상위 20개를 남긴다(다른 표들은 배지로 구분하지만 히트맵 셀은 배지를
+          넣을 자리가 없다). */}
       <div className="section-title" style={{ marginTop: 16 }}>코스피 / 코스닥 상위 종목</div>
-      <div className="toggle-hint" style={{ marginBottom: 8 }}>거래대금 상위 20종목 · 색 = 등락률</div>
+      <div className="toggle-hint" style={{ marginBottom: 8 }}>거래대금 상위 20종목(개별 종목만, ETF 제외) · 색 = 등락률</div>
       <div
         style={{
           display: 'grid',
@@ -4598,7 +4600,7 @@ export default function DashboardPage() {
         <div>
           <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>코스피 상위 종목</div>
           <StockHeatmap
-            items={(filterRowsByMarket(effectiveValueRank?.rows, 'kospi') || []).slice(0, 20)}
+            items={(filterRowsByMarket(effectiveValueRank?.rows, 'kospi') || []).filter((r) => !r.is_etf).slice(0, 20)}
             minCellWidth={80}
             onCellClick={STATIC_DATA ? undefined : (code, name) => openStockModal(code, name)}
           />
@@ -4606,7 +4608,7 @@ export default function DashboardPage() {
         <div>
           <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>코스닥 상위 종목</div>
           <StockHeatmap
-            items={(filterRowsByMarket(effectiveValueRank?.rows, 'kosdaq') || []).slice(0, 20)}
+            items={(filterRowsByMarket(effectiveValueRank?.rows, 'kosdaq') || []).filter((r) => !r.is_etf).slice(0, 20)}
             minCellWidth={80}
             onCellClick={STATIC_DATA ? undefined : (code, name) => openStockModal(code, name)}
           />
