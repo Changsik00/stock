@@ -3798,6 +3798,61 @@ warning 5건 제외). 실 컨테이너에서 `curl .../groups/theme-picks` 직�
 이력(마지막 청산 2026-08-13)뿐임을 재확인 — 검증 과정에서 킬스위치/포지션
 상태 변경 없음.
 
+**후속 수정(2026-08-14)**: 사용자가 실제 화면에서 "코스피 상위에 ETF가
+있는데 개별종목이 나와야 하는거 아닐까" 지적 — 실데이터로 확인해보니
+코스피 거래대금 상위 20종목 중 13개가 KODEX/TIGER류 ETF였다. 다른 표
+(`ValueRankTable` 등)는 ETF를 배지로 구분해서 같이 보여주는 게 기존
+관례지만, 히트맵 셀은 배지를 넣을 자리가 없어 개별 종목과 ETF가 섞이면
+"상위 종목"이 실질적으로 ETF로 채워져 보인다. `is_etf` 행을 걸러낸 뒤
+상위 20개를 뽑도록 수정(`DashboardPage.jsx`, 새 백엔드 변경 없음).
+
+### Phase 5.67 — DashboardPage.jsx 리팩토링: 모달/헬퍼 컴포넌트 분리 (2026-08-16)
+
+**계기**: 사용자 "리팩토링 진행해줘" — 대상을 물어보니(AskUserQuestion)
+`DashboardPage.jsx`(4933줄, 프런트엔드 최대 파일) 지정.
+
+**구조 분석**: 파일이 뚜렷이 세 구간으로 나뉘어 있었다. (1) 줄 1~548 순수
+포맷터 함수 30개 + 페이지 상수 + `StaleDate`/`DiffArrow`/`KpiTile`,
+(2) 줄 549~3030 모달 컴포넌트 20개(`CandleModal` 등) + `Top5RowTile`/
+`SectorRotationCard`/`Top5Card` — 전부 모듈 최상위 `function` 선언이라
+JS 스코프 규칙상 `DashboardPage()`의 로컬 state를 클로저로 참조할 수
+없고(grep으로 실사용처 전수 대조해 확인), props와 자체 `fetch`만으로
+완결되는 독립형 컴포넌트였다, (3) 줄 3031~4933 `export default function
+DashboardPage()` 본체(~1900줄, state/effect/렌더가 얽힌 실제 페이지 로직).
+(2)는 기계적으로 안전하게 옮길 수 있는 대상, (3)은 억지로 쪼개면
+prop-drilling/context 도입이 필요해 동작이 바뀔 위험이 있어 이번
+범위에서 제외(리팩토링이지 재설계가 아님).
+
+**구현**: `frontend/src/components/dashboard/` 신설.
+- `shared.jsx`(540줄) — 모달과 본체 양쪽에서 쓰는 포맷터 함수 30개,
+  `Intl.NumberFormat` 인스턴스, `StaleDate`/`DiffArrow`/`KpiTile`/
+  `Top5RowTile`/`SectorRotationCard`/`Top5Card`, 양쪽 공용 상수.
+- 모달 20개를 파일 하나씩(`CandleModal.jsx` ~ `GroupTopStocksModal.jsx`)
+  으로 분리, 모달 전용 보조 컴포넌트/상수는 같은 파일에 묶음(예:
+  `HynixPositioningModal.jsx`에 `PositioningHitrateTable`도 같이,
+  `PaperTradeModal.jsx`에 `formatTradeDateTime`/스타일 상수도 같이).
+- `DashboardPage.jsx`: 4933줄 → 2068줄. `DashboardPage()` 함수 본체는
+  옮긴 게 하나도 없었으므로(모달 호출부는 원래도 props만 넘기던 자리)
+  **한 글자도 안 바뀜** — 상단 import 블록만 옮긴 파일들을 가리키도록
+  교체하고, 특정 모달 1개에서만 쓰이던 상수/함수는 그 모달 파일로
+  같이 이동.
+- Sonnet 서브에이전트에게 정확한 줄 경계 맵(각 함수의 시작 줄 번호)과
+  "로직/주석 100% 그대로, 파일만 이동" 제약을 명시해 위임, 완료 후
+  직접 재검증.
+
+**검증**: `diff`로 `DashboardPage()` 함수 본체(새 파일 166번째 줄부터
+끝까지)가 원본 커밋의 3031~4933번째 줄과 **바이트 단위로 완전히 동일함**을
+확인. `CandleModal.jsx`/`PaperTradeModal.jsx` 등 개별 모달 파일도 원본
+해당 줄 구간과 diff 대조(공백 줄 하나 차이 외 동일). `npm run build`
+클린. `npx oxlint` — 신규 warning은 전부 `shared.jsx`의 `only-export-
+components`(포맷터+컴포넌트를 한 파일에서 export하면 나오는 근본적으로
+피할 수 없는 힌트, `GroupTreemap.jsx`도 같은 이유로 이미 갖고 있던 패턴)
+뿐이고 `no-unused-vars`/`no-undef`는 0건. `git status`로 다른 파일(백엔드/
+자동매매)은 전혀 안 건드렸음을 확인. 실 컨테이너(`stock-frontend-1`)
+HMR 로그에 신규 파일 21개 전부 에러 없이 반영됨, 프런트엔드 페이지
+curl 200 확인. 브라우저상 모달 클릭 동작(캔들/수급/업종·테마 드릴인 등)
+정상 여부는 직접 확인 못 해 사용자 확인 요청.
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
