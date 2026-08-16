@@ -221,20 +221,24 @@ async def test_search_no_match_returns_empty_list():
 # -- ka10059 파서 (순수 함수, DB/네트워크 없음) -----------------------------------
 
 
-def test_parse_ka10059_rows_maps_all_13_investor_fields():
+def test_parse_ka10059_rows_filters_to_3_stored_investors():
+    """ka10059 응답은 13개 투자자 필드를 담고 있지만(KA10059_FIELD_TO_INVESTOR),
+    저장 대상은 STOCK_FLOW_STORED_INVESTORS(개인/외국인/기관계) 3종뿐이다 —
+    나머지 10종은 어디서도 읽히지 않아 저장 낭비였다(2026-08-17 리소스 점검,
+    stock_flow가 DB 용량의 95% 차지)."""
     data = _fake_ka10059_response(dt.date(2026, 7, 17), dt.date(2026, 7, 16))
     rows = stocks._parse_ka10059_rows(data)
 
-    assert len(rows) == 26  # 2 dates x 13 investors
-    assert {r["investor"] for r in rows} == set(stocks.KA10059_FIELD_TO_INVESTOR.values())
+    assert len(rows) == 6  # 2 dates x 3 investors
+    assert {r["investor"] for r in rows} == set(stocks.STOCK_FLOW_STORED_INVESTORS)
     assert all(r["net_volume"] is None for r in rows)
 
     by_date_investor = {(r["date"], r["investor"]): r["net_value"] for r in rows}
     assert by_date_investor[(dt.date(2026, 7, 17), "개인")] == 1000
     assert by_date_investor[(dt.date(2026, 7, 17), "외국인")] == -500
-    assert by_date_investor[(dt.date(2026, 7, 17), "사모")] == -200
-    assert by_date_investor[(dt.date(2026, 7, 17), "국가")] == 0
     assert by_date_investor[(dt.date(2026, 7, 16), "개인")] == 800
+    assert (dt.date(2026, 7, 17), "사모") not in by_date_investor
+    assert (dt.date(2026, 7, 17), "국가") not in by_date_investor
 
 
 def test_parse_ka10059_rows_handles_missing_array():

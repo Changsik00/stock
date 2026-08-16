@@ -268,6 +268,16 @@ KA10059_FIELD_TO_INVESTOR: dict[str, str] = {
     "natfor": "기타외국인",
 }
 
+# stock_flow에 실제로 저장할 투자자 3종 — 나머지 10종은 ka10059 응답에는
+# 있지만 어디서도 읽히지 않는다(백엔드: scalp.py/stocks.py의 flow-percentile/
+# accumulation_screener.py 전부 개인·외국인·기관계만 조회, 프런트:
+# StockDetailModal.jsx가 DEFAULT_INVESTORS만 순회 — FlowChart.jsx의
+# EXTRA_INVESTORS 5종 토글은 market_flow 소스라 이 테이블과 무관). 저장만
+# 되고 한 번도 안 읽혀 stock_flow가 DB 용량의 95%를 차지하던 낭비를 없앤다
+# (2026-08-17, 실측: 1065MB 중 970MB가 이 10종). SectorFlow 모델(같은 파일
+# models.py)이 이미 동일한 이유로 3종만 저장하도록 설계돼 있던 것과 통일.
+STOCK_FLOW_STORED_INVESTORS = frozenset({"개인", "외국인", "기관계"})
+
 
 def _parse_signed_int(raw: object) -> int | None:
     """ka10059 숫자 필드는 "+"/"-" 부호가 붙은 문자열로 온다(예: "-218284").
@@ -290,7 +300,9 @@ def _parse_signed_int(raw: object) -> int | None:
 
 def _parse_ka10059_rows(data: dict) -> list[dict]:
     """ka10059 응답 body -> [{"date": dt.date, "investor": str, "net_value": int|None,
-    "net_volume": None}, ...] (일자 x 투자자 13개).
+    "net_volume": None}, ...] (일자 x STOCK_FLOW_STORED_INVESTORS 3개 — 응답 자체는
+    13개 필드를 담고 있지만 저장 대상이 아닌 10개는 여기서 걸러낸다, 위 상수 주석
+    참고).
 
     net_volume은 항상 None — 이 라우터는 금액 모드(amt_qty_tp="1", 기본값)만
     호출한다(수량까지 받으려면 별도 콜이 필요해 호출 예산이 배로 늘어남,
@@ -309,6 +321,8 @@ def _parse_ka10059_rows(data: dict) -> list[dict]:
             logger.warning("stocks: ka10059 dt 파싱 실패, 건너뜀: %r", date_str)
             continue
         for field, investor in KA10059_FIELD_TO_INVESTOR.items():
+            if investor not in STOCK_FLOW_STORED_INVESTORS:
+                continue
             out.append(
                 {
                     "date": date,
@@ -1112,6 +1126,16 @@ async def _warm_stock_intraday(code: str, interval: int) -> dict:
             "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         }
         _intraday_cache[cache_key] = {"ts": now, "data": payload}
+        # 만료된 키를 함께 청소한다 — 예전엔 TTL만 있고 삭제 로직이 없어
+        # (code, interval) 조합이 프로세스 생애주기 동안 무한정 쌓였다(자동매매/
+        # 스캘핑이 30~60초마다 계속 새 종목을 조회, 2026-08-17 리소스 점검에서
+        # 발견). 이미 락을 쥔 채 캐시를 쓰는 시점에 기회적으로 정리해 새
+        # 스케줄러 잡 없이 크기를 상한시킨다.
+        stale_keys = [
+            k for k, v in _intraday_cache.items() if (now - v["ts"]) >= _intraday_ttl_seconds(k[1])
+        ]
+        for k in stale_keys:
+            del _intraday_cache[k]
         return payload
 
 

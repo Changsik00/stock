@@ -3851,7 +3851,58 @@ components`(포맷터+컴포넌트를 한 파일에서 export하면 나오는 �
 자동매매)은 전혀 안 건드렸음을 확인. 실 컨테이너(`stock-frontend-1`)
 HMR 로그에 신규 파일 21개 전부 에러 없이 반영됨, 프런트엔드 페이지
 curl 200 확인. 브라우저상 모달 클릭 동작(캔들/수급/업종·테마 드릴인 등)
-정상 여부는 직접 확인 못 해 사용자 확인 요청.
+정상 여부는 직접 확인 못 해 사용자 확인 요청 — 사용자가 "모달 작동해"로
+확인 완료.
+
+### Phase 5.68 — 리소스 낭비 정리: stock_flow 저장 축소 + intraday 캐시 메모리 누수 수정 (2026-08-17)
+
+**계기**: 사용자 "리소스 낭비하거나 최적화 할 부분으로 고민해봐 .. 특히
+pooling 최적화, 정보 재사용.. , db 에 담을때 디스플레이용 저장용, 압축해서
+담아야 할지." Explore agent 2개(DB 레이어, 애플리케이션 캐싱/폴링 레이어)를
+병렬로 조사해 두 가지 명확한 낭비를 확인.
+
+**1) `stock_flow`가 DB 용량의 95%를 차지하며 13종 투자자 분류 전부를
+저장하는데 실사용은 3종(개인/외국인/기관계)뿐**: 백엔드 읽기 지점 3곳
+(`scalp.py`/`stocks.py`의 flow-percentile/`accumulation_screener.py`)과
+프런트(`StockDetailModal.jsx`가 `DEFAULT_INVESTORS`만 순회, 8종 토글인
+`EXTRA_INVESTORS`는 별개 테이블(`market_flow`) 기반 `FlowChart.jsx`
+전용) 전수 확인 — 나머지 10종을 읽는 코드는 어디에도 없었다. `SectorFlow`
+모델이 이미 동일한 이유로 3종만 저장하도록 설계돼 있던 것과 통일.
+
+- `routers/stocks.py`: `STOCK_FLOW_STORED_INVESTORS = frozenset({"개인",
+  "외국인", "기관계"})` 추가, 유일한 파싱 지점인 `_parse_ka10059_rows`
+  (온디맨드 `_ensure_flows_cached`/`live_refresh.py`의 stock_flow_scan/
+  `accumulation_screener.py` 3개 쓰기 경로가 전부 이 함수를 재사용하므로
+  한 곳만 고치면 됨)에서 나머지 10종을 emit 시점에 걸러냄.
+- 신규 Alembic 마이그레이션(`e36f368f3c93`, 스키마 변경 없이 데이터만)으로
+  기존 10종 과거 행 삭제(AskUserQuestion으로 확인: 즉시 삭제 선택 — 어차피
+  ka10059가 최근 90일 이전은 재조회 불가라 되돌릴 수 없지만, 한 번도 읽힌
+  적 없는 데이터라 손실 위험 없음).
+- 삭제 후 `VACUUM FULL stock_flow` 실행(장 시작 전 08:25 KST, 실계좌
+  포지션 없음(`status: idle`) 확인 후 진행) — **실측: 1065MB → 117MB**
+  (91% 감소, 계획 당시 추정치 ~245MB보다 더 절감됨). 행 수: 13종 x
+  403,941행(5,251,233행) → 3종 x 403,941행(1,211,823행).
+
+**2) `routers/stocks.py`의 `_intraday_cache`(종목 분봉 메모리 캐시)가
+만료 항목을 지우는 로직이 없어 무한정 증가**: 자동매매/스캘핑이 30~60초
+주기로 계속 새 종목을 조회하며 프로세스 생애주기 동안 `(code, interval)`
+키가 쌓이기만 하던 문제. 새 스케줄러 잡을 추가하지 않고, 이미
+`_intraday_cache_lock`을 쥐고 있는 `_warm_stock_intraday` 안에서 캐시를
+쓰는 시점마다 만료된 키를 함께 청소하도록 최소 침습으로 수정.
+
+**검증**: 킬스위치 확인(`enabled: true, status: idle`, 포지션 없음) 후
+`test_auto_trader_collector.py`/`test_auto_trade_router.py` 제외
+`pytest -q` — 877 passed(§5.66/§5.67과 동일한 무관 기존 실패 1건 그대로),
+새로 고친 `test_parse_ka10059_rows_filters_to_3_stored_investors` 포함
+통과. 마이그레이션 전후 `SELECT investor, count(*) FROM stock_flow GROUP
+BY investor`로 직접 대조(위 실측치). `GET /api/stocks/005930/series`
+curl로 flows 필드가 3개 투자자 키만 남고 값은 정상(예: 외국인 순매수
+1,338,610천원)임을 확인 — 화면에 실제 보이던 데이터는 그대로. 마이그레이션/
+VACUUM 전후로 킬스위치 상태(`updated_at` 불변) 재확인 — 이번 작업이
+실계좌에 영향 없었음. `docker logs stock-backend-1`에 신규 에러 없음
+(로그에 보인 "매수 주문 실패: 장이 열리지않는 날입니다"는 공휴일에 계속
+도는 자동매매 30초 watch 루프가 키움 자체에서 거부된 것 — 이번 변경과
+무관한 기존 동작).
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
