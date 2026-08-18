@@ -98,8 +98,6 @@ import ForeignPositionModal from '../components/dashboard/ForeignPositionModal'
 import DerivativeEtfModal from '../components/dashboard/DerivativeEtfModal'
 import ExpiryPatternModal from '../components/dashboard/ExpiryPatternModal'
 import HynixPositioningModal from '../components/dashboard/HynixPositioningModal'
-import PairViewModal from '../components/dashboard/PairViewModal'
-import PaperTradeModal from '../components/dashboard/PaperTradeModal'
 import FlowRankFullModal from '../components/dashboard/FlowRankFullModal'
 import ValueRankFullModal from '../components/dashboard/ValueRankFullModal'
 import FlowPathFullModal from '../components/dashboard/FlowPathFullModal'
@@ -1461,38 +1459,6 @@ export default function DashboardPage() {
             )
           }
         />
-        {/* 종목 페어(본주·레버리지2X·인버스2X) 통합 뷰 진입점(PLAN.md §5.50-2/5.50-3) —
-            위 타일과 동일하게 상시 값을 미리 fetch하지 않고 클릭 시 PairViewModal이
-            열릴 때 데이터를 가져온다. 로컬 전용 기능이라 STATIC_DATA에서는 기존
-            foreignPosition 모달로 대신 연결한다(같은 STATIC_DATA 분기 관례). */}
-        <KpiTile
-          label="본주 · 레버리지 · 인버스 비교"
-          value="자세히 보기"
-          sub={<span className="kpi-tile-sub">호가 매물대 · ETF 괴리율</span>}
-          onClick={() =>
-            setModal(
-              STATIC_DATA
-                ? { type: 'foreignPosition', title: '외인 현물 vs 선물 · 베이시스' }
-                : { type: 'pairView', title: '본주 · 레버리지2X · 인버스2X 비교' }
-            )
-          }
-        />
-        {/* 가상 매매 기록 장부 진입점(PLAN.md §5.51) — 위 두 타일과 동일하게 클릭
-            시에만 PaperTradeModal이 자기 데이터를 가져온다. 서버에 실제 주문을
-            내지 않는 순수 로컬 장부라 로컬 전용 기능이고, STATIC_DATA에서는
-            기존 foreignPosition 모달로 대신 연결한다(같은 STATIC_DATA 분기 관례). */}
-        <KpiTile
-          label="가상 매매 기록"
-          value="자세히 보기"
-          sub={<span className="kpi-tile-sub">진입/청산 기록 · 손익 추적</span>}
-          onClick={() =>
-            setModal(
-              STATIC_DATA
-                ? { type: 'foreignPosition', title: '외인 현물 vs 선물 · 베이시스' }
-                : { type: 'paperTrade', title: '가상 매매 기록' }
-            )
-          }
-        />
       </div>
 
       {/* 3. 시황 · 자금 */}
@@ -2025,8 +1991,6 @@ export default function DashboardPage() {
         {modal?.type === 'derivativeEtf' && <DerivativeEtfModal />}
         {modal?.type === 'expiryPattern' && <ExpiryPatternModal />}
         {modal?.type === 'hynixPositioning' && <HynixPositioningModal />}
-        {modal?.type === 'pairView' && <PairViewModal />}
-        {modal?.type === 'paperTrade' && <PaperTradeModal />}
         {/* 랭킹 3종 전체 보기 모달 — onRowClick을 STATIC_DATA일 때 undefined로 넘겨
             행 클릭 자체를 비활성화한다(TOP5 카드와 동일한 정적 모드 판단, 위
             Top5RowTile 주석 참고). */}

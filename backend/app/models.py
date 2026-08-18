@@ -572,47 +572,6 @@ class InvestorWarningEvent(Base):
     )
 
 
-class PaperTrade(Base):
-    """가상 매매 기록 — 실제 주문 없이 사용자가 직접 판단한 진입/청산을 기록해
-    손익을 추적하는 순수 로컬 장부(PLAN.md §5.51).
-
-    **이 테이블/라우터는 매매 실행이 아니다** — `KiwoomClient.place_buy_order`/
-    `place_sell_order`(§5.48, kt10000/kt10001)를 어떤 코드 경로에서도 호출하지
-    않는다. 사용자가 §5.50 통합 뷰(호가·ETF 괴리율·나스닥선물 등)를 보고 이미
-    직접 내린 진입/청산 판단을 진입가·수량·청산가로 "기록"만 하고 손익을
-    계산해 줄 뿐이다(house rule §5 — 판단/추천 문구 생성 금지, 관찰 서술만).
-
-    대상 종목은 §5.50 `PAIR_SETS`의 6개 코드(005930/000660/0193W0/0193T0/
-    0193L0/0197X0)로 한정한다 — `routers/paper_trades.py`가 요청 시점에
-    검증한다(이 테이블 자체는 다른 종목코드를 막지 않지만, 라우터가 그 6개
-    바깥의 code로는 insert하지 않는다).
-
-    ``side``: "buy"(롱, 상승에 베팅) | "sell"(숏, 하락에 베팅) — 실제 주문
-    방향이 아니라 사용자가 기록한 포지션 방향일 뿐이다. ``status``: "open"
-    (진입만 기록됨) | "closed"(청산가까지 기록됨). id는 사람이 손으로 입력하는
-    장부라 오타 정정(삭제) 대상을 가리키는 단순 식별자로만 쓰는 autoincrement
-    정수 PK다 — 이 프로젝트의 다른 테이블들과 달리 시계열 복합 PK가 아니다
-    (파일 상단 docstring 참고 — 이 테이블은 TimescaleDB 하이퍼테이블 대상이
-    아니라 예외를 둔다)."""
-
-    __tablename__ = "paper_trade"
-
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    code: Mapped[str] = mapped_column(String(20), nullable=False)
-    name: Mapped[str] = mapped_column(String(100), nullable=False)
-    side: Mapped[str] = mapped_column(String(10), nullable=False)  # "buy"(롱) | "sell"(숏)
-    entry_price: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
-    entry_qty: Mapped[float] = mapped_column(Numeric(14, 4), nullable=False)
-    entry_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    exit_price: Mapped[float | None] = mapped_column(Numeric(12, 2))
-    exit_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
-    status: Mapped[str] = mapped_column(String(10), nullable=False, default="open")  # "open"|"closed"
-    note: Mapped[str | None] = mapped_column(String(500))
-    created_at: Mapped[dt.datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-
-
 class PositioningSnapshot(Base):
     """§5.50 포지셔닝 프레임(하이닉스 중심 top-down 브리핑)의 하루 1회 스냅샷 +
     사후 결과 기록 — 사후 검증(PLAN.md §5.52) 전용 관찰 로그다.
@@ -628,10 +587,7 @@ class PositioningSnapshot(Base):
 
     ``date``가 자연 키인 진짜 시계열(하루 1행)이라, 파일 상단 docstring의 §5.2
     복합 PK 관례를 예외 없이 그대로 따른다 — 단일 컬럼(``date``)이 이미
-    복합키의 역할을 하므로 별도로 두 컬럼을 묶을 필요가 없을 뿐이다
-    (``PaperTrade``의 autoincrement 정수 PK 예외와는 다른 케이스 — 그 모델은
-    "사람이 손으로 입력하는 장부"라 자연 키가 없어 예외를 둔 것이고, 이 모델은
-    자연 키(date)가 있어 예외가 아니다).
+    복합키의 역할을 하므로 별도로 두 컬럼을 묶을 필요가 없을 뿐이다.
 
     모든 값 컬럼이 nullable인 이유: 개별 소스(regime, flow-concentration, 외인
     현물/선물, SOX, 나스닥선물, 하이닉스 상대강도, 리스크 경보) 중 하나가
@@ -724,8 +680,8 @@ class AutoTradeLog(Base):
     킬스위치가 꺼져 있는 동안(매 폴링마다 "disabled, skipped")이나 idle 상태에서
     진입 조건이 미충족인 동안은 이 테이블에 아무 것도 쌓이지 않는다 — 노이즈를
     피하기 위해 `collectors/auto_trader.py`가 의도적으로 로그를 남기지 않는
-    경로다(모듈 docstring 참고). ``id``는 `PaperTrade`와 동일한 이유(자연 키
-    없는 append-only 기록)로 autoincrement 정수 PK를 쓴다."""
+    경로다(모듈 docstring 참고). ``id``는 자연 키 없는 append-only 기록이라
+    autoincrement 정수 PK를 쓴다."""
 
     __tablename__ = "auto_trade_log"
 

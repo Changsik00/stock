@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .routers import admin, auto_trade, basis, etf, flow_rank, groups, macro, markets, paper_trades, scalp, stocks
+from .routers import admin, auto_trade, basis, etf, flow_rank, groups, macro, markets, scalp, stocks
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -48,7 +48,7 @@ app = FastAPI(title="수급 분석 대시보드 API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -61,7 +61,6 @@ app.include_router(flow_rank.router)
 app.include_router(groups.router)
 app.include_router(admin.router)
 app.include_router(scalp.router)
-app.include_router(paper_trades.router)
 app.include_router(auto_trade.router)
 
 

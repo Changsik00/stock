@@ -3904,6 +3904,51 @@ VACUUM 전후로 킬스위치 상태(`updated_at` 불변) 재확인 — 이번 �
 도는 자동매매 30초 watch 루프가 키움 자체에서 거부된 것 — 이번 변경과
 무관한 기존 동작).
 
+### Phase 5.69 — 가상매매기록·본주 페어뷰 제거 (프론트+백엔드 전부) (2026-08-18)
+
+**계기**: 대시보드 "본주 · 레버리지 · 인버스 비교"(PairViewModal, §5.50-2/-3)와
+"가상 매매 기록"(PaperTradeModal, §5.51) 두 KPI 타일이 "필요 없어 보인다"는
+지적 — `AutoTradePage.jsx`(§5.54, 실계좌 완전자동매매 전용 탭: 킬스위치,
+수동 매수/매도, 실거래 로그)가 생기면서 "수동으로 페어 비교해서 진입 타이밍
+재기"와 "실전 가기 전 연습 장부" 둘 다 용도가 없어졌다는 취지.
+AskUserQuestion으로 확인: 프론트+백엔드 전부 제거(추천안) — PairViewModal
+백엔드는 저장 데이터 없는 라이브 조회 전용이라 손실 없고, `paper_trade`
+테이블은 실측 확인 결과 삭제 시점 **0행**이라 데이터 손실 없음.
+
+**제거**: `DashboardPage.jsx`(import 2줄, KPI 타일 2개, 모달 디스패치 2줄),
+`components/dashboard/PairViewModal.jsx`/`PaperTradeModal.jsx`(파일 삭제),
+`api.js`(`fetchPairView`/`createPaperTrade`/`closePaperTrade`/
+`deletePaperTrade`/`fetchPaperTrades` + 이제 유일한 호출자를 잃은
+`deleteJson` 헬퍼도 같이), `routers/paper_trades.py`(파일 삭제),
+`main.py`(라우터 등록 + CORS `allow_methods`의 DELETE도 제거 — 이제 DELETE
+쓰는 엔드포인트가 하나도 없음), `routers/markets.py`의 "종목 페어 통합 뷰"
+구획 203줄(1960-2162행, `PAIR_SETS`/`_etf_nav_cache`/`positioning_pair_view`
+등 — 바로 뒤 나스닥선물 구획은 완전히 독립적이라 그대로 둠), `models.py`의
+`PaperTrade` 모델(다른 두 모델 docstring에 남아있던 낡은 교차 참조 문구도
+같이 정리). 신규 Alembic 마이그레이션으로 `paper_trade` 테이블 drop(downgrade는
+스키마 재생성 가능하도록 완전히 작성 — §5.68의 데이터 삭제 마이그레이션과
+달리 이번엔 스키마뿐이라 되돌릴 수 있음).
+
+**테스트**: `test_paper_trades_router.py` 삭제. 나스닥선물과 같은 파일에서
+테스트하던 `test_markets_pair_view_and_nasdaq_futures_router.py`는 pair_view
+테스트 6개 + 전용 fixture/헬퍼만 제거하고 나스닥선물 테스트 4개는 그대로
+유지, 이제 나스닥선물만 다루므로 `test_markets_nasdaq_futures_router.py`로
+파일명 변경(git mv). `test_auto_trade_router.py` 등 실계좌 공유 DB를 다루는
+민감한 테스트 3개는 `test_paper_trades_router.py`를 "동일 패턴 참고"로
+언급하는 주석만 있고 실제 의존은 없어 손대지 않음(최소 침습).
+
+**검증**: 킬스위치 확인(`enabled: true, status: idle`) 후 위 2개 파일
+제외 `pytest -q` — 856 passed(삭제한 테스트만큼 감소, §5.66부터 반복된
+동일한 무관 기존 실패 1건 그대로), 새 `test_markets_nasdaq_futures_router.py`
+4개 단독 실행도 통과. `alembic upgrade head` 후 `\d paper_trade`로 테이블
+실제 삭제 확인. `npm run build`/`npx oxlint` 클린(신규 warning 없음, 번들
+크기 961KB→949KB로 소폭 감소). `git grep`으로 프론트/백엔드 소스 전체에서
+pairView/PairView/paperTrade/PaperTrade/pair_view/paper_trade 잔존 확인 —
+남은 건 과거 alembic 마이그레이션 파일(수정 금지 대상)과 auto_trade.py의
+무관 주석뿐. 실 컨테이너 curl로 `/api/markets/positioning/pair-view`,
+`/api/paper-trades` 둘 다 404 확인, `docker logs stock-backend-1`에 신규
+에러 없음.
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)

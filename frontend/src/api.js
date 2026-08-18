@@ -27,21 +27,6 @@ async function postJson(url, body) {
   return parsed
 }
 
-async function deleteJson(url) {
-  const res = await fetch(url, { method: 'DELETE' })
-  if (!res.ok) {
-    const text = await res.text()
-    let detail = text
-    try {
-      const parsed = JSON.parse(text)
-      detail = typeof parsed?.detail === 'string' ? parsed.detail : JSON.stringify(parsed?.detail)
-    } catch {
-      // 응답이 JSON이 아니면(빈 바디 등) 원문 텍스트를 그대로 쓴다.
-    }
-    throw new Error(detail || `요청 실패 (${res.status})`)
-  }
-}
-
 // GitHub Pages 정적 배포 모드 — VITE_STATIC_DATA=1로 빌드하면 /api/* 대신
 // public/data/*.json 스냅샷을 fetch해서 클라이언트에서 슬라이싱한다. 스냅샷은
 // 항상 최대 1095일 창을 담고 있으므로 (수집 스크립트, PLAN.md 참고) 요청받은
@@ -535,16 +520,6 @@ export async function fetchHynixRelativeStrength() {
 }
 
 // GET /api/markets/positioning/pair-view?set=samsung|hynix -> { set, market_closed,
-// stock: {code, name, change_rate, quote: {asks, bids, total_ask_qty, total_bid_qty,
-// base_time}|None}, leverage: {code, name, now_value, nav, deviation_pct, quote}|같은 구조,
-// inverse: {...leverage와 동일 구조...}, computed_at } (PLAN.md §5.50-2/5.50-3) — 본주 +
-// 레버리지2X ETF + 인버스2X ETF 3열 통합 뷰(호가 10단계 + ETF NAV 괴리율). 관찰치만
-// 제공 — "강함/약함"/매매 판단 텍스트로 절대 쓰지 말 것. 로컬 전용 기능, STATIC_DATA
-// 대상 아님.
-export async function fetchPairView(set) {
-  return getJson(`/api/markets/positioning/pair-view?set=${set}`)
-}
-
 // GET /api/markets/nasdaq-futures/live -> { symbol: "NQ=F", bars: [{time, close}, ...],
 // latest_change_pct, cached_at } (PLAN.md §5.50-5) — 나스닥선물 준실시간 5분봉(CME
 // Globex가 KST 주간에도 열려 있어 "지금"에 가까운 값). latest_change_pct는 마지막 봉과
@@ -604,41 +579,6 @@ export async function fetchMacroSeries(ids, days) {
     return { days, series }
   }
   return getJson(`/api/macro/series?ids=${idParam}&days=${days}`)
-}
-
-// -- 가상 매매 기록(paper trade) 장부 (PLAN.md §5.51) — §5.50 통합 뷰(호가·ETF
-// 괴리율·나스닥선물)를 보고 사용자가 직접 내린 진입/청산 판단을 기록만 하는 순수
-// 로컬 장부. **실제 주문을 내지 않는다** — 백엔드가 kt10000/kt10001을 호출하지
-// 않는다. 대상 종목은 §5.50 PAIR_SETS 6개 코드로 한정(백엔드가 그 외는 400).
-// 로컬 전용 기능, STATIC_DATA 대상 아님.
-
-// POST /api/paper-trades { code, side, entry_price, entry_qty, note? } -> 생성된 행
-// { id, code, name, side, entry_price, entry_qty, entry_at, exit_price: null,
-// exit_at: null, status: "open", note, current_price: null, unrealized_pnl: null,
-// unrealized_pnl_pct: null, realized_pnl: null, realized_pnl_pct: null }.
-export async function createPaperTrade(payload) {
-  return postJson('/api/paper-trades', payload)
-}
-
-// POST /api/paper-trades/{id}/close { exit_price } -> 갱신된 행(status: "closed",
-// exit_price/exit_at 채워짐, realized_pnl/realized_pnl_pct 계산됨). id 없으면 404,
-// 이미 closed면 409(호출부에서 에러 메시지로 노출).
-export async function closePaperTrade(id, exitPrice) {
-  return postJson(`/api/paper-trades/${id}/close`, { exit_price: exitPrice })
-}
-
-// DELETE /api/paper-trades/{id} -> 204(바디 없음). 오기록 정정용 — id 없으면 404.
-export async function deletePaperTrade(id) {
-  return deleteJson(`/api/paper-trades/${id}`)
-}
-
-// GET /api/paper-trades?status=open|closed|all(기본 all) -> { status, rows: [{id,
-// code, name, side, entry_price, entry_qty, entry_at, exit_price, exit_at, status,
-// note, current_price, unrealized_pnl, unrealized_pnl_pct, realized_pnl,
-// realized_pnl_pct}, ...] } — entry_at 내림차순. open 행은 현재가/미실현손익이
-// 채워지고(가격 조회 실패 시 셋 다 null), closed 행은 실현손익이 채워진다.
-export async function fetchPaperTrades(status = 'all') {
-  return getJson(`/api/paper-trades?status=${status}`)
 }
 
 // -- 완전자동매매 엔진(SOL AI반도체TOP2플러스 0167A0, 트레일링 스탑) — PLAN.md
