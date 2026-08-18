@@ -323,6 +323,74 @@ async def test_get_log_respects_limit():
     assert len(resp.json()["rows"]) == 2
 
 
+async def test_get_log_filters_by_kst_date():
+    """PLAN.md §5.70 — 2099-01-0X처럼 실제 거래 이력과 절대 겹치지 않을 미래
+    날짜로 고정해 실 dev DB의 다른 진짜 행과 섞이지 않게 한다(다른 테스트들이
+    쓰는 `>= 2` 관용구 대신 이 테스트는 total/rows 정확한 개수를 확인해야
+    하므로 날짜 자체를 충돌 불가능하게 고른다)."""
+    async with async_session_factory() as session:
+        # 2099-01-17 06:00 UTC == 2099-01-17 15:00 KST(그 날짜 안).
+        session.add(
+            AutoTradeLog(
+                ts=dt.datetime(2099, 1, 17, 6, 0, tzinfo=dt.timezone.utc),
+                event_type="entry", code="0167A0", price=16000, reason="1/17 기록",
+            )
+        )
+        # 2099-01-16 15:01 UTC == 2099-01-17 00:01 KST(자정 막 넘어감, 여전히 1/17).
+        session.add(
+            AutoTradeLog(
+                ts=dt.datetime(2099, 1, 16, 15, 1, tzinfo=dt.timezone.utc),
+                event_type="entry", code="0167A0", price=16000, reason="1/17 자정 직후 기록",
+            )
+        )
+        # 2099-01-16 14:59 UTC == 2099-01-16 23:59 KST(경계 밖 — 하루 전).
+        session.add(
+            AutoTradeLog(
+                ts=dt.datetime(2099, 1, 16, 14, 59, tzinfo=dt.timezone.utc),
+                event_type="entry", code="0167A0", price=16000, reason="1/16 기록",
+            )
+        )
+        await session.commit()
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/auto-trade/log", params={"date": "2099-01-17", "limit": 50})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 2
+    reasons = {r["reason"] for r in body["rows"]}
+    assert reasons == {"1/17 기록", "1/17 자정 직후 기록"}
+
+
+async def test_get_log_offset_paginates_and_total_ignores_offset():
+    async with async_session_factory() as session:
+        base = dt.datetime(2099, 2, 1, 6, 0, tzinfo=dt.timezone.utc)
+        for i in range(3):
+            session.add(
+                AutoTradeLog(
+                    ts=base - dt.timedelta(minutes=i),
+                    event_type="entry", code="0167A0", price=16000, reason=f"2/1 기록 {i}",
+                )
+            )
+        await session.commit()
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp_page1 = await client.get("/api/auto-trade/log", params={"date": "2099-02-01", "limit": 2, "offset": 0})
+        resp_page2 = await client.get("/api/auto-trade/log", params={"date": "2099-02-01", "limit": 2, "offset": 2})
+
+    page1 = resp_page1.json()
+    page2 = resp_page2.json()
+    assert page1["total"] == 3
+    assert page2["total"] == 3  # total은 offset과 무관하게 항상 전체 개수
+    assert len(page1["rows"]) == 2
+    assert len(page2["rows"]) == 1
+    # 두 페이지가 겹치지 않고 합치면 전체가 되는지(최신순 유지).
+    assert [r["reason"] for r in page1["rows"]] == ["2/1 기록 0", "2/1 기록 1"]
+    assert [r["reason"] for r in page2["rows"]] == ["2/1 기록 2"]
+
+
 # ---------------------------------------------------------------------------
 # POST /api/auto-trade/manual-buy (PLAN.md §5.56 — 자동 감지 엔진 위에 얹는
 # 수동 매수 버튼. 자동 진입 경로(_handle_idle)와 동일한 안전장치를 검증한다.)

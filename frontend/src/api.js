@@ -601,11 +601,14 @@ export async function toggleAutoTrade(enabled) {
   return postJson('/api/auto-trade/toggle', { enabled })
 }
 
-// GET /api/auto-trade/log?limit=N(기본 200) -> { rows: [{id, ts, event_type,
-// code, price, reason, signal_snapshot, order_response}, ...] } — ts 내림차순
-// (매매일지, 최신이 먼저).
-export async function fetchAutoTradeLog(limit = 200) {
-  return getJson(`/api/auto-trade/log?limit=${limit}`)
+// GET /api/auto-trade/log?limit=N(기본 30)&offset=N(기본 0)&date=YYYY-MM-DD(생략 시
+// 전체) -> { rows: [{id, ts, event_type, code, price, reason, signal_snapshot,
+// order_response}, ...], total } — ts 내림차순(매매일지, 최신이 먼저). total은
+// 같은 날짜 필터 기준 전체 건수(페이지네이션용).
+export async function fetchAutoTradeLog({ date, limit = 30, offset = 0 } = {}) {
+  const params = new URLSearchParams({ limit, offset })
+  if (date) params.set('date', date)
+  return getJson(`/api/auto-trade/log?${params}`)
 }
 
 // POST /api/auto-trade/manual-buy -> 갱신된 state(GET /state와 동일 모양).

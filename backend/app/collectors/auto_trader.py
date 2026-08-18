@@ -270,7 +270,9 @@ async def _get_risk_alert_active(session: AsyncSession) -> bool:
     return bool(risk and risk.get("alerts"))
 
 
-async def run_auto_trade(session: AsyncSession, now_kst: dt.time | None = None) -> dict:
+async def run_auto_trade(
+    session: AsyncSession, now_kst: dt.time | None = None, today_str: str | None = None
+) -> dict:
     """PLAN.md §5.54 상태 기계를 1회 평가·실행한다. PLAN.md §5.55(2026-08-06,
     실제 손실 사고 이후 안전 규칙) 4개가 이 함수와 `_handle_idle`/
     `_handle_position`에 배선돼 있다 — 모듈 상단 "안전 규칙 추가" 절 참고.
@@ -281,15 +283,18 @@ async def run_auto_trade(session: AsyncSession, now_kst: dt.time | None = None) 
     바뀌지 않는다. 테스트가 15:20~15:30 KST 같은 특정 시각을 재현하려고
     실제 벽시계를 기다리지 않게 하기 위한 주입 지점이다(house rule — "시간
     관련 테스트는 now_kst를 파라미터로 주입 가능하게 설계", 하드코딩된
-    `dt.datetime.now()`를 함수 내부 깊은 곳에 두지 않는다).
+    `dt.datetime.now()`를 함수 내부 깊은 곳에 두지 않는다). `today_str`
+    (선택, 기본 None, "YYYYMMDD")도 동일한 이유로 주입 가능하게 뒀다 — 아래
+    "오늘 데이터 아니면 스킵" 가드용, 기본값은 실제 KST 오늘 날짜.
 
     Returns 요약 dict(로깅용, `scalp_tracker.track_scalp_picks`/
     `positioning_snapshot.track_positioning_snapshot`의 반환 관례 참고) —
     ``{"enabled": bool, "action": str, ...}``. ``action``은
-    "none"(꺼짐/조건 미충족/신고가만 조용히 갱신)|"enter"|"trail_activate"|
-    "exit_stop_loss"|"exit_trail"|"exit_eod_forced"|"exit_flow_reversal"|
-    "entry_blocked_time"|"entry_blocked_risk"|"budget_blocked"|"buy_failed"|
-    "sell_failed"|"error" 중 하나.
+    "none"(꺼짐/조건 미충족/신고가만 조용히 갱신)|"stale_data"(오늘 거래
+    데이터 없음, 공휴일 등)|"enter"|"trail_activate"|"exit_stop_loss"|
+    "exit_trail"|"exit_eod_forced"|"exit_flow_reversal"|"entry_blocked_time"|
+    "entry_blocked_risk"|"budget_blocked"|"buy_failed"|"sell_failed"|"error"
+    중 하나.
     """
     result: dict = {"enabled": False, "action": "none"}
 
@@ -317,6 +322,23 @@ async def run_auto_trade(session: AsyncSession, now_kst: dt.time | None = None) 
         bars = intraday.get("bars") if intraday else None
         if not bars:
             result["action"] = "no_bars"
+            return result
+
+        # 2026-08-18(리소스 점검 중 발견) — 공휴일 등 실제로 오늘 거래 데이터가
+        # 없는 날에도 이 함수 자체는 계속 평가를 돌았다. `_warm_stock_intraday`가
+        # 부르는 ka10080은 공휴일에 조회해도 마지막 실제 거래일 데이터를 그대로
+        # 주므로(`parse_minute_chart_rows`가 "가장 최근 날짜"만 골라 반환,
+        # `clients/kiwoom.py` 참고) golden cross/volume spike가 그 정지된
+        # 데이터에서 계속 "최근"으로 재평가돼, 조건이 맞으면 매 폴링(60초)마다
+        # 실제 매수 주문을 제출했다 — 키움 서버가 매번 거부했지만(장이 열리지
+        # 않는 날), 그 실패가 매번 AutoTradeLog에 error로 쌓여 하루 288건까지
+        # 노이즈가 생겼다(2026-08-17 실측). 새 홀리데이 달력 없이, 이미 매
+        # 폴링 가져오는 1분봉의 날짜가 "오늘"과 다르면 킬스위치 꺼짐과 동일하게
+        # 신호 평가/주문 시도 자체를 하지 않는다 — 로그도 남기지 않는다(노이즈
+        # 방지 원칙, 모듈 docstring 참고).
+        effective_today_str = today_str if today_str is not None else dt.datetime.now(KST).strftime("%Y%m%d")
+        if bars[-1].get("date") != effective_today_str:
+            result["action"] = "stale_data"
             return result
 
         current_price = bars[-1]["close"]

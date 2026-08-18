@@ -311,15 +311,51 @@ function StrategyPanel() {
   )
 }
 
-function LogPanel({ rows, loading, error }) {
+// 페이지당 행 수 — api.js fetchAutoTradeLog 기본값과 맞춘다.
+const LOG_PAGE_SIZE = 30
+
+function LogPanel({ rows, loading, error, date, onDateChange, offset, total, onPrevPage, onNextPage }) {
+  const hasPrev = offset > 0
+  const hasNext = offset + rows.length < total
+  const rangeStart = total === 0 ? 0 : offset + 1
+  const rangeEnd = offset + rows.length
   return (
     <section style={{ border: '1px solid var(--border, #333)', borderRadius: 12, padding: 16 }}>
       <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 8 }}>
         매매일지 (감사 로그, 최신이 위) — 실행뿐 아니라 판단 근거(신호값)까지 그대로 기록합니다.
       </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+        <label style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
+          날짜
+          <input
+            type="date"
+            value={date}
+            onChange={(e) => onDateChange(e.target.value)}
+            style={{ padding: '4px 6px', fontSize: 13 }}
+          />
+        </label>
+        {date && (
+          <button type="button" className="toggle-chip" onClick={() => onDateChange('')}>
+            전체 기간
+          </button>
+        )}
+        <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+          {total === 0 ? '0건' : `${rangeStart}–${rangeEnd} / 총 ${total}건`}
+        </span>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button type="button" className="toggle-chip" disabled={!hasPrev} onClick={onPrevPage}>
+            이전
+          </button>
+          <button type="button" className="toggle-chip" disabled={!hasNext} onClick={onNextPage}>
+            다음
+          </button>
+        </div>
+      </div>
       {loading && <div className="state">불러오는 중…</div>}
       {error && <div className="state">불러오기 실패: {error}</div>}
-      {!loading && !error && rows.length === 0 && <div className="state">아직 기록이 없습니다.</div>}
+      {!loading && !error && rows.length === 0 && (
+        <div className="state">{date ? '이 날짜엔 기록이 없습니다.' : '아직 기록이 없습니다.'}</div>
+      )}
       {!loading && !error && rows.length > 0 && (
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
@@ -379,6 +415,9 @@ export default function AutoTradePage() {
   const [logRows, setLogRows] = useState([])
   const [logLoading, setLogLoading] = useState(true)
   const [logError, setLogError] = useState(null)
+  const [logDate, setLogDate] = useState('')
+  const [logOffset, setLogOffset] = useState(0)
+  const [logTotal, setLogTotal] = useState(0)
 
   // PLAN.md §5.56 — 자동 감지 엔진 위에 얹는 수동 매수/매도 버튼 상태.
   const [manualBuyBusy, setManualBuyBusy] = useState(false)
@@ -396,11 +435,22 @@ export default function AutoTradePage() {
   const loadLog = () => {
     setLogLoading(true)
     setLogError(null)
-    return fetchAutoTradeLog(200)
-      .then((body) => setLogRows(body.rows || []))
+    return fetchAutoTradeLog({ date: logDate || undefined, limit: LOG_PAGE_SIZE, offset: logOffset })
+      .then((body) => {
+        setLogRows(body.rows || [])
+        setLogTotal(body.total || 0)
+      })
       .catch((e) => setLogError(e.message))
       .finally(() => setLogLoading(false))
   }
+
+  const handleLogDateChange = (nextDate) => {
+    setLogDate(nextDate)
+    setLogOffset(0)
+  }
+
+  const handleLogPrevPage = () => setLogOffset((o) => Math.max(0, o - LOG_PAGE_SIZE))
+  const handleLogNextPage = () => setLogOffset((o) => o + LOG_PAGE_SIZE)
 
   useEffect(() => {
     loadState()
@@ -408,12 +458,15 @@ export default function AutoTradePage() {
     // 실제 주문이 자동으로 나갈 수 있는 화면이라 상태/로그를 열어 둔 동안
     // 15초마다 새로고침한다 — 사용자가 진입/청산이 실제로 언제 일어났는지
     // 화면을 계속 보고 있을 수 있어야 한다(다른 탭들의 60초 폴링보다 짧게 잡음).
+    // logDate/logOffset이 바뀌면(날짜 필터/페이지 이동) 이 effect가 다시
+    // 돌면서 그 필터로 즉시 다시 불러오고, 15초 타이머도 그 필터를 유지한 채
+    // 재시작된다 — 과거 페이지를 보고 있는데 최신 페이지로 튕기지 않는다.
     const timer = setInterval(() => {
       loadState()
       loadLog()
     }, 15000)
     return () => clearInterval(timer)
-  }, [])
+  }, [logDate, logOffset])
 
   const handleToggle = async (nextEnabled) => {
     setToggleError(null)
@@ -476,7 +529,17 @@ export default function AutoTradePage() {
         sellBusy={manualSellBusy}
       />
       <StrategyPanel />
-      <LogPanel rows={logRows} loading={logLoading} error={logError} />
+      <LogPanel
+        rows={logRows}
+        loading={logLoading}
+        error={logError}
+        date={logDate}
+        onDateChange={handleLogDateChange}
+        offset={logOffset}
+        total={logTotal}
+        onPrevPage={handleLogPrevPage}
+        onNextPage={handleLogNextPage}
+      />
     </div>
   )
 }

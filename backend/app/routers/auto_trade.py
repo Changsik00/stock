@@ -25,7 +25,7 @@ import datetime as dt
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..clients.kiwoom import MAX_ORDER_NOTIONAL_KRW, KiwoomClient
@@ -41,6 +41,7 @@ from ..collectors.auto_trader import (
     _position_lock,
 )
 from ..db import get_session
+from ..market_hours import KST
 from ..models import AutoTradeLog, AutoTradeState
 from ..quant.auto_trade_rules import check_entry_budget, foreign_flow_sign
 from .stocks import _warm_stock_intraday
@@ -319,17 +320,47 @@ async def manual_sell_auto_trade(session: AsyncSession = Depends(get_session)) -
 
 @router.get("/log")
 async def get_auto_trade_log(
-    limit: int = Query(200, ge=1, le=1000, description="최대 반환 행 수"),
+    limit: int = Query(30, ge=1, le=200, description="페이지당 행 수"),
+    offset: int = Query(0, ge=0, description="건너뛸 행 수(페이지네이션)"),
+    date: dt.date | None = Query(None, description="KST 기준 이 날짜 하루만(생략 시 전체 기간)"),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     """매매일지(`AutoTradeLog`) — ts 내림차순(최신이 먼저). 킬스위치가 꺼져
     있거나 idle 상태에서 진입 조건 미충족인 폴링은 애초에 기록되지 않는다
     (`collectors/auto_trader.py` 모듈 docstring "노이즈 방지" 원칙).
 
+    2026-08-18(PLAN.md §5.70) — 예전엔 `limit`(최대 1000, 기본 200)만 있어
+    프런트가 항상 최대 200행을 한 화면에 그대로 뿌렸다("너무 방대하다"는
+    지적 + 공휴일 주문 재시도 노이즈가 겹쳐 실제로 오작동처럼 보인 사고,
+    `collectors/auto_trader.py`의 "오늘 데이터 아니면 스킵" 가드로 노이즈
+    자체는 근본 수정했지만 페이지네이션/날짜 필터는 별개로 필요) — `offset`/
+    `date`를 추가하고 기본 `limit`을 30으로 낮췄다. `date`가 있으면 KST
+    기준 그 날짜의 00:00~다음날 00:00 범위로 좁힌다(``ts``는 UTC로 저장되지만
+    비교는 KST 자정 경계로 해야 사용자가 보는 날짜와 일치한다).
+
     Returns ``{"rows": [{"id", "ts", "event_type", "code", "price", "reason",
-    "signal_snapshot", "order_response"}, ...]}``.
+    "signal_snapshot", "order_response"}, ...], "total": int}`` — ``total``은
+    같은 필터(``date``) 기준 전체 건수(페이지네이션 UI가 "다음" 버튼
+    활성화 여부/총 건수를 계산하는 데 씀).
     """
-    stmt = select(AutoTradeLog).order_by(AutoTradeLog.ts.desc()).limit(limit)
+    filters = []
+    if date is not None:
+        start_utc = dt.datetime.combine(date, dt.time.min, tzinfo=KST).astimezone(dt.timezone.utc)
+        end_utc = start_utc + dt.timedelta(days=1)
+        filters.append(AutoTradeLog.ts >= start_utc)
+        filters.append(AutoTradeLog.ts < end_utc)
+
+    total = (
+        await session.execute(select(func.count()).select_from(AutoTradeLog).where(*filters))
+    ).scalar_one()
+
+    stmt = (
+        select(AutoTradeLog)
+        .where(*filters)
+        .order_by(AutoTradeLog.ts.desc())
+        .offset(offset)
+        .limit(limit)
+    )
     rows = (await session.execute(stmt)).scalars().all()
     return {
         "rows": [
@@ -344,5 +375,6 @@ async def get_auto_trade_log(
                 "order_response": r.order_response,
             }
             for r in rows
-        ]
+        ],
+        "total": total,
     }

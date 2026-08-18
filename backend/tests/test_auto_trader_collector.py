@@ -228,11 +228,19 @@ async def _log_rows() -> list[AutoTradeLog]:
         return list(result.scalars().all())
 
 
-def _patch_signals(monkeypatch, ma_state="none", is_spike=False, bars_close=16000.0):
+def _patch_signals(monkeypatch, ma_state="none", is_spike=False, bars_close=16000.0, bars_date=None):
+    """bars_date 기본값은 "실제 오늘"(auto_trader.KST 기준) — run_auto_trade의
+    "오늘 데이터 아니면 스킵" 가드(2026-08-18, PLAN.md §5.70)가 today_str 인자를
+    안 받으면 똑같이 실제 오늘 날짜를 계산해서 대조하므로, 이 기본값이면 기존
+    테스트들이 전부 "오늘 데이터"로 취급돼 today_str을 따로 주입할 필요가 없다.
+    자정 경계를 걸치는 극히 드문 경우를 빼면 플레이키하지 않다 — 그 가드
+    자체를 검증하는 테스트만 bars_date를 명시적으로 다르게 준다."""
+    resolved_bars_date = bars_date or dt.datetime.now(auto_trader.KST).strftime("%Y%m%d")
+
     async def fake_warm_intraday(code, interval):
         assert code == "0167A0"
         assert interval == 1
-        return {"bars": [{"close": bars_close, "volume": 1000}]}
+        return {"bars": [{"close": bars_close, "volume": 1000, "date": resolved_bars_date}]}
 
     def fake_ma_cross(bars, *args, **kwargs):
         return {"state": ma_state, "short_ma": None, "long_ma": None}
@@ -376,6 +384,39 @@ async def test_idle_enters_when_conditions_met_and_budget_ok(monkeypatch):
     assert len(logs) == 1
     assert logs[0].event_type == "entry"
     assert "golden" in logs[0].reason
+
+
+async def test_idle_skips_entry_silently_when_bars_are_not_from_today(monkeypatch):
+    """2026-08-18(PLAN.md §5.70) — 공휴일 등 오늘 실거래 데이터가 없으면
+    (`_warm_stock_intraday`가 준 마지막 봉의 날짜가 오늘과 다르면) 조건이
+    충족돼 보여도 주문을 시도하지 않고, 로그도 안 남긴다(disabled/no_bars와
+    동일한 노이즈 방지 원칙). 실제 사고 재현: 진입 조건은 충족(golden+spike)
+    이지만 봉 날짜가 어제라 상황을 만든다."""
+    await _set_state(enabled=True, status="idle")
+    _patch_signals(monkeypatch, ma_state="golden", is_spike=True, bars_close=16000.0, bars_date="20260101")
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST, today_str="20260102")
+
+    assert result["action"] == "stale_data"
+    assert fake_cls.instances == []  # 주문 시도 자체가 없어야 함(가장 중요)
+    assert await _log_rows() == []  # 노이즈 방지 — 공휴일 반복 시도가 로그를 채우던 사고 재현 확인
+    state = await _get_state()
+    assert state.status == "idle"
+
+
+async def test_idle_enters_normally_when_bars_date_matches_injected_today(monkeypatch):
+    """위 가드가 today_str을 명시적으로 주입해도 봉 날짜와 일치하면 평소처럼
+    진입한다는 걸 확인(가드가 너무 공격적으로 막지 않는지 회귀 확인)."""
+    await _set_state(enabled=True, status="idle")
+    _patch_signals(monkeypatch, ma_state="golden", is_spike=True, bars_close=16000.0, bars_date="20260102")
+    _patch_kiwoom_client(monkeypatch)
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST, today_str="20260102")
+
+    assert result["action"] == "entry"
 
 
 async def test_idle_blocked_by_budget_guard_when_notional_exceeds_total_budget(monkeypatch):
