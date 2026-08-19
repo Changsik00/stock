@@ -54,6 +54,9 @@ const EVENT_TYPE_LABEL = {
   // PLAN.md §5.56(2026-08-11) — 자동 감지 엔진 위에 얹는 수동 매수/매도 버튼.
   manual_entry: '수동 매수',
   exit_manual: '수동 매도',
+  // PLAN.md §5.71(2026-08-19) — 주문은 접수됐지만 체결 미확인(취소 시도함).
+  buy_unconfirmed: '매수 체결 미확인',
+  sell_unconfirmed: '매도 체결 미확인',
 }
 
 // 이 페이지가 보여주는 값들은 전부 PLAN.md §5.54/§5.55에서 사용자가 직접 확정한

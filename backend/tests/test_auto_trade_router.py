@@ -23,7 +23,12 @@ from app.collectors.auto_trader import STATE_ID
 from app.db import async_session_factory, engine
 from app.models import AutoTradeLog, AutoTradeState
 from app.routers import auto_trade
-from tests.test_auto_trader_collector import FAKE_QUOTE_RAW, _FakeKiwoomClient
+from tests.test_auto_trader_collector import (
+    FAKE_QUOTE_RAW,
+    _FakeKiwoomClient,
+    _UnfilledBuyClient,
+    _UnfilledSellClient,
+)
 
 
 def _make_app() -> FastAPI:
@@ -115,6 +120,17 @@ def _default_intraday_fails(monkeypatch):
         raise RuntimeError("no live source configured for this test")
 
     monkeypatch.setattr(auto_trade, "_warm_stock_intraday", _default_intraday)
+
+
+@pytest.fixture(autouse=True)
+def _reset_log_dedup_memory():
+    """PLAN.md §5.71 — `test_auto_trader_collector.py`의 동일 이름 fixture와
+    같은 이유(모듈 전역 dict가 같은 pytest 프로세스 안에서 파일 경계 없이
+    공유됨) — 이 파일도 `_log`(따라서 `_last_log_by_code`)를 거치는
+    manual-buy/manual-sell 엔드포인트를 테스트하므로 독립적으로 리셋한다."""
+    auto_trader_module._last_log_by_code.clear()
+    yield
+    auto_trader_module._last_log_by_code.clear()
 
 
 async def _set_state(**kwargs) -> None:
@@ -522,6 +538,41 @@ async def test_manual_buy_order_failure_keeps_state_idle(monkeypatch):
     assert logs[0].event_type == "error"
 
 
+async def test_manual_buy_unconfirmed_when_order_not_filled(monkeypatch):
+    """PLAN.md §5.71 — 수동 매수도 `_handle_idle`과 동일한 미체결 확인을
+    거친다. 체결 미확인이면 502로 응답하고 status는 holding으로 넘어가면
+    안 된다(취소 시도함)."""
+    await _set_state(enabled=True, status="idle")
+
+    async def fake_intraday(code, interval):
+        return {"bars": [{"close": 16000.0}]}
+
+    monkeypatch.setattr(auto_trade, "_warm_stock_intraday", fake_intraday)
+    _FakeKiwoomClient.instances = []
+    monkeypatch.setattr(auto_trade, "KiwoomClient", _UnfilledBuyClient)
+
+    start_max_log_id = await _current_max_log_id()
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/auto-trade/manual-buy")
+
+    assert resp.status_code == 502
+    assert "체결" in resp.json()["detail"]
+
+    fake = _FakeKiwoomClient.instances[-1]
+    assert fake.buy_calls == [("0167A0", 1, 16100)]
+    assert fake.cancel_calls == [("0167A0", "0099001", 1)]
+
+    state = await _get_state()
+    assert state.status == "idle"
+    assert state.entry_price is None
+
+    logs = await _log_rows_since(start_max_log_id)
+    assert len(logs) == 1
+    assert logs[0].event_type == "buy_unconfirmed"
+
+
 # ---------------------------------------------------------------------------
 # POST /api/auto-trade/manual-sell — 매도는 킬스위치 상태와 무관하게 항상
 # 허용된다는 절대 원칙을 검증하는 케이스가 핵심.
@@ -628,6 +679,43 @@ async def test_manual_sell_order_failure_keeps_state_holding(monkeypatch):
     logs = await _log_rows_since(start_max_log_id)
     assert len(logs) == 1
     assert logs[0].event_type == "error"
+
+
+async def test_manual_sell_unconfirmed_when_order_not_filled(monkeypatch):
+    """PLAN.md §5.71 — 수동 매도도 `_execute_sell`을 그대로 재사용하므로
+    자동으로 같은 미체결 확인을 거친다. 체결 미확인이면 502로 응답하고
+    포지션(holding)이 그대로 유지돼야 한다(idle로 넘어가면 안 됨 — 8/14
+    실사고와 동일한 유형)."""
+    await _set_state(enabled=True, status="holding", entry_price=16000, entry_qty=1)
+
+    async def fake_intraday(code, interval):
+        return {"bars": [{"close": 16000.0}]}
+
+    monkeypatch.setattr(auto_trade, "_warm_stock_intraday", fake_intraday)
+    _FakeKiwoomClient.instances = []
+    monkeypatch.setattr(auto_trade, "KiwoomClient", _UnfilledSellClient)
+    monkeypatch.setattr(auto_trader_module, "KiwoomClient", _UnfilledSellClient)
+
+    start_max_log_id = await _current_max_log_id()
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/auto-trade/manual-sell")
+
+    assert resp.status_code == 502
+    assert "체결" in resp.json()["detail"]
+
+    fake = _FakeKiwoomClient.instances[-1]
+    assert fake.sell_calls == [("0167A0", 1, 16050)]
+    assert fake.cancel_calls == [("0167A0", "0099002", 1)]
+
+    state = await _get_state()
+    assert state.status == "holding"  # idle로 안 넘어감 — 핵심 단언
+    assert float(state.entry_price) == pytest.approx(16000.0)
+
+    logs = await _log_rows_since(start_max_log_id)
+    assert len(logs) == 1
+    assert logs[0].event_type == "sell_unconfirmed"
 
 
 # ---------------------------------------------------------------------------

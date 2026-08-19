@@ -51,18 +51,30 @@ FAKE_QUOTE_RAW = {
 
 class _FakeKiwoomClient:
     """`async with KiwoomClient() as client:` 관례를 흉내내는 테스트 더블.
-    place_buy_order/place_sell_order 호출 여부·인자를 기록해 검증한다."""
+    place_buy_order/place_sell_order 호출 여부·인자를 기록해 검증한다.
+
+    PLAN.md §5.71 — `get_unfilled_orders`/`cancel_order` 추가. 기본값
+    `unfilled_orders=[]`(방금 낸 주문이 미체결 목록에 전혀 없음)은 "항상
+    즉시 체결됨"을 뜻해 기존(§5.71 이전) 테스트들의 가정과 동일하다 — 그
+    테스트들은 이 두 메서드가 생기기 전부터 통과하던 그대로 수정 없이
+    계속 통과해야 한다. 미체결을 흉내내려면 테스트가
+    `fake.unfilled_orders = [{"ord_no": "0099001", "ord_qty": "1",
+    "cntr_qty": "0"}]`처럼 방금 응답의 ord_no와 일치하는 행을 채워 넣는다."""
 
     instances: list["_FakeKiwoomClient"] = []
 
     def __init__(self, *args, **kwargs):
         self.buy_calls: list[tuple] = []
         self.sell_calls: list[tuple] = []
+        self.cancel_calls: list[tuple] = []
         self.quote_data = dict(FAKE_QUOTE_RAW)
         self.buy_response = {"ord_no": "0099001", "return_code": 0}
         self.sell_response = {"ord_no": "0099002", "return_code": 0}
         self.buy_error: Exception | None = None
         self.sell_error: Exception | None = None
+        self.unfilled_orders: list[dict] = []
+        self.get_unfilled_orders_error: Exception | None = None
+        self.cancel_error: Exception | None = None
         _FakeKiwoomClient.instances.append(self)
 
     async def __aenter__(self):
@@ -85,6 +97,17 @@ class _FakeKiwoomClient:
         if self.sell_error is not None:
             raise self.sell_error
         return self.sell_response
+
+    async def get_unfilled_orders(self):
+        if self.get_unfilled_orders_error is not None:
+            raise self.get_unfilled_orders_error
+        return {"oso": list(self.unfilled_orders), "return_code": 0}
+
+    async def cancel_order(self, code, orig_order_no, qty):
+        self.cancel_calls.append((code, orig_order_no, qty))
+        if self.cancel_error is not None:
+            raise self.cancel_error
+        return {"return_code": 0}
 
 
 def _raising_kiwoom_client_factory(*args, **kwargs):  # pragma: no cover - 호출되면 안 됨
@@ -291,6 +314,19 @@ def _patch_risk_and_regime_default(monkeypatch):
     monkeypatch.setattr(auto_trader, "_warm_regime", _fake_regime())
 
 
+@pytest.fixture(autouse=True)
+def _reset_log_dedup_memory():
+    """PLAN.md §5.71 — `_log`의 반복 억제는 in-process 모듈 전역 dict
+    (`auto_trader._last_log_by_code`)로 판정한다. 같은 pytest 프로세스 안에서
+    파일 경계 없이 여러 테스트에 걸쳐 상태가 남으므로(test_auto_trade_router.py
+    도 동일한 dict를 공유 — 같은 모듈 import), 매 테스트 전후로 비워 다른
+    테스트의 (event_type, reason) 조합이 우연히 이번 테스트의 첫 로그를
+    억제하지 않게 한다."""
+    auto_trader._last_log_by_code.clear()
+    yield
+    auto_trader._last_log_by_code.clear()
+
+
 # ---------------------------------------------------------------------------
 # 킬스위치 꺼짐 — 가장 중요한 테스트: 어떤 외부 호출도 절대 일어나면 안 된다
 # ---------------------------------------------------------------------------
@@ -384,6 +420,66 @@ async def test_idle_enters_when_conditions_met_and_budget_ok(monkeypatch):
     assert len(logs) == 1
     assert logs[0].event_type == "entry"
     assert "golden" in logs[0].reason
+
+
+class _UnfilledBuyClient(_FakeKiwoomClient):
+    """PLAN.md §5.71 — place_buy_order의 기본 응답 ord_no("0099001")가
+    체결 안 된 채(cntr_qty=0) 미체결 목록에 그대로 남아있는 상황을 흉내낸다."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.unfilled_orders = [{"ord_no": self.buy_response["ord_no"], "ord_qty": "1", "cntr_qty": "0"}]
+
+
+async def test_idle_entry_unconfirmed_when_buy_order_not_filled(monkeypatch):
+    """PLAN.md §5.71 — 매수 주문이 접수는 됐지만 체결이 확인되지 않으면
+    status를 holding으로 넘기지 않고 idle을 유지해야 한다(안 그러면 실제
+    포지션이 없는데 있다고 착각해 손절 감시가 유령 포지션을 감시하게 됨)."""
+    await _set_state(enabled=True, status="idle")
+    _patch_signals(monkeypatch, ma_state="golden", is_spike=True, bars_close=16000.0)
+    monkeypatch.setattr(auto_trader, "KiwoomClient", _UnfilledBuyClient)
+    _FakeKiwoomClient.instances = []
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
+
+    assert result["action"] == "buy_unconfirmed"
+    fake = _FakeKiwoomClient.instances[-1]
+    assert fake.buy_calls == [("0167A0", 1, 16100)]
+    assert fake.cancel_calls == [("0167A0", "0099001", 1)]  # 미체결 주문 취소 시도함
+
+    state = await _get_state()
+    assert state.status == "idle"  # holding으로 안 넘어감 — 핵심 단언
+    assert state.entry_price is None
+    assert state.entry_qty is None
+
+    logs = await _log_rows()
+    assert len(logs) == 1
+    assert logs[0].event_type == "buy_unconfirmed"
+    assert "체결 미확인" in logs[0].reason
+
+
+async def test_idle_entry_treats_unfilled_orders_query_failure_as_unfilled(monkeypatch):
+    """get_unfilled_orders 조회 자체가 실패하면(네트워크 등) 보수적으로
+    "미체결"로 취급해 상태를 넘기지 않아야 한다("확인 안 되면 이전 상태
+    유지"가 항상 더 안전한 기본값)."""
+    await _set_state(enabled=True, status="idle")
+    _patch_signals(monkeypatch, ma_state="golden", is_spike=True, bars_close=16000.0)
+
+    class _QueryFailsClient(_FakeKiwoomClient):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.get_unfilled_orders_error = RuntimeError("kiwoom 500")
+
+    monkeypatch.setattr(auto_trader, "KiwoomClient", _QueryFailsClient)
+    _QueryFailsClient.instances = []
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
+
+    assert result["action"] == "buy_unconfirmed"
+    state = await _get_state()
+    assert state.status == "idle"
 
 
 async def test_idle_skips_entry_silently_when_bars_are_not_from_today(monkeypatch):
@@ -483,6 +579,47 @@ async def test_holding_stop_loss_sells_and_resets_to_idle(monkeypatch):
     logs = await _log_rows()
     assert len(logs) == 1
     assert logs[0].event_type == "exit_stop_loss"
+
+
+class _UnfilledSellClient(_FakeKiwoomClient):
+    """PLAN.md §5.71 — place_sell_order의 기본 응답 ord_no("0099002")가
+    체결 안 된 채(cntr_qty=0) 미체결 목록에 그대로 남아있는 상황을 흉내낸다
+    (8/14 실사고 재현용). `_execute_sell`/`watch_stop_loss`는 매도 한 번에
+    `async with KiwoomClient()` 블록 하나만 여므로 인스턴스는 하나뿐이다."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.unfilled_orders = [{"ord_no": self.sell_response["ord_no"], "ord_qty": "1", "cntr_qty": "0"}]
+
+
+async def test_holding_stop_loss_sell_unconfirmed_keeps_position(monkeypatch):
+    """PLAN.md §5.71 — 8/14 실사고 재현: 매도 주문은 접수됐지만 체결이
+    확인되지 않으면(get_unfilled_orders에 그 주문이 여전히 남아있음)
+    status를 idle로 넘기지 않고 holding을 그대로 유지해야 한다(안 그러면
+    실제 사고처럼 손절 감시가 그대로 꺼져버림 — 이게 이번 안전장치의
+    핵심 목적)."""
+    await _set_state(enabled=True, status="holding", entry_price=16000, entry_qty=1)
+    _patch_signals(monkeypatch, ma_state="none", is_spike=False, bars_close=16000 * 0.98)
+    monkeypatch.setattr(auto_trader, "KiwoomClient", _UnfilledSellClient)
+    _FakeKiwoomClient.instances = []
+
+    async with async_session_factory() as session:
+        result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
+
+    assert result["action"] == "sell_unconfirmed"
+    fake = _FakeKiwoomClient.instances[-1]
+    assert fake.sell_calls == [("0167A0", 1, 16050)]
+    assert fake.cancel_calls == [("0167A0", "0099002", 1)]  # 미체결 주문 취소 시도함
+
+    state = await _get_state()
+    assert state.status == "holding"  # idle로 안 넘어감 — 핵심 단언
+    assert float(state.entry_price) == pytest.approx(16000.0)
+    assert state.entry_qty == 1
+
+    logs = await _log_rows()
+    assert len(logs) == 1
+    assert logs[0].event_type == "sell_unconfirmed"
+    assert "체결 미확인" in logs[0].reason
 
 
 async def test_holding_trail_activate_no_order_placed(monkeypatch):
@@ -709,6 +846,33 @@ async def test_watch_holding_triggers_stop_loss_using_live_quote(monkeypatch):
     assert len(logs) == 1
     assert logs[0].event_type == "exit_stop_loss"
     assert "실시간" in logs[0].reason
+
+
+async def test_watch_stop_loss_sell_unconfirmed_keeps_position(monkeypatch):
+    """PLAN.md §5.71 — `watch_stop_loss`는 `_execute_sell`을 안 쓰고 자체
+    구현이라(모듈 docstring "미체결 확인" 절 참고) 별도로 검증한다. 30초
+    고빈도 손절 감시가 실제로 발동해도, 매도 주문이 미체결이면 idle로
+    안 넘어가야 한다."""
+    entry_price = 20000.0
+    await _set_state(enabled=True, status="holding", entry_price=entry_price, entry_qty=1)
+    monkeypatch.setattr(auto_trader, "KiwoomClient", _UnfilledSellClient)
+    _FakeKiwoomClient.instances = []
+
+    async with async_session_factory() as session:
+        result = await auto_trader.watch_stop_loss(session)
+
+    assert result["action"] == "sell_unconfirmed"
+    fake = _FakeKiwoomClient.instances[-1]
+    assert fake.sell_calls == [("0167A0", 1, 16050)]
+    assert fake.cancel_calls == [("0167A0", "0099002", 1)]
+
+    state = await _get_state()
+    assert state.status == "holding"
+    assert float(state.entry_price) == pytest.approx(entry_price)
+
+    logs = await _log_rows()
+    assert len(logs) == 1
+    assert logs[0].event_type == "sell_unconfirmed"
 
 
 async def test_watch_trailing_also_triggers_stop_loss(monkeypatch):
@@ -1196,3 +1360,50 @@ async def test_holding_no_early_exit_when_entry_sign_not_recorded(monkeypatch):
 
     assert result["action"] == "none"
     assert fake_cls.instances == []
+
+
+# ---------------------------------------------------------------------------
+# 매매일지 반복 노이즈 억제 — _log 자체 (PLAN.md §5.71)
+# ---------------------------------------------------------------------------
+
+
+async def test_log_dedup_suppresses_immediate_identical_repeat():
+    async with async_session_factory() as session:
+        await auto_trader._log(
+            session, event_type="error", code="0167A0", price=100.0, reason="같은 사유"
+        )
+        await auto_trader._log(
+            session, event_type="error", code="0167A0", price=100.0, reason="같은 사유"
+        )
+
+    logs = await _log_rows()
+    assert len(logs) == 1
+
+
+async def test_log_dedup_allows_immediately_different_reason():
+    async with async_session_factory() as session:
+        await auto_trader._log(session, event_type="error", code="0167A0", price=100.0, reason="사유 A")
+        await auto_trader._log(session, event_type="error", code="0167A0", price=100.0, reason="사유 B")
+
+    logs = await _log_rows()
+    assert len(logs) == 2
+
+
+async def test_log_dedup_allows_repeat_after_window_elapses():
+    async with async_session_factory() as session:
+        await auto_trader._log(
+            session, event_type="error", code="0167A0", price=100.0, reason="같은 사유"
+        )
+        # 창(5분)이 지난 것처럼 in-process 기록의 타임스탬프를 과거로 되돌린다.
+        event_type, reason, _ts = auto_trader._last_log_by_code["0167A0"]
+        auto_trader._last_log_by_code["0167A0"] = (
+            event_type,
+            reason,
+            dt.datetime.now(dt.timezone.utc) - auto_trader._LOG_DEDUP_WINDOW - dt.timedelta(seconds=1),
+        )
+        await auto_trader._log(
+            session, event_type="error", code="0167A0", price=100.0, reason="같은 사유"
+        )
+
+    logs = await _log_rows()
+    assert len(logs) == 2

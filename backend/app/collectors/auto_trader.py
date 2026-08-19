@@ -65,14 +65,26 @@ intraday`의 마지막 분봉 종가)를 그대로 재사용한다 — 중복 �
 "판단"이 아니라 지정가 주문이 실제로 체결되도록 하는 기계적 실행
 디테일이다(PLAN.md §5.54 지시 그대로).
 
-## 미체결 확인은 이 엔진의 책임이 아니다
+## 미체결 확인(PLAN.md §5.71, 2026-08-19 — 실사고 이후 추가)
 
-`place_buy_order`/`place_sell_order`가 성공(예외 없이 반환)하면 그 즉시 상태를
-전이한다(주문 접수 = 상태 전이) — 체결 여부를 `get_unfilled_orders`로 재확인하는
-루프는 두지 않는다(PLAN.md §5.54가 정의한 알고리즘 범위 밖). 즉시 체결 가능한
-호가로 지정가를 걸어 정상 시장 상황에서는 사실상 즉시 체결되는 것을 전제로
-한다 — 이 전제가 깨지는 경우(부분체결/미체결 잔류)에 대한 대응은 이번 범위
-밖의 후속 작업이다.
+**과거(2026-08-19 이전)엔 이 절이 "주문 접수 = 상태 전이, 미체결 확인은
+이 엔진의 책임이 아니다"였다 — 그 전제가 실제로 깨졌다.** 8/14 15:20 KST
+EOD 강제청산이 매도 지정가 주문을 제출해 접수(`return_code=0`)까지는
+됐지만, 가격이 그 사이 움직여 장마감(15:30)까지 체결되지 않은 채 자동
+취소됐다. 그런데 `_execute_sell`은 제출 성공만 보고 그 즉시 상태를
+idle로 갱신해버려, 실제로는 그대로 보유 중이던 포지션(1주, 매입가
+18,015원)에 5일간(8/14~8/19) 손절/트레일링 감시가 전혀 작동하지 않았다
+— 사용자가 실계좌를 직접 조회(kt00004/kt00018)해 발견, 상태를 수동으로
+`holding`으로 정정하자마자 30초 손절 감시가 즉시 작동해 -5.52% 구간에서
+실제로 청산됐다(체결 확인 완료).
+
+이후 `_order_still_unfilled`/`_cancel_unfilled_order_silently`(아래,
+`_best_fill_price` 바로 뒤)를 매수/매도 주문 제출 직후마다 호출한다 —
+`get_unfilled_orders`(ka10075, 이미 실호출 확정)로 방금 낸 주문이 아직
+미체결인지 확인하고, 미체결이면 `cancel_order`(kt10003)로 취소를 시도한
+뒤 **상태 전이를 하지 않고**(idle<->holding 어느 방향으로도 넘어가지
+않음) `*_unconfirmed` 이벤트로만 로그한다 — 다음 폴링이 최신 호가로
+자연히 재시도한다. 새 TR 호출 없이 이미 확정된 조회/취소 TR만 재사용.
 
 ## 안전 규칙 추가(PLAN.md §5.55, 2026-08-06 — 2026-08-05 실제 손실 사고 이후)
 
@@ -208,6 +220,19 @@ async def _get_state(session: AsyncSession) -> AutoTradeState | None:
     return await session.get(AutoTradeState, STATE_ID)
 
 
+# 2026-08-19(PLAN.md §5.71, 사용자 지적 — "매매일지 900건 이상, 의미 있는
+# 정보가 맞을까?") — 완전히 같은 이벤트(event_type+reason 바이트 단위 동일)가
+# 폴링(60초/30초)마다 반복 기록되던 노이즈를 억제한다(실측: entry_blocked_risk가
+# 완전히 정적인 문구로 8/17 하루에만 324건). DB 쿼리가 아니라 in-process
+# 모듈 전역 dict로 판정한다(_intraday_cache 등 기존 캐시와 동일한 패턴) —
+# 이 프로젝트 테스트는 실 dev Postgres를 공유하므로 DB 쿼리 기반 dedup은
+# 다른 테스트/실운영 행과 우연히 겹쳐 오탐 억제될 위험이 있다. 프로세스
+# 재시작 시 자연히 초기화되고, 테스트 프로세스와 실배포 프로세스는 애초에
+# 별개 프로세스라 절대 섞이지 않는다.
+_LOG_DEDUP_WINDOW = dt.timedelta(minutes=5)
+_last_log_by_code: dict[str, tuple[str, str, dt.datetime]] = {}
+
+
 async def _log(
     session: AsyncSession,
     *,
@@ -218,12 +243,29 @@ async def _log(
     signal_snapshot: dict | None = None,
     order_response: dict | None = None,
 ) -> None:
+    truncated_reason = reason[:1000]
+    now = dt.datetime.now(dt.timezone.utc)
+    prev = _last_log_by_code.get(code)
+    if (
+        prev is not None
+        and prev[0] == event_type
+        and prev[1] == truncated_reason
+        and (now - prev[2]) < _LOG_DEDUP_WINDOW
+    ):
+        # 직전 기록과 완전히 같은 사건이 5분 이내에 다시 왔다 — 새 행을 만들지
+        # 않는다("한 번 나면 영원히 안 남"이 아니라 "짧은 간격 반복만 접는다" —
+        # 5분이 지나거나 다른 이벤트가 끼어들면 다시 기록된다). entry/exit_*
+        # 처럼 매번 체결가가 달라 reason이 사실상 겹칠 일이 없는 진짜 이벤트는
+        # 전혀 영향받지 않는다.
+        return
+    _last_log_by_code[code] = (event_type, truncated_reason, now)
+
     session.add(
         AutoTradeLog(
             event_type=event_type,
             code=code,
             price=price,
-            reason=reason[:1000],
+            reason=truncated_reason,
             signal_snapshot=(
                 json.dumps(signal_snapshot, ensure_ascii=False, default=str)[:2000]
                 if signal_snapshot is not None
@@ -250,6 +292,51 @@ async def _best_fill_price(client: KiwoomClient, code: str, side: str) -> float 
         if lvl["price"] > 0:
             return lvl["price"]
     return None
+
+
+async def _order_still_unfilled(client: KiwoomClient, order_no: str | None) -> bool:
+    """주문이 아직 (부분)미체결로 남아있는지 확인한다 — 2026-08-19(PLAN.md
+    §5.71) "주문 접수 = 상태 전이" 가정이 실제로 깨진 사고(8/14 EOD 강제청산
+    매도가 체결 안 된 채 장마감으로 취소됐는데 상태는 이미 idle로 넘어가
+    5일간 손절 감시가 꺼져 있었음) 이후 추가. `get_unfilled_orders`(ka10075,
+    이미 실호출 확정된 조회 TR)를 재사용한다 — 새 TR 없음.
+
+    `order_no`가 없으면(응답에 `ord_no`가 없었던 극히 드문 경우) 판정 불가로
+    보수적으로 True(미체결 취급)를 반환한다 — 조회 자체가 실패해도 마찬가지다.
+    "확인 안 되면 이전 상태 유지"가 항상 더 안전한 기본값이다(모듈 상단
+    안전 원칙과 동일한 태도)."""
+    if not order_no:
+        return True
+    try:
+        data = await client.get_unfilled_orders()
+    except Exception:  # noqa: BLE001 - 조회 실패 -> 모름 -> 안전하게 "아직 미체결"로 취급
+        return True
+    for row in data.get("oso") or []:
+        if str(row.get("ord_no")) != str(order_no):
+            continue
+        try:
+            ord_qty = int(str(row.get("ord_qty") or "0"))
+            cntr_qty = int(str(row.get("cntr_qty") or "0"))
+        except ValueError:
+            return True  # 파싱 실패도 모름 취급(보수적 기본값)
+        if cntr_qty < ord_qty:
+            return True
+    return False
+
+
+async def _cancel_unfilled_order_silently(
+    client: KiwoomClient, code: str, order_no: str | None, qty: int
+) -> None:
+    """미체결로 확인된 주문을 최선을 다해 취소한다(`cancel_order`, kt10003,
+    이미 실호출 확정) — 실패해도 무시한다(다음 폴링이 새 호가로 다시 시도
+    하면 되므로 치명적이지 않다). 자금/수량 예약을 풀어 다음 시도를 막지
+    않게 하는 목적. `order_no`가 없으면 아무것도 하지 않는다."""
+    if not order_no:
+        return
+    try:
+        await client.cancel_order(code, order_no, qty)
+    except Exception as e:  # noqa: BLE001 - 취소 실패는 무시(다음 폴링이 그래도 재시도)
+        logger.warning("auto-trade: 미체결 주문 취소 시도 실패(무시하고 계속): %s", e)
 
 
 async def _get_risk_alert_active(session: AsyncSession) -> bool:
@@ -293,8 +380,9 @@ async def run_auto_trade(
     "none"(꺼짐/조건 미충족/신고가만 조용히 갱신)|"stale_data"(오늘 거래
     데이터 없음, 공휴일 등)|"enter"|"trail_activate"|"exit_stop_loss"|
     "exit_trail"|"exit_eod_forced"|"exit_flow_reversal"|"entry_blocked_time"|
-    "entry_blocked_risk"|"budget_blocked"|"buy_failed"|"sell_failed"|"error"
-    중 하나.
+    "entry_blocked_risk"|"budget_blocked"|"buy_failed"|"buy_unconfirmed"|
+    "sell_failed"|"sell_unconfirmed"|"error" 중 하나(뒤 둘은 PLAN.md §5.71 —
+    주문 접수는 됐지만 체결 미확인, 모듈 상단 "미체결 확인" 절 참고).
     """
     result: dict = {"enabled": False, "action": "none"}
 
@@ -460,6 +548,10 @@ async def _handle_idle(
             if order_price is None:
                 raise RuntimeError("매도호가를 확인할 수 없어 주문가를 정할 수 없음")
             order_response = await client.place_buy_order(code, TARGET_QTY, int(order_price))
+            order_no = str(order_response.get("ord_no")) if order_response.get("ord_no") else None
+            unfilled = await _order_still_unfilled(client, order_no)
+            if unfilled:
+                await _cancel_unfilled_order_silently(client, code, order_no, TARGET_QTY)
     except Exception as e:  # noqa: BLE001 - 주문 실패는 재시도 루프에 빠지지 않고 로그만
         logger.warning("auto-trade: 매수 주문 실패: %s", e)
         await _log(
@@ -472,6 +564,25 @@ async def _handle_idle(
         )
         result["action"] = "buy_failed"
         result["error"] = str(e)[:300]
+        return result
+
+    if unfilled:
+        # PLAN.md §5.71 — 주문은 접수됐지만 체결 미확인(취소 시도함). status를
+        # holding으로 넘기지 않고 idle을 유지해 다음 폴링이 새 호가로 다시
+        # 시도하게 한다(모듈 상단 "미체결 확인" 절 참고).
+        await _log(
+            session,
+            event_type="buy_unconfirmed",
+            code=code,
+            price=order_price,
+            reason=(
+                decision["reason"] + f" -> 매수 주문 제출(지정가 {order_price}원)했으나 "
+                "체결 미확인(취소 시도) — 진입 보류, 다음 폴링에서 재시도"
+            ),
+            signal_snapshot=signal_snapshot,
+            order_response=order_response,
+        )
+        result["action"] = "buy_unconfirmed"
         return result
 
     now = dt.datetime.now(dt.timezone.utc)
@@ -536,6 +647,12 @@ async def _execute_sell(
             order_response = await client.place_sell_order(
                 code, int(state.entry_qty or TARGET_QTY), int(order_price)
             )
+            order_no = str(order_response.get("ord_no")) if order_response.get("ord_no") else None
+            unfilled = await _order_still_unfilled(client, order_no)
+            if unfilled:
+                await _cancel_unfilled_order_silently(
+                    client, code, order_no, int(state.entry_qty or TARGET_QTY)
+                )
     except Exception as e:  # noqa: BLE001 - 주문 실패는 재시도 루프에 빠지지 않고 로그만
         logger.warning("auto-trade: 매도 주문 실패(%s): %s", event_type, e)
         await _log(
@@ -548,6 +665,24 @@ async def _execute_sell(
         )
         result["action"] = "sell_failed"
         result["error"] = str(e)[:300]
+        return result
+
+    if unfilled:
+        # PLAN.md §5.71 — 8/14 실사고(모듈 상단 "미체결 확인" 절 참고): 주문은
+        # 접수됐지만 체결 미확인(취소 시도함). status를 idle로 넘기지 않고
+        # holding/trailing 그대로 유지해 손절 감시가 계속 이 포지션을 보게
+        # 한다 — 다음 폴링이 새 호가로 다시 매도를 시도한다.
+        await _log(
+            session,
+            event_type="sell_unconfirmed",
+            code=code,
+            price=order_price,
+            reason=reason + f" -> 매도 주문 제출(지정가 {order_price}원)했으나 "
+            "체결 미확인(취소 시도) — 포지션 상태 유지, 다음 폴링에서 재시도",
+            signal_snapshot=signal_snapshot,
+            order_response=order_response,
+        )
+        result["action"] = "sell_unconfirmed"
         return result
 
     state.status = "idle"
@@ -747,7 +882,9 @@ async def watch_stop_loss(session: AsyncSession) -> dict:
     trade`가 전담).
 
     Returns ``{"enabled": bool, "action": "none"|"exit_stop_loss"|
-    "sell_failed"|"error"}``.
+    "sell_unconfirmed"|"sell_failed"|"error"}`` — "sell_unconfirmed"는
+    PLAN.md §5.71(주문 접수는 됐지만 체결 미확인, 모듈 상단 "미체결 확인"
+    절 참고).
     """
     result: dict = {"enabled": False, "action": "none"}
 
@@ -806,6 +943,12 @@ async def watch_stop_loss(session: AsyncSession) -> dict:
         try:
             async with KiwoomClient() as client:
                 order_response = await client.place_sell_order(code, int(state.entry_qty or TARGET_QTY), int(live_price))
+                order_no = str(order_response.get("ord_no")) if order_response.get("ord_no") else None
+                unfilled = await _order_still_unfilled(client, order_no)
+                if unfilled:
+                    await _cancel_unfilled_order_silently(
+                        client, code, order_no, int(state.entry_qty or TARGET_QTY)
+                    )
         except Exception as e:  # noqa: BLE001 - 주문 실패는 재시도 루프에 빠지지 않고 로그만
             logger.warning("auto-trade(fast watch): 매도 주문 실패: %s", e)
             await _log(
@@ -818,6 +961,27 @@ async def watch_stop_loss(session: AsyncSession) -> dict:
             )
             result["action"] = "sell_failed"
             result["error"] = str(e)[:300]
+            return result
+
+        if unfilled:
+            # PLAN.md §5.71 — `_execute_sell`과 동일한 이유(모듈 상단 "미체결
+            # 확인" 절 참고). 이 30초 고빈도 잡은 `_execute_sell`을 안 쓰고
+            # 자체 구현이라 별도로 동일 패턴을 적용한다.
+            await _log(
+                session,
+                event_type="sell_unconfirmed",
+                code=code,
+                price=live_price,
+                reason=(
+                    f"[실시간 호가 손절 감시(30초)] 손절 조건 충족: 실시간가 {live_price} vs "
+                    f"진입가 {entry_price} ({pct:+.2f}%) <= {stop_loss_threshold}%"
+                    + (" (리스크 경보 활성 -> 임시 손절선 적용)" if risk_alert_active else "")
+                    + " -> 매도 주문 제출했으나 체결 미확인(취소 시도) — 포지션 상태 유지"
+                ),
+                signal_snapshot=signal_snapshot,
+                order_response=order_response,
+            )
+            result["action"] = "sell_unconfirmed"
             return result
 
         state.status = "idle"

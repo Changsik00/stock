@@ -36,8 +36,10 @@ from ..collectors.auto_trader import (
     TARGET_CODE,
     TARGET_QTY,
     _best_fill_price,
+    _cancel_unfilled_order_silently,
     _execute_sell,
     _log,
+    _order_still_unfilled,
     _position_lock,
 )
 from ..db import get_session
@@ -210,6 +212,10 @@ async def manual_buy_auto_trade(session: AsyncSession = Depends(get_session)) ->
                 if order_price is None:
                     raise RuntimeError("매도호가를 확인할 수 없어 주문가를 정할 수 없음")
                 order_response = await client.place_buy_order(code, TARGET_QTY, int(order_price))
+                order_no = str(order_response.get("ord_no")) if order_response.get("ord_no") else None
+                unfilled = await _order_still_unfilled(client, order_no)
+                if unfilled:
+                    await _cancel_unfilled_order_silently(client, code, order_no, TARGET_QTY)
         except Exception as e:  # noqa: BLE001 - 주문 실패는 상태 변경 없이 로그만
             await _log(
                 session,
@@ -220,6 +226,27 @@ async def manual_buy_auto_trade(session: AsyncSession = Depends(get_session)) ->
                 signal_snapshot={"current_price": current_price, "source": "manual"},
             )
             raise HTTPException(status_code=502, detail=f"매수 주문 실패: {e}") from e
+
+        if unfilled:
+            # PLAN.md §5.71 — `_handle_idle`과 동일한 이유(collectors/
+            # auto_trader.py 모듈 상단 "미체결 확인" 절 참고). 주문은 접수됐지만
+            # 체결 미확인(취소 시도함) — status를 holding으로 넘기지 않는다.
+            await _log(
+                session,
+                event_type="buy_unconfirmed",
+                code=code,
+                price=order_price,
+                reason=(
+                    f"사용자가 대시보드에서 수동으로 매수 주문을 실행함(지정가 {order_price}원, "
+                    f"{TARGET_QTY}주)했으나 체결 미확인(취소 시도)"
+                ),
+                signal_snapshot={"current_price": current_price, "source": "manual"},
+                order_response=order_response,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="매수 주문을 제출했지만 체결이 확인되지 않았습니다(취소 시도함) — 잠시 후 다시 시도하세요.",
+            )
 
         now = dt.datetime.now(dt.timezone.utc)
         state.status = "holding"
@@ -313,6 +340,14 @@ async def manual_sell_auto_trade(session: AsyncSession = Depends(get_session)) -
         )
         if result.get("action") == "sell_failed":
             raise HTTPException(status_code=502, detail=f"매도 주문 실패: {result.get('error')}")
+        if result.get("action") == "sell_unconfirmed":
+            # PLAN.md §5.71 — _execute_sell이 주문 제출은 했지만 체결을 확인
+            # 못 해(취소 시도함) 포지션 상태를 그대로 유지한 경우.
+            raise HTTPException(
+                status_code=502,
+                detail="매도 주문을 제출했지만 체결이 확인되지 않았습니다(취소 시도함) — "
+                "포지션은 유지됩니다, 잠시 후 다시 시도하세요.",
+            )
 
         await session.refresh(state)
         return _serialize_state(state, current_price=None)
