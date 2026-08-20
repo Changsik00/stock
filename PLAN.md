@@ -4068,6 +4068,41 @@ idle로 정확히 복귀함을 실계좌 재조회(kt00018, 보유 0건)로 확�
 클린. `docker logs stock-backend-1`에 신규 에러 없음, `_run_auto_trade_watch`
 30초 잡이 새 코드로 계속 정상 실행됨을 실시간 확인.
 
+### Phase 5.72 — 오늘의 매크로 브리핑 패널 추가 (2026-08-20)
+
+**계기**: "매크로 상황이라는게 있는데.. 그걸 따로 보기 좋게 말하는게
+있나? 물론 우리 정보가 어느정도 준비 되어 잇는거로 알아" — 조사 결과
+환율/유가/미국 4대지수/수급쏠림/장세국면(regime)/리스크 경보 데이터는
+전부 이미 있었지만 "시황·자금" 섹션에 개별 타일로 흩어져 있고
+(`MacroModal`도 차트만 나열, 서술형 요약 없음) 한눈에 "오늘 매크로가
+어떤지" 읽히지 않았다. 이미 있던 "오늘의 포지셔닝 재료"
+(`HynixPositioningModal.jsx`, §5.50-6/-7 — 여러 기존 API를
+`Promise.allSettled`로 병렬 호출해 하나의 읽기 좋은 브리핑 패널로 묶는
+패턴)를 추천하자 "만들어봐" 승인.
+
+**구현**: 신규 `frontend/src/components/dashboard/MacroBriefingModal.jsx` —
+Hynix 모달과 동일한 자기완결 패턴(마운트 시 병렬 fetch, 하나 실패해도
+나머지 구획 유지, house rule §5 관찰 서술 배너). 새 백엔드 없음 — 전부
+기존 엔드포인트 재사용: `fetchMacroSeries`(환율/WTI/브렌트/미국 4대지수),
+`fetchNasdaqFuturesLive`, `fetchRegime`, `fetchFlowConcentrationIntradayAccumulated`,
+`fetchIndexTilesLive`(리스크 경보). 4개 구획(①환율·유가 ②미국증시
+③코스피/코스닥 수급쏠림·장세국면 ④리스크경보) — 대시보드 본문에 이미
+항상 노출되는 "지금 유입 우세" 카드의 콤보 그리드 상세(스트릭/가속도)는
+중복 렌더하지 않고 verdict/reason 한 줄 요약 + "자세한 내용은 본문 카드
+참고" 안내만 둔다. `DashboardPage.jsx`에 "오늘의 포지셔닝 재료" 타일
+바로 뒤, "시황·자금" 섹션 진입점으로 새 KPI 타일 추가(동일한
+STATIC_DATA 분기 관례 — 정적 배포에서는 기존 `macro` 차트 모달로 대체).
+
+**검증**: 백엔드 변경 없음(신규 함수 0개, 전부 기존 재사용) — 회귀 확인
+목적으로 자동매매 테스트 2개 제외 `pytest -q` 856 passed(기존 무관 실패
+1건 그대로). `npm run build`/`npx oxlint` 클린(새 파일 자체 warning 0건).
+실 컨테이너 curl로 5개 재사용 엔드포인트(`/api/macro/series`,
+`/api/markets/nasdaq-futures/live`, `/api/markets/regime`,
+`/api/markets/flow-concentration/intraday-accumulated`,
+`/api/markets/index-tiles/live`) 전부 정상 응답 확인. `docker logs
+stock-frontend-1` HMR 정상, 신규 에러 없음. 브라우저상 타일 클릭 → 모달
+정상 표시는 사용자 확인 요청.
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)

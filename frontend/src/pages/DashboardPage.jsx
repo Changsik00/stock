@@ -98,6 +98,7 @@ import ForeignPositionModal from '../components/dashboard/ForeignPositionModal'
 import DerivativeEtfModal from '../components/dashboard/DerivativeEtfModal'
 import ExpiryPatternModal from '../components/dashboard/ExpiryPatternModal'
 import HynixPositioningModal from '../components/dashboard/HynixPositioningModal'
+import MacroBriefingModal from '../components/dashboard/MacroBriefingModal'
 import FlowRankFullModal from '../components/dashboard/FlowRankFullModal'
 import ValueRankFullModal from '../components/dashboard/ValueRankFullModal'
 import FlowPathFullModal from '../components/dashboard/FlowPathFullModal'
@@ -1459,6 +1460,24 @@ export default function DashboardPage() {
             )
           }
         />
+        {/* "오늘의 매크로 브리핑" 진입점 — 사용자 요청("매크로 상황을 따로 보기
+            좋게 보여주는 게 있냐")에 따라 위 포지셔닝 재료 타일과 동일한 패턴으로
+            추가. 클릭 시에만 MacroBriefingModal이 데이터를 가져온다(신규
+            백엔드 없음, 전부 기존 엔드포인트 재조합). 로컬 전용 기능이라
+            STATIC_DATA에서는 기존 macro 모달(차트만)로 대신 연결한다(다른
+            브리핑 진입점 타일과 동일한 STATIC_DATA 분기 관례). */}
+        <KpiTile
+          label="오늘의 매크로 브리핑"
+          value="자세히 보기"
+          sub={<span className="kpi-tile-sub">환율·유가·미국증시·수급쏠림 모음</span>}
+          onClick={() =>
+            setModal(
+              STATIC_DATA
+                ? { type: 'macro', title: '환율 · 유가 · 전일 미국장' }
+                : { type: 'macroBriefing', title: '오늘의 매크로 브리핑' }
+            )
+          }
+        />
       </div>
 
       {/* 3. 시황 · 자금 */}
@@ -1991,6 +2010,7 @@ export default function DashboardPage() {
         {modal?.type === 'derivativeEtf' && <DerivativeEtfModal />}
         {modal?.type === 'expiryPattern' && <ExpiryPatternModal />}
         {modal?.type === 'hynixPositioning' && <HynixPositioningModal />}
+        {modal?.type === 'macroBriefing' && <MacroBriefingModal />}
         {/* 랭킹 3종 전체 보기 모달 — onRowClick을 STATIC_DATA일 때 undefined로 넘겨
             행 클릭 자체를 비활성화한다(TOP5 카드와 동일한 정적 모드 판단, 위
             Top5RowTile 주석 참고). */}
