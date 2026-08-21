@@ -317,7 +317,19 @@ function StrategyPanel() {
 // 페이지당 행 수 — api.js fetchAutoTradeLog 기본값과 맞춘다.
 const LOG_PAGE_SIZE = 30
 
-function LogPanel({ rows, loading, error, date, onDateChange, offset, total, onPrevPage, onNextPage }) {
+function LogPanel({
+  rows,
+  loading,
+  error,
+  date,
+  onDateChange,
+  offset,
+  total,
+  onPrevPage,
+  onNextPage,
+  showAll,
+  onShowAllChange,
+}) {
   const hasPrev = offset > 0
   const hasNext = offset + rows.length < total
   const rangeStart = total === 0 ? 0 : offset + 1
@@ -342,6 +354,17 @@ function LogPanel({ rows, loading, error, date, onDateChange, offset, total, onP
             전체 기간
           </button>
         )}
+        {/* PLAN.md §5.73 — 기본은 실제 체결된 거래(진입/청산/수동매수/수동매도)만.
+            차단(entry_blocked 계열)/오류/체결미확인/트레일전환은 반복적으로
+            쌓여 판단 근거만 장황해지고 정보량이 적다는 지적으로 기본 숨김
+            처리, 필요할 때만 이 토글로 펼쳐본다. */}
+        <button
+          type="button"
+          className={`toggle-chip ${showAll ? 'active' : ''}`}
+          onClick={() => onShowAllChange(!showAll)}
+        >
+          차단·오류 포함
+        </button>
         <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>
           {total === 0 ? '0건' : `${rangeStart}–${rangeEnd} / 총 ${total}건`}
         </span>
@@ -357,7 +380,10 @@ function LogPanel({ rows, loading, error, date, onDateChange, offset, total, onP
       {loading && <div className="state">불러오는 중…</div>}
       {error && <div className="state">불러오기 실패: {error}</div>}
       {!loading && !error && rows.length === 0 && (
-        <div className="state">{date ? '이 날짜엔 기록이 없습니다.' : '아직 기록이 없습니다.'}</div>
+        <div className="state">
+          {date ? '이 날짜엔 기록이 없습니다.' : '아직 기록이 없습니다.'}
+          {!showAll && ' (차단·오류 포함으로 보면 나올 수 있습니다)'}
+        </div>
       )}
       {!loading && !error && rows.length > 0 && (
         <div style={{ overflowX: 'auto' }}>
@@ -421,6 +447,8 @@ export default function AutoTradePage() {
   const [logDate, setLogDate] = useState('')
   const [logOffset, setLogOffset] = useState(0)
   const [logTotal, setLogTotal] = useState(0)
+  // PLAN.md §5.73 — 기본은 실제 체결된 거래만(showAll=false -> tradesOnly=true).
+  const [logShowAll, setLogShowAll] = useState(false)
 
   // PLAN.md §5.56 — 자동 감지 엔진 위에 얹는 수동 매수/매도 버튼 상태.
   const [manualBuyBusy, setManualBuyBusy] = useState(false)
@@ -438,7 +466,12 @@ export default function AutoTradePage() {
   const loadLog = () => {
     setLogLoading(true)
     setLogError(null)
-    return fetchAutoTradeLog({ date: logDate || undefined, limit: LOG_PAGE_SIZE, offset: logOffset })
+    return fetchAutoTradeLog({
+      date: logDate || undefined,
+      limit: LOG_PAGE_SIZE,
+      offset: logOffset,
+      tradesOnly: !logShowAll,
+    })
       .then((body) => {
         setLogRows(body.rows || [])
         setLogTotal(body.total || 0)
@@ -452,6 +485,11 @@ export default function AutoTradePage() {
     setLogOffset(0)
   }
 
+  const handleLogShowAllChange = (nextShowAll) => {
+    setLogShowAll(nextShowAll)
+    setLogOffset(0)
+  }
+
   const handleLogPrevPage = () => setLogOffset((o) => Math.max(0, o - LOG_PAGE_SIZE))
   const handleLogNextPage = () => setLogOffset((o) => o + LOG_PAGE_SIZE)
 
@@ -461,15 +499,16 @@ export default function AutoTradePage() {
     // 실제 주문이 자동으로 나갈 수 있는 화면이라 상태/로그를 열어 둔 동안
     // 15초마다 새로고침한다 — 사용자가 진입/청산이 실제로 언제 일어났는지
     // 화면을 계속 보고 있을 수 있어야 한다(다른 탭들의 60초 폴링보다 짧게 잡음).
-    // logDate/logOffset이 바뀌면(날짜 필터/페이지 이동) 이 effect가 다시
-    // 돌면서 그 필터로 즉시 다시 불러오고, 15초 타이머도 그 필터를 유지한 채
-    // 재시작된다 — 과거 페이지를 보고 있는데 최신 페이지로 튕기지 않는다.
+    // logDate/logOffset/logShowAll이 바뀌면(날짜 필터/페이지 이동/차단·오류
+    // 포함 토글) 이 effect가 다시 돌면서 그 필터로 즉시 다시 불러오고, 15초
+    // 타이머도 그 필터를 유지한 채 재시작된다 — 과거 페이지를 보고 있는데
+    // 최신 페이지로 튕기지 않는다.
     const timer = setInterval(() => {
       loadState()
       loadLog()
     }, 15000)
     return () => clearInterval(timer)
-  }, [logDate, logOffset])
+  }, [logDate, logOffset, logShowAll])
 
   const handleToggle = async (nextEnabled) => {
     setToggleError(null)
@@ -542,6 +581,8 @@ export default function AutoTradePage() {
         total={logTotal}
         onPrevPage={handleLogPrevPage}
         onNextPage={handleLogNextPage}
+        showAll={logShowAll}
+        onShowAllChange={handleLogShowAllChange}
       />
     </div>
   )

@@ -602,11 +602,13 @@ export async function toggleAutoTrade(enabled) {
 }
 
 // GET /api/auto-trade/log?limit=N(기본 30)&offset=N(기본 0)&date=YYYY-MM-DD(생략 시
-// 전체) -> { rows: [{id, ts, event_type, code, price, reason, signal_snapshot,
-// order_response}, ...], total } — ts 내림차순(매매일지, 최신이 먼저). total은
-// 같은 날짜 필터 기준 전체 건수(페이지네이션용).
-export async function fetchAutoTradeLog({ date, limit = 30, offset = 0 } = {}) {
-  const params = new URLSearchParams({ limit, offset })
+// 전체)&trades_only=true|false(기본 true) -> { rows: [{id, ts, event_type, code,
+// price, reason, signal_snapshot, order_response}, ...], total } — ts 내림차순
+// (매매일지, 최신이 먼저). total은 같은 필터 기준 전체 건수(페이지네이션용).
+// trades_only=true(기본)는 실제 체결된 거래만 남기고 차단/오류/체결미확인/
+// 트레일전환은 뺀다.
+export async function fetchAutoTradeLog({ date, limit = 30, offset = 0, tradesOnly = true } = {}) {
+  const params = new URLSearchParams({ limit, offset, trades_only: tradesOnly })
   if (date) params.set('date', date)
   return getJson(`/api/auto-trade/log?${params}`)
 }

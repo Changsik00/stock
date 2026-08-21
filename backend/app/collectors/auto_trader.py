@@ -173,6 +173,24 @@ logger = logging.getLogger(__name__)
 # MAX_ORDER_NOTIONAL_KRW 중 더 작은 쪽이 사실상의 상한이 된다.
 AUTO_TRADE_TOTAL_BUDGET_KRW = 25_000
 
+# 2026-08-21(PLAN.md §5.73, 사용자 지적 — "정보가 장황하기만 하지 유의미한
+# 정보를 제공한다고 생각하지는 않아") — 매매일지(`GET /api/auto-trade/log`)
+# 기본 보기에서 "실제로 주문이 체결된" 이벤트만 남기고 나머지(진입 시도가
+# 조건에 막힘/실패/체결 미확인/트레일 전환 같은 상태 메모)는 접어 둔다.
+# `trail_activate`는 상태 전이이긴 하지만 주문 자체가 안 나가므로 이
+# 집합에서 제외한다("실제 거래"의 기준은 "체결된 주문이 있었는가"로 통일).
+TRADE_EVENT_TYPES = frozenset(
+    {
+        "entry",
+        "manual_entry",
+        "exit_stop_loss",
+        "exit_trail",
+        "exit_eod_forced",
+        "exit_flow_reversal",
+        "exit_manual",
+    }
+)
+
 STATE_ID = 1  # AutoTradeState 싱글턴 PK — routers/auto_trade.py와 동일한 상수 사용
 
 # **2026-08-05 추가(PLAN.md §5.54-6)**: `run_auto_trade`(60초)와 `watch_stop_loss`

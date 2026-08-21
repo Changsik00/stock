@@ -4103,6 +4103,39 @@ STATIC_DATA 분기 관례 — 정적 배포에서는 기존 `macro` 차트 모�
 stock-frontend-1` HMR 정상, 신규 에러 없음. 브라우저상 타일 클릭 → 모달
 정상 표시는 사용자 확인 요청.
 
+### Phase 5.73 — 매매일지 기본 보기: 실제 체결된 거래만 (2026-08-21)
+
+**계기**: §5.71에서 5분 이내 완전 동일 반복만 접도록 손봤지만, 사용자가
+다시 "정보가 장황하기만 하지 유의미한 정보를 제공한다고 생각하지는
+않아"라고 지적 — 실측해보니 `entry_blocked_risk`(리스크 경보로 진입
+보류)가 45분~1시간 간격으로 계속 재확인되며 매번 "새 사건"으로 기록돼
+§5.71 필터를 피해갔다(942건 중 실제 체결된 거래는 19건뿐). AskUserQuestion
+으로 세 가지 간소화 방향(①실제 거래만 기본 표시 ②판단근거 텍스트만 축약
+③차단/오류를 아예 별도 로그로 분리) 중 "①실제 거래만 기본 표시(추천)"
+채택 — 반복 억제 임계값을 더 손보는 대신, 애초에 "체결된 주문이 있었는가"
+기준으로 기본 필터를 건다.
+
+**구현**: `collectors/auto_trader.py`에 `TRADE_EVENT_TYPES` 상수(entry/
+manual_entry/exit_stop_loss/exit_trail/exit_eod_forced/exit_flow_reversal/
+exit_manual — `trail_activate`는 주문이 안 나가므로 제외) 추가.
+`GET /api/auto-trade/log`에 `trades_only`(기본 `true`) 쿼리 파라미터
+추가 — 켜져 있으면 위 집합만 필터. `AutoTradePage.jsx`의 `LogPanel`에
+"차단·오류 포함" 토글 버튼 추가(기본 꺼짐 = `trades_only=true`), 날짜
+필터/페이지네이션과 동일한 관례로 `logShowAll` state가 바뀌면
+`logOffset`을 0으로 리셋.
+
+**검증**: 킬스위치 확인(`enabled: true, status: idle`) 후 임시로 꺼서
+자동매매 테스트 2개 포함 73 passed(신규 `test_get_log_trades_only_
+defaults_to_hiding_non_trade_events` 포함 — 기본 호출은 entry만 보이고
+`trades_only=false`라야 entry_blocked_risk/error까지 보이는지 확인),
+직후 킬스위치 정확히 원상 복구. 나머지 파일 제외 재실행도 856 passed
+(무관 기존 실패 1건 그대로). `npm run build`/`npx oxlint` 클린(구현
+중 JSX 주석 텍스트에 `exit_*/manual_*`처럼 우연히 `*/`가 섞여 들어가
+빌드가 깨진 걸 발견해 문구를 고쳐 해결). 실 컨테이너 curl로
+`/api/auto-trade/log`(파라미터 없음) total 19·`trades_only=false` total
+942 확인 — 기본 보기가 실제로 942건을 19건으로 줄임을 실측 확인.
+`docker logs stock-frontend-1` 최종 상태 에러 없음.
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)

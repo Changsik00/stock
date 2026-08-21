@@ -407,6 +407,47 @@ async def test_get_log_offset_paginates_and_total_ignores_offset():
     assert [r["reason"] for r in page2["rows"]] == ["2/1 기록 2"]
 
 
+async def test_get_log_trades_only_defaults_to_hiding_non_trade_events():
+    """PLAN.md §5.73 — 사용자 지적("정보가 장황하기만 하지 유의미한 정보를
+    제공한다고 생각하지는 않아") 이후 기본값을 trades_only=true로 바꿨다.
+    entry_blocked_risk 같은 "거래로 안 이어진" 이벤트는 파라미터 없이
+    호출하면 안 보이고, trades_only=false를 명시해야만 보인다."""
+    async with async_session_factory() as session:
+        base = dt.datetime(2099, 3, 1, 6, 0, tzinfo=dt.timezone.utc)
+        session.add(
+            AutoTradeLog(
+                ts=base, event_type="entry", code="0167A0", price=16000, reason="실제 진입",
+            )
+        )
+        session.add(
+            AutoTradeLog(
+                ts=base - dt.timedelta(minutes=1),
+                event_type="entry_blocked_risk", code="0167A0", price=16000, reason="리스크 경보로 보류",
+            )
+        )
+        session.add(
+            AutoTradeLog(
+                ts=base - dt.timedelta(minutes=2),
+                event_type="error", code="0167A0", price=16000, reason="주문 실패",
+            )
+        )
+        await session.commit()
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp_default = await client.get("/api/auto-trade/log", params={"date": "2099-03-01", "limit": 50})
+        resp_all = await client.get(
+            "/api/auto-trade/log", params={"date": "2099-03-01", "limit": 50, "trades_only": "false"}
+        )
+
+    default_body = resp_default.json()
+    all_body = resp_all.json()
+    assert default_body["total"] == 1
+    assert [r["event_type"] for r in default_body["rows"]] == ["entry"]
+    assert all_body["total"] == 3
+    assert {r["event_type"] for r in all_body["rows"]} == {"entry", "entry_blocked_risk", "error"}
+
+
 # ---------------------------------------------------------------------------
 # POST /api/auto-trade/manual-buy (PLAN.md §5.56 — 자동 감지 엔진 위에 얹는
 # 수동 매수 버튼. 자동 진입 경로(_handle_idle)와 동일한 안전장치를 검증한다.)

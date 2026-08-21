@@ -35,6 +35,7 @@ from ..collectors.auto_trader import (
     STATE_ID,
     TARGET_CODE,
     TARGET_QTY,
+    TRADE_EVENT_TYPES,
     _best_fill_price,
     _cancel_unfilled_order_silently,
     _execute_sell,
@@ -358,6 +359,9 @@ async def get_auto_trade_log(
     limit: int = Query(30, ge=1, le=200, description="페이지당 행 수"),
     offset: int = Query(0, ge=0, description="건너뛸 행 수(페이지네이션)"),
     date: dt.date | None = Query(None, description="KST 기준 이 날짜 하루만(생략 시 전체 기간)"),
+    trades_only: bool = Query(
+        True, description="실제 체결된 거래만(기본) — 차단/오류/체결미확인/트레일전환 등은 제외"
+    ),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     """매매일지(`AutoTradeLog`) — ts 내림차순(최신이 먼저). 킬스위치가 꺼져
@@ -373,10 +377,19 @@ async def get_auto_trade_log(
     기준 그 날짜의 00:00~다음날 00:00 범위로 좁힌다(``ts``는 UTC로 저장되지만
     비교는 KST 자정 경계로 해야 사용자가 보는 날짜와 일치한다).
 
+    2026-08-21(PLAN.md §5.73, 사용자 지적 — "정보가 장황하기만 하지 유의미한
+    정보를 제공한다고 생각하지는 않아") — `trades_only`(기본 True) 추가.
+    §5.71의 반복 억제(같은 이벤트가 5분 이내 재발생하면 접기)로도 `entry_
+    blocked_risk`류가 여전히 하루 수십 건씩 쌓였다(리스크 경보가 45분~1시간
+    간격으로 계속 재확인되면 매번 새 사건으로 기록되므로) — 껐다 켜는 게
+    아니라 아예 "실제로 주문이 체결된 이벤트"(`collectors/auto_trader.
+    TRADE_EVENT_TYPES`)만 기본으로 보여주고, 차단/오류/체결미확인/트레일
+    전환은 `trades_only=false`로 명시해야만 보이게 한다.
+
     Returns ``{"rows": [{"id", "ts", "event_type", "code", "price", "reason",
     "signal_snapshot", "order_response"}, ...], "total": int}`` — ``total``은
-    같은 필터(``date``) 기준 전체 건수(페이지네이션 UI가 "다음" 버튼
-    활성화 여부/총 건수를 계산하는 데 씀).
+    같은 필터(``date``/``trades_only``) 기준 전체 건수(페이지네이션 UI가
+    "다음" 버튼 활성화 여부/총 건수를 계산하는 데 씀).
     """
     filters = []
     if date is not None:
@@ -384,6 +397,8 @@ async def get_auto_trade_log(
         end_utc = start_utc + dt.timedelta(days=1)
         filters.append(AutoTradeLog.ts >= start_utc)
         filters.append(AutoTradeLog.ts < end_utc)
+    if trades_only:
+        filters.append(AutoTradeLog.event_type.in_(TRADE_EVENT_TYPES))
 
     total = (
         await session.execute(select(func.count()).select_from(AutoTradeLog).where(*filters))
