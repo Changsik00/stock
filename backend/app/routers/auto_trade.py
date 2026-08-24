@@ -45,7 +45,8 @@ from ..collectors.auto_trader import (
 )
 from ..db import get_session
 from ..market_hours import KST
-from ..models import AutoTradeLog, AutoTradeState
+from ..models import AutoTradeLog, AutoTradeState, StockOhlcv
+from ..quant.auto_trade_backtest import run_backtest
 from ..quant.auto_trade_rules import check_entry_budget, foreign_flow_sign
 from .stocks import _warm_stock_intraday
 
@@ -427,4 +428,59 @@ async def get_auto_trade_log(
             for r in rows
         ],
         "total": total,
+    }
+
+
+@router.get("/backtest")
+async def get_auto_trade_backtest(
+    code: str = Query(TARGET_CODE, description="종목코드(기본 자동매매 대상)"),
+    days: int = Query(365, ge=1, le=3650, description="최근 며칠치 일봉을 쓸지"),
+    trail_mode: str = Query(
+        "fixed_floor", description="'fixed_floor'(현재 실거래 규칙) | 'ratchet'(비교 실험용 대안)"
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """§5.54 자동매매 핵심 규칙(진입: 골든크로스+거래량 스파이크, 손절 -1.5%,
+    트레일전환 +1%, 트레일청산: 데드크로스 AND 진입가+0.5% 이하)의 일봉 근사
+    백테스트(PLAN.md §5.74) — **완전 읽기 전용**, 주문/상태 변경 전혀 없다
+    (`_position_lock`/`AutoTradeState`/`AutoTradeLog` 어느 것도 건드리지
+    않는다). 계산 자체는 `quant/auto_trade_backtest.run_backtest`(순수 함수,
+    자세한 설계·제약은 그 모듈 docstring 참고)에 위임한다.
+
+    **1분봉이 아니라 일봉 근사다** — 실제 자동매매가 쓰는 1분봉 이력은 DB에
+    저장된 적이 없어(§5.1 원칙) `stock_ohlcv`(일봉)로 대신한다. §5.55 안전
+    규칙(진입시간필터/EOD강제청산/리스크경보 손절선 축소/수급반전조기청산)은
+    장중·실시간 개념이라 과거 일봉만으로는 재현할 수 없어 포함하지 않는다.
+
+    `trail_mode="ratchet"`는 실거래 규칙이 아니라 비교 실험용 대안(트레일
+    청산 기준을 진입가 고정 플로어 대신 고점 대비 반납폭으로 바꿔본 것) —
+    `quant/auto_trade_backtest.py` 모듈 docstring 참고.
+
+    Returns ``{"code", "days", "bars_used", "trail_mode", "trades": [...],
+    "summary": {"n","win_rate_pct","avg_win_pct","avg_loss_pct",
+    "cumulative_return_pct","best_trade_pct","worst_trade_pct"}}``.
+    """
+    if trail_mode not in ("fixed_floor", "ratchet"):
+        raise HTTPException(400, "trail_mode must be 'fixed_floor' or 'ratchet'")
+
+    since = dt.date.today() - dt.timedelta(days=days)
+    stmt = (
+        select(StockOhlcv)
+        .where(StockOhlcv.code == code, StockOhlcv.date >= since)
+        .order_by(StockOhlcv.date)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    bars = [
+        {"date": r.date.isoformat(), "close": r.close, "volume": r.volume}
+        for r in rows
+        if r.close is not None and r.volume is not None
+    ]
+
+    result = run_backtest(bars, trail_mode=trail_mode)
+    return {
+        "code": code,
+        "days": days,
+        "bars_used": len(bars),
+        "trail_mode": trail_mode,
+        **result,
     }

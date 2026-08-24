@@ -19,7 +19,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 
 from app.collectors import auto_trader as auto_trader_module
-from app.collectors.auto_trader import STATE_ID
+from app.collectors.auto_trader import STATE_ID, TARGET_CODE
 from app.db import async_session_factory, engine
 from app.models import AutoTradeLog, AutoTradeState
 from app.routers import auto_trade
@@ -830,3 +830,67 @@ async def test_manual_buy_acquires_position_lock(monkeypatch):
 
     assert resp.status_code == 200
     assert lock_calls == [1]  # 이 엔드포인트가 collectors/auto_trader._position_lock을 잡았다
+
+
+# ---------------------------------------------------------------------------
+# GET /api/auto-trade/backtest (PLAN.md §5.74) — 완전 읽기 전용, 킬스위치/
+# 포지션과 무관(주문/상태 변경이 전혀 없어 위 안전장치 대상이 아니지만, 같은
+# 파일이라 다른 테스트와 동일한 autouse fixture를 그대로 공유한다). 계산
+# 로직 자체(진입/손절/트레일)는 tests/test_auto_trade_backtest.py가 합성
+# 데이터로 이미 전수 검증했으므로, 여기서는 실제 dev DB의 진짜 0167A0
+# stock_ohlcv를 그대로 써서(새로 쓰지 않음 — 공유 테이블 오염 방지) 라우팅·
+# 응답 형태·파라미터 검증만 확인한다(실 시세라 정확한 승률 등은 단언하지
+# 않는다 — 매일 값이 바뀜).
+# ---------------------------------------------------------------------------
+
+
+async def test_get_backtest_returns_well_formed_response_using_real_data():
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/auto-trade/backtest", params={"days": 365})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["code"] == TARGET_CODE
+    assert body["trail_mode"] == "fixed_floor"
+    assert isinstance(body["bars_used"], int)
+    assert "trades" in body and isinstance(body["trades"], list)
+    assert set(body["summary"].keys()) == {
+        "n",
+        "win_rate_pct",
+        "avg_win_pct",
+        "avg_loss_pct",
+        "cumulative_return_pct",
+        "best_trade_pct",
+        "worst_trade_pct",
+    }
+    assert body["summary"]["n"] == len(body["trades"])
+
+
+async def test_get_backtest_supports_ratchet_trail_mode():
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/auto-trade/backtest", params={"days": 365, "trail_mode": "ratchet"})
+
+    assert resp.status_code == 200
+    assert resp.json()["trail_mode"] == "ratchet"
+
+
+async def test_get_backtest_rejects_unknown_trail_mode():
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/auto-trade/backtest", params={"trail_mode": "not_a_real_mode"})
+
+    assert resp.status_code == 400
+
+
+async def test_get_backtest_no_data_for_unknown_code_returns_empty_result():
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/auto-trade/backtest", params={"code": "9999999", "days": 365})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bars_used"] == 0
+    assert body["trades"] == []
+    assert body["summary"]["n"] == 0
