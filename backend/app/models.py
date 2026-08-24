@@ -79,6 +79,35 @@ class StockOhlcv(Base):
     value: Mapped[int | None] = mapped_column(BigInteger)
 
 
+class StockIntradayBar(Base):
+    """종목 1분봉 이력 — 자동매매 백테스트용(PLAN.md §5.75, §5.74 후속).
+
+    §5.74에서 자동매매 전략(§5.54)을 백테스트해보니 실제 라이브가 쓰는
+    1분봉 이력이 DB에 저장된 적이 없어(§5.1 원칙 — 온디맨드 조회만,
+    미저장) 일봉으로만 근사할 수 있었다 — 108일 표본으로는 골든크로스와
+    거래량스파이크가 한 번도 안 겹쳐 거래 0건이었다. 진짜 1분봉 백테스트를
+    하려면 이력이 쌓여야 하므로 이 테이블부터 시작한다(`collectors/
+    stock_intraday_history.py`가 자동매매 대상 종목(`quant/auto_trade_rules.
+    TARGET_CODE`, 현재 "0167A0") 하나만 매일 밤 배치로 채워 간다 — 전종목
+    확장은 저장 규모가 전혀 다른 별개 결정이라 이번 범위 밖).
+
+    ``time``은 ``routers/stocks.py::_warm_stock_intraday``가 이미 파싱해
+    주는 "HHMM" 형식 문자열을 그대로 저장한다(재변환 없음)."""
+
+    __tablename__ = "stock_intraday_bar"
+
+    code: Mapped[str] = mapped_column(
+        String(20), ForeignKey("stocks.code"), primary_key=True
+    )
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    time: Mapped[str] = mapped_column(String(4), primary_key=True)
+    open: Mapped[int | None] = mapped_column(BigInteger)
+    high: Mapped[int | None] = mapped_column(BigInteger)
+    low: Mapped[int | None] = mapped_column(BigInteger)
+    close: Mapped[int | None] = mapped_column(BigInteger)
+    volume: Mapped[int | None] = mapped_column(BigInteger)
+
+
 class MarketFlow(Base):
     """시장별 투자자 순매수 (KIS 3분류 + pykrx/kiwoom 13분류 겸용, source 컬럼으로 구분)."""
 

@@ -32,6 +32,7 @@ def register_all() -> None:
     from . import ohlcv as _ohlcv_collector  # noqa: F401
     from . import program_flow as _program_flow_collector  # noqa: F401
     from . import short_selling_market as _short_selling_market_collector  # noqa: F401
+    from . import stock_intraday_history as _stock_intraday_history_collector  # noqa: F401
     from . import value_rank as _value_rank_collector  # noqa: F401
 
     # **알파벳순을 의도적으로 깬다 — 지우거나 재정렬하지 말 것(PLAN.md §5.35)**:
