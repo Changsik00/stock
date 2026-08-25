@@ -47,6 +47,11 @@ from ..db import get_session
 from ..market_hours import KST
 from ..models import AutoTradeLog, AutoTradeState, StockOhlcv
 from ..quant.auto_trade_backtest import run_backtest
+from ..quant.auto_trade_performance import (
+    ENTRY_EVENT_TYPES,
+    EXIT_EVENT_TYPES,
+    summarize_by_entry_source,
+)
 from ..quant.auto_trade_rules import check_entry_budget, foreign_flow_sign
 from .stocks import _warm_stock_intraday
 
@@ -484,3 +489,32 @@ async def get_auto_trade_backtest(
         "trail_mode": trail_mode,
         **result,
     }
+
+
+@router.get("/performance")
+async def get_auto_trade_performance(session: AsyncSession = Depends(get_session)) -> dict:
+    """진입 방식별(자동/수동) 성과 집계(PLAN.md §5.76) — 완전 읽기 전용,
+    `AutoTradeLog`를 그대로 집계할 뿐 새 저장소·주문·상태 변경이 전혀 없다.
+    사용자가 "내가 직접 한 게 수익률이 더 좋다면 자동매매 프로그램의 존폐
+    유무가 중요하다"고 물어 만들었다 — 계산 자체는
+    `quant/auto_trade_performance.summarize_by_entry_source`(순수 함수,
+    pairing 원리·`KNOWN_BAD_LOG_IDS` 예외 설명은 그 모듈 docstring 참고)에
+    위임한다. **이 엔드포인트도 어떤 판단 문구도 만들지 않는다** — 숫자만
+    반환한다.
+
+    Returns ``{"by_source": {"auto": {...}, "manual": {...}}, "trades": [...],
+    "anomalies": [...], "open_position": {...} | None}``.
+    """
+    event_types = ENTRY_EVENT_TYPES | EXIT_EVENT_TYPES
+    stmt = (
+        select(AutoTradeLog.id, AutoTradeLog.ts, AutoTradeLog.event_type, AutoTradeLog.price)
+        .where(AutoTradeLog.event_type.in_(event_types))
+        .order_by(AutoTradeLog.ts)
+    )
+    rows = (await session.execute(stmt)).all()
+    log_rows = [
+        {"id": r.id, "ts": r.ts.isoformat(), "event_type": r.event_type, "price": float(r.price)}
+        for r in rows
+        if r.price is not None
+    ]
+    return summarize_by_entry_source(log_rows)

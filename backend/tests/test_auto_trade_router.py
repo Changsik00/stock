@@ -894,3 +894,43 @@ async def test_get_backtest_no_data_for_unknown_code_returns_empty_result():
     assert body["bars_used"] == 0
     assert body["trades"] == []
     assert body["summary"]["n"] == 0
+
+
+# ---------------------------------------------------------------------------
+# GET /api/auto-trade/performance (PLAN.md §5.76) — 완전 읽기 전용, 킬스위치/
+# 포지션과 무관(주문/상태 변경이 전혀 없음). pairing 로직 자체(승률·평균수익률
+# 계산, KNOWN_BAD_LOG_IDS 제외)는 tests/test_auto_trade_performance.py가 합성
+# 데이터로 이미 전수 검증했으므로, 여기서는 실제 dev DB의 진짜 AutoTradeLog를
+# 그대로 써서(새로 쓰지 않음 — 공유 테이블 오염 방지) 라우팅·응답 형태만
+# 확인한다(실 거래 로그라 정확한 승률 등은 단언하지 않는다 — 계속 바뀜).
+# ---------------------------------------------------------------------------
+
+
+async def test_get_performance_returns_well_formed_response_using_real_data():
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/auto-trade/performance")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body.keys()) == {"by_source", "trades", "anomalies", "open_position"}
+    assert set(body["by_source"].keys()) == {"auto", "manual"}
+    for group in body["by_source"].values():
+        assert set(group.keys()) == {"n", "win_rate_pct", "avg_return_pct", "cumulative_return_pct"}
+    assert isinstance(body["trades"], list)
+    assert isinstance(body["anomalies"], list)
+
+
+async def test_get_performance_excludes_known_bad_log_id_1920():
+    """§5.71 실사고 로그(id=1920)가 실 DB에 여전히 남아있는데, 어느 거래에도
+    exit_id=1920으로 짝지어져 나오면 안 된다(KNOWN_BAD_LOG_IDS 제외가 라우터
+    경로에서도 실제로 적용되는지 확인 — 로직 자체는 이미 순수함수 테스트로
+    검증했으므로 여기선 배선만 재확인)."""
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/auto-trade/performance")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    exit_ids = {t["exit_id"] for t in body["trades"]}
+    assert 1920 not in exit_ids

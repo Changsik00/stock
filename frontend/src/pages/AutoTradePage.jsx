@@ -1,5 +1,12 @@
 import { useEffect, useState } from 'react'
-import { fetchAutoTradeLog, fetchAutoTradeState, manualBuyAutoTrade, manualSellAutoTrade, toggleAutoTrade } from '../api'
+import {
+  fetchAutoTradeLog,
+  fetchAutoTradePerformance,
+  fetchAutoTradeState,
+  manualBuyAutoTrade,
+  manualSellAutoTrade,
+  toggleAutoTrade,
+} from '../api'
 
 // 대상 종목(PLAN.md §5.54, 사용자 확정 — quant/auto_trade_rules.py의
 // TARGET_CODE와 동일한 값). 이 페이지의 "전략 규칙 요약" 절에서만 쓰는 표시용
@@ -314,6 +321,74 @@ function StrategyPanel() {
   )
 }
 
+const ENTRY_SOURCE_LABEL = { auto: '자동 진입', manual: '수동 진입' }
+
+// 진입 방식별(자동/수동) 성과 요약(PLAN.md §5.76) — AutoTradeLog를 그대로
+// 집계한 결과를 보여줄 뿐, "자동매매를 꺼라/켜라" 같은 판단 문구는 만들지
+// 않는다(숫자만 표시, 종합 판단은 사용자 몫).
+function PerformancePanel({ data, loading, error }) {
+  return (
+    <section style={{ border: '1px solid var(--border, #333)', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 8 }}>
+        진입 방식별 성과 — 완결된 거래만 집계합니다(진입만 있고 아직 청산 안 된 보유 중 포지션은 제외).
+      </div>
+      {loading && <div className="state">불러오는 중…</div>}
+      {error && <div className="state">불러오기 실패: {error}</div>}
+      {!loading && !error && data && (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <thead>
+              <tr>
+                {['진입 방식', '거래 수', '승률', '평균 수익률', '누적 수익률'].map((h) => (
+                  <th
+                    key={h}
+                    style={{
+                      textAlign: 'left',
+                      padding: '4px 8px',
+                      borderBottom: '1px solid var(--border, #333)',
+                      whiteSpace: 'nowrap',
+                      fontWeight: 600,
+                    }}
+                  >
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {['auto', 'manual'].map((source) => {
+                const g = data.by_source[source]
+                return (
+                  <tr key={source}>
+                    <td style={{ padding: '4px 8px', borderBottom: '1px solid var(--border, #333)', whiteSpace: 'nowrap' }}>
+                      {ENTRY_SOURCE_LABEL[source]}
+                    </td>
+                    <td style={{ padding: '4px 8px', borderBottom: '1px solid var(--border, #333)' }}>{g.n}건</td>
+                    <td style={{ padding: '4px 8px', borderBottom: '1px solid var(--border, #333)' }}>
+                      {g.win_rate_pct === null ? '-' : `${g.win_rate_pct.toFixed(1)}%`}
+                    </td>
+                    <td className={rateClass(g.avg_return_pct)} style={{ padding: '4px 8px', borderBottom: '1px solid var(--border, #333)' }}>
+                      {rateLabel(g.avg_return_pct)}
+                    </td>
+                    <td className={rateClass(g.cumulative_return_pct)} style={{ padding: '4px 8px', borderBottom: '1px solid var(--border, #333)' }}>
+                      {rateLabel(g.cumulative_return_pct)}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+          {data.anomalies.length > 0 && (
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 8 }}>
+              집계에서 제외된 이상 항목 {data.anomalies.length}건이 있습니다(진입·청산 짝을 찾지 못함).
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}
+
 // 페이지당 행 수 — api.js fetchAutoTradeLog 기본값과 맞춘다.
 const LOG_PAGE_SIZE = 30
 
@@ -450,6 +525,13 @@ export default function AutoTradePage() {
   // PLAN.md §5.73 — 기본은 실제 체결된 거래만(showAll=false -> tradesOnly=true).
   const [logShowAll, setLogShowAll] = useState(false)
 
+  // PLAN.md §5.76 — 진입 방식별 성과 요약. 로그 전체를 훑는 집계라 15초
+  // 타이머엔 얹지 않고, 마운트 시 1회 + 로그가 실제로 바뀔 만한 시점(수동
+  // 매수/매도 직후)에만 다시 불러온다.
+  const [perfData, setPerfData] = useState(null)
+  const [perfLoading, setPerfLoading] = useState(true)
+  const [perfError, setPerfError] = useState(null)
+
   // PLAN.md §5.56 — 자동 감지 엔진 위에 얹는 수동 매수/매도 버튼 상태.
   const [manualBuyBusy, setManualBuyBusy] = useState(false)
   const [manualBuyError, setManualBuyError] = useState(null)
@@ -478,6 +560,15 @@ export default function AutoTradePage() {
       })
       .catch((e) => setLogError(e.message))
       .finally(() => setLogLoading(false))
+  }
+
+  const loadPerformance = () => {
+    setPerfLoading(true)
+    setPerfError(null)
+    return fetchAutoTradePerformance()
+      .then(setPerfData)
+      .catch((e) => setPerfError(e.message))
+      .finally(() => setPerfLoading(false))
   }
 
   const handleLogDateChange = (nextDate) => {
@@ -510,6 +601,13 @@ export default function AutoTradePage() {
     return () => clearInterval(timer)
   }, [logDate, logOffset, logShowAll])
 
+  // 성과 요약은 로그 필터(날짜/페이지/차단·오류 포함 토글)와 무관하게 로그
+  // 전체를 훑는 집계라 마운트 시 한 번만 불러온다(위 15초 타이머엔 얹지
+  // 않음 — 매매일지 자체가 바뀔 때만 다시 불러오면 충분).
+  useEffect(() => {
+    loadPerformance()
+  }, [])
+
   const handleToggle = async (nextEnabled) => {
     setToggleError(null)
     setToggleBusy(true)
@@ -528,7 +626,7 @@ export default function AutoTradePage() {
     setManualBuyBusy(true)
     try {
       await manualBuyAutoTrade()
-      await Promise.all([loadState(), loadLog()])
+      await Promise.all([loadState(), loadLog(), loadPerformance()])
     } catch (err) {
       setManualBuyError(err.message)
     } finally {
@@ -541,7 +639,7 @@ export default function AutoTradePage() {
     setManualSellBusy(true)
     try {
       await manualSellAutoTrade()
-      await Promise.all([loadState(), loadLog()])
+      await Promise.all([loadState(), loadLog(), loadPerformance()])
     } catch (err) {
       setManualSellError(err.message)
     } finally {
@@ -571,6 +669,7 @@ export default function AutoTradePage() {
         sellBusy={manualSellBusy}
       />
       <StrategyPanel />
+      <PerformancePanel data={perfData} loading={perfLoading} error={perfError} />
       <LogPanel
         rows={logRows}
         loading={logLoading}

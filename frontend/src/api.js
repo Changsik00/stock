@@ -628,3 +628,13 @@ export async function manualBuyAutoTrade() {
 export async function manualSellAutoTrade() {
   return postJson('/api/auto-trade/manual-sell', {})
 }
+
+// GET /api/auto-trade/performance -> { by_source: { auto: {n, win_rate_pct,
+// avg_return_pct, cumulative_return_pct}, manual: {...} }, trades: [...],
+// anomalies: [...], open_position: {...}|null } (PLAN.md §5.76). AutoTradeLog
+// 전체를 진입 방식별로 집계한 결과 — 완전 읽기 전용, 판단 문구 없이 숫자만
+// 반환한다. 로그 전체를 훑는 집계라 15초 폴링에 얹지 않고 매매일지 새로고침
+// 타이밍에 맞춰서만 호출한다.
+export async function fetchAutoTradePerformance() {
+  return getJson('/api/auto-trade/performance')
+}

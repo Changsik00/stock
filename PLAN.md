@@ -4233,6 +4233,60 @@ stock_intraday_history`로 즉시 수동 실행 — **381개 1분봉 upsert 성�
 없음. 오늘부터 매일 밤 자동으로 쌓이기 시작 — 표본이 §5.74 백테스트에
 쓸 만큼 쌓이면 후속 작업으로 실제 1분봉 백테스트 진행 예정.
 
+### Phase 5.76 — 진입 방식별(자동/수동) 성과 요약 (2026-08-25)
+
+**계기**: 사용자가 직접 매수한 뒤 "내가 직접 한 게 수익률이 더 좋다면
+자동매매 프로그램의 존폐 유무가 중요하다"고 물어, 그 자리에서
+`AutoTradeLog`를 손으로 짠 SQL로 집계해 답했다(완결 거래 13건 중 자동
+진입 10건 승률 30%/평균 -1.00%, 수동 진입 3건 승률 0%/평균 -2.45%).
+매번 손으로 확인하기보다 매매일지 화면에 상시 보이게 만들자고 합의 —
+신규 저장소 없이 `AutoTradeLog` 집계만으로 구현.
+
+**핵심 설계 문제 — id=1920 처리**: §5.71 실사고(2026-08-14 EOD강제청산이
+실제로는 체결 안 됐는데 로그엔 `exit_eod_forced`로 남음)를 그대로 시간순
+pairing하면 그 거래가 +0.19% 승리로 잘못 집계되고 5일 뒤 진짜 청산
+(8/19 `exit_stop_loss`, -5.52%)은 orphan이 된다. `KNOWN_BAD_LOG_IDS =
+frozenset({1920})`로 이 하나만 명시적으로 pairing에서 제외 — 그 사이
+새 진입이 없었으므로 8/14 진입이 8/19 진짜 청산과 자연스럽게 짝지어져
+실제 경제적 결과가 정확히 복원된다. 일반화된 이상탐지 시스템은 만들지
+않음(§5.71로 이미 재발 방지됨, 과설계 금지) — 대신 향후 다른 pairing
+실패(orphan 청산/연속 진입)는 `anomalies`에 투명하게 남기고 통계에서
+제외하는 일반 로직은 둔다.
+
+**구현**: `quant/auto_trade_performance.py`(신규, 순수 함수) —
+`summarize_by_entry_source(rows)`가 ts 오름차순 로그를 훑으며 진입
+(`entry`|`manual_entry`) 하나를 열고 다음 청산(`exit_*`)에서 닫는
+단순 상태 기계로 거래를 복원, `entry_source`(auto/manual)별로
+`{n, win_rate_pct, avg_return_pct, cumulative_return_pct}` 집계.
+마지막에 청산 안 된 진입은 `open_position`으로만 반환(완결 통계엔 미포함
+— 미실현 손익은 이미 `GET /state`가 제공, 중복 계산 안 함). **판단
+문구는 어디에도 없음**(house rule §5) — 숫자만 반환. `routers/
+auto_trade.py`에 `GET /api/auto-trade/performance` 추가(완전 읽기
+전용, entry/exit류 이벤트만 쿼리해 그대로 위임). 프런트
+`AutoTradePage.jsx`에 `PerformancePanel`을 `LogPanel` 위에 추가,
+기존 `rateClass`/`rateLabel` 재사용. 로그 전체를 훑는 집계라 기존
+15초 폴링에는 얹지 않고 마운트 시 1회 + 수동 매수/매도 직후에만
+재조회(`api.js::fetchAutoTradePerformance`).
+
+**검증**: 신규 순수함수 유닛테스트(`tests/test_auto_trade_performance.py`,
+DB 무관) 8건 — 자동/수동 분리 집계, orphan 청산/연속 진입이 anomalies로
+빠지고 통계 오염 안 함, 보유 중 포지션이 `open_position`으로만 가고
+완결 통계 제외, id=1920 제외 전/후 8/14 거래가 정확히 -5.52%대로
+복원됨(제외 안 하면 +0.19%로 오집계됨을 합성 데이터로 직접 대조) — 전부
+통과. 실행 시점 실계좌에 보유 중 포지션(`status: trailing`)이 있어
+`test_auto_trader_collector.py`/`test_auto_trade_router.py` 제외하고
+나머지 `pytest -q` 실행 — 870 passed(무관 기존 실패 1건 `test_markets_
+positioning_hitrate_router.py`는 이 변경과 무관한 실 DB 데이터 상태
+차이, 그대로 존재 확인). `curl localhost:8123/api/auto-trade/
+performance`로 실 데이터 직접 대조 — `manual: {n:3, win_rate_pct:0.0,
+avg_return_pct:-2.4558}`, `auto: {n:10, win_rate_pct:30.0, avg_return_
+pct:-1.0021}`, `anomalies: []`, `open_position`이 현재 보유 중인 수동
+진입(entry_price 16320)을 정확히 반영 — 이번 대화에서 손으로 계산한
+값과 일치. 새 라우터 테스트(`test_get_performance_*` 2건)는 코드에
+추가해 뒀으나 포지션이 열려 있는 동안은 위 안전장치에 따라 실행을
+보류, 포지션이 자연스럽게 청산된 뒤 실행 예정. `npm run build`/
+`npx oxlint` 클린(기존 경고만, 신규 없음).
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
