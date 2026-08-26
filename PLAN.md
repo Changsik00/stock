@@ -4367,6 +4367,64 @@ positioning_hitrate_router.py` 그대로 존재 확인, 이번 변경과 무관)
 `daily_giveback_pct` 기본값(0.3%)은 잠정치 — 1분봉 이력이 더 쌓이면
 재보정 필요.
 
+### Phase 5.78 — 주문 체결확인을 실보유수량 기준으로 교체 (§5.71 재발 방지, 2026-08-26)
+
+**계기**: 사용자가 직접 매도(09:31 KST)한 지 7분 뒤 자동매매가 골든크로스+
+거래량스파이크로 재진입(09:38 KST, 17,430원)했는데, 실제로는 매수가
+체결되지 않았다(직전 매도 대금이 아직 결제 전이라 가용 현금 부족으로
+거부됐을 가능성 — 추정). 그런데도 `AutoTradeState`는 `status=holding`
+으로 정상 전이됐고, 이후 36분간 손절/수급반전조기청산/실시간호가감시
+등 여러 매도 시도가 전부 "매도가능수량 부족, 0주 매도가능"으로 실패하며
+재시도만 반복했다. 사용자가 키움 HTS로 실계좌를 직접 확인해 실보유 0주를
+확인 — `AutoTradeState`를 idle로, entry_* 필드를 전부 null로 수동 정정해
+응급 조치(감사로그 id=3171)를 먼저 완료한 뒤 근본 원인을 조사했다.
+
+**근본 원인**: `_order_still_unfilled`(§5.71에서 추가)가 `get_unfilled_
+orders`(ka10075, **미체결** 주문 목록)에 방금 낸 주문번호가 "없으면"
+체결된 것으로 간주했다. 그런데 주문은 체결돼서 그 목록에서 빠질 수도
+있지만 거부/취소돼서 빠질 수도 있다 — 그 함수는 이 둘을 구분하지
+못했다. 이 함수는 매수/매도 양쪽 다 쓰였다(호출부 4곳: 자동 매수 진입,
+`_execute_sell` 공용 매도, `watch_stop_loss`의 30초 실시간호가 매도,
+`routers/auto_trade.py`의 수동 매수) — 같은 결함이 매도 쪽에서
+재현되면 §5.71 원래 사고(실제로는 보유 중인데 상태가 idle로 넘어가
+손절 감시가 꺼짐)가 그대로 재발할 수 있었다. 이번 사고는 그 반대
+방향(실제 idle인데 상태가 holding)이었을 뿐, 근본 결함은 방향과
+무관하게 열려 있었다.
+
+**구현**: `clients/kiwoom.py`에 `get_account_holdings_qty(code)`(kt00018,
+계좌평가잔고내역요청) 추가 — 2026-08-26 읽기전용 실호출로 URL/최상위
+필드(`acnt_evlt_remn_indv_tot`)까지 확인(보유 0종목이라 빈 배열로 옴 —
+이 사고를 그대로 재현/검증하는 조건). 배열 원소의 개별 필드명(`stk_cd`/
+`rmnd_qty`)은 실제 보유가 없어 실측하지 못해 추정치로 남겨 뒀다 —
+그래서 방어적으로 설계: 빈 배열/해당 종목 못 찾음 → 확실히 0(실측
+확인됨), 종목은 찾았는데 수량 필드를 못 읽으면 조용히 틀린 숫자 대신
+`ValueError`(호출부가 "미확인"으로 안전 처리). `collectors/auto_trader.py`
+의 `_order_still_unfilled`를 `_confirm_holdings_qty(client, code,
+expected_qty)`로 교체(추론 대신 직접 조회 — 매수 후 기대값 `TARGET_QTY`,
+매도 후 기대값 0) — 4개 호출부 전부 교체, "확인 안 되면 이전 상태 유지"
+보수적 철학은 그대로 유지.
+
+**검증**: `test_kiwoom_client.py`에 `get_account_holdings_qty` 신규
+테스트 5건(요청 형태, 빈 배열=0, 종목 찾음, 종목 못 찾음=0, 필드명 추정
+틀림→ValueError) 추가. `test_auto_trader_collector.py`의 기존 미체결
+시나리오 테스트(매수측/매도측/watch_stop_loss측)를 "응답은 성공했지만
+실보유수량은 그대로"인 상황(`_RejectedButAcceptedBuyClient`/
+`_RejectedButAcceptedSellClient`)으로 교체 — 오늘 실사고를 정확히
+재현하는 형태로 강화됐다(예전 버전은 "미체결 목록에 남아있음"만
+흉내냈지 "거부돼서 목록에서 아예 사라짐"은 재현 못 했음). `test_auto_
+trade_router.py`의 수동매수/매도 관련 테스트도 동일하게 교체. 실행 전
+`GET /api/auto-trade/state` 확인 — `enabled=true, status=idle`이라
+절차대로 킬스위치를 잠시 껐다(`POST /toggle {"enabled": false}`) 두 파일
+포함 전체 테스트 실행(119 passed) 후 즉시 원래 값으로 복원(`enabled=true`,
+상태 조회로 정확히 원복 확인). 나머지 전체 `pytest -q` 883 passed(무관
+기존 실패 1건 그대로).
+
+**하지 않은 것**: 라이브 규칙(진입/청산 신호)은 무관, 전혀 손대지 않음.
+이번 사고의 응급 조치(AutoTradeState 정정)는 조사 착수 전에 이미 완료.
+`get_account_holdings_qty`의 개별 필드명은 여전히 실측 미확정 — 다음에
+실제 보유 중일 때 `acnt_evlt_remn_indv_tot` 원소 하나를 로그로 남겨
+확정할 것.
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)

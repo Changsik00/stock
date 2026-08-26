@@ -38,9 +38,9 @@ from ..collectors.auto_trader import (
     TRADE_EVENT_TYPES,
     _best_fill_price,
     _cancel_unfilled_order_silently,
+    _confirm_holdings_qty,
     _execute_sell,
     _log,
-    _order_still_unfilled,
     _position_lock,
 )
 from ..db import get_session
@@ -221,8 +221,8 @@ async def manual_buy_auto_trade(session: AsyncSession = Depends(get_session)) ->
                     raise RuntimeError("매도호가를 확인할 수 없어 주문가를 정할 수 없음")
                 order_response = await client.place_buy_order(code, TARGET_QTY, int(order_price))
                 order_no = str(order_response.get("ord_no")) if order_response.get("ord_no") else None
-                unfilled = await _order_still_unfilled(client, order_no)
-                if unfilled:
+                confirmed = await _confirm_holdings_qty(client, code, TARGET_QTY)
+                if not confirmed:
                     await _cancel_unfilled_order_silently(client, code, order_no, TARGET_QTY)
         except Exception as e:  # noqa: BLE001 - 주문 실패는 상태 변경 없이 로그만
             await _log(
@@ -235,10 +235,11 @@ async def manual_buy_auto_trade(session: AsyncSession = Depends(get_session)) ->
             )
             raise HTTPException(status_code=502, detail=f"매수 주문 실패: {e}") from e
 
-        if unfilled:
-            # PLAN.md §5.71 — `_handle_idle`과 동일한 이유(collectors/
+        if not confirmed:
+            # PLAN.md §5.78(§5.71 후속) — `_handle_idle`과 동일한 이유(collectors/
             # auto_trader.py 모듈 상단 "미체결 확인" 절 참고). 주문은 접수됐지만
-            # 체결 미확인(취소 시도함) — status를 holding으로 넘기지 않는다.
+            # 실보유수량으로 체결이 확인되지 않음(취소 시도함) — status를
+            # holding으로 넘기지 않는다.
             await _log(
                 session,
                 event_type="buy_unconfirmed",
@@ -246,7 +247,7 @@ async def manual_buy_auto_trade(session: AsyncSession = Depends(get_session)) ->
                 price=order_price,
                 reason=(
                     f"사용자가 대시보드에서 수동으로 매수 주문을 실행함(지정가 {order_price}원, "
-                    f"{TARGET_QTY}주)했으나 체결 미확인(취소 시도)"
+                    f"{TARGET_QTY}주)했으나 체결 미확인(실보유수량 불일치, 취소 시도)"
                 ),
                 signal_snapshot={"current_price": current_price, "source": "manual"},
                 order_response=order_response,

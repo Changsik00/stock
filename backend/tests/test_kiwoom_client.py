@@ -851,6 +851,127 @@ async def test_get_unfilled_orders_request_shape(make_client):
     assert data["oso"] == []
 
 
+async def test_get_account_holdings_qty_request_shape(make_client):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return _token_response(request)
+        assert request.url.path == "/api/dostk/acnt"
+        assert request.headers["api-id"] == "kt00018"
+        assert json.loads(request.content) == {"qry_tp": "1", "dmst_stex_tp": "KRX"}
+        return httpx.Response(
+            200,
+            json={"return_code": 0, "return_msg": "", "acnt_evlt_remn_indv_tot": []},
+            headers={"cont-yn": "N", "next-key": "", "api-id": "kt00018"},
+        )
+
+    client = make_client(handler)
+    try:
+        qty = await client.get_account_holdings_qty("0167A0")
+    finally:
+        await client.aclose()
+
+    assert qty == 0
+
+
+async def test_get_account_holdings_qty_empty_list_means_zero(make_client):
+    """PLAN.md §5.78 — 2026-08-26 실호출로 직접 확인된 케이스(계좌에 아무
+    종목도 없을 때 `acnt_evlt_remn_indv_tot`가 빈 배열로 옴) — 가장 신뢰도
+    높은 케이스라 별도로 명시."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return _token_response(request)
+        return httpx.Response(
+            200,
+            json={"return_code": 0, "return_msg": "조회가 완료되었습니다", "acnt_evlt_remn_indv_tot": []},
+            headers={"cont-yn": "N", "next-key": "", "api-id": "kt00018"},
+        )
+
+    client = make_client(handler)
+    try:
+        qty = await client.get_account_holdings_qty("0167A0")
+    finally:
+        await client.aclose()
+
+    assert qty == 0
+
+
+async def test_get_account_holdings_qty_finds_matching_code(make_client):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return _token_response(request)
+        return httpx.Response(
+            200,
+            json={
+                "return_code": 0,
+                "return_msg": "",
+                "acnt_evlt_remn_indv_tot": [
+                    {"stk_cd": "005930", "rmnd_qty": "10"},
+                    {"stk_cd": "0167A0", "rmnd_qty": "1"},
+                ],
+            },
+            headers={"cont-yn": "N", "next-key": "", "api-id": "kt00018"},
+        )
+
+    client = make_client(handler)
+    try:
+        qty = await client.get_account_holdings_qty("0167A0")
+    finally:
+        await client.aclose()
+
+    assert qty == 1
+
+
+async def test_get_account_holdings_qty_code_not_in_nonempty_list_is_zero(make_client):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return _token_response(request)
+        return httpx.Response(
+            200,
+            json={
+                "return_code": 0,
+                "return_msg": "",
+                "acnt_evlt_remn_indv_tot": [{"stk_cd": "005930", "rmnd_qty": "10"}],
+            },
+            headers={"cont-yn": "N", "next-key": "", "api-id": "kt00018"},
+        )
+
+    client = make_client(handler)
+    try:
+        qty = await client.get_account_holdings_qty("0167A0")
+    finally:
+        await client.aclose()
+
+    assert qty == 0
+
+
+async def test_get_account_holdings_qty_raises_when_field_name_guess_is_wrong(make_client):
+    """PLAN.md §5.78 — `rmnd_qty` 필드명은 실측 미확정 추정값이다(모듈
+    docstring 참고). 종목은 찾았는데 그 필드가 없으면(추정이 틀렸을 경우)
+    조용히 틀린 숫자(0 등)를 반환하는 대신 예외를 던져 호출부가 안전하게
+    "미확인"으로 처리하게 해야 한다."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return _token_response(request)
+        return httpx.Response(
+            200,
+            json={
+                "return_code": 0,
+                "return_msg": "",
+                "acnt_evlt_remn_indv_tot": [{"stk_cd": "0167A0", "poss_qty": "1"}],  # 필드명이 다름
+            },
+            headers={"cont-yn": "N", "next-key": "", "api-id": "kt00018"},
+        )
+
+    client = make_client(handler)
+    try:
+        with pytest.raises(ValueError):
+            await client.get_account_holdings_qty("0167A0")
+    finally:
+        await client.aclose()
+
+
 # -- parse_quote_levels (ka10004 응답 파싱, PLAN.md §5.50-2) -------------------------
 
 

@@ -53,13 +53,14 @@ class _FakeKiwoomClient:
     """`async with KiwoomClient() as client:` 관례를 흉내내는 테스트 더블.
     place_buy_order/place_sell_order 호출 여부·인자를 기록해 검증한다.
 
-    PLAN.md §5.71 — `get_unfilled_orders`/`cancel_order` 추가. 기본값
-    `unfilled_orders=[]`(방금 낸 주문이 미체결 목록에 전혀 없음)은 "항상
-    즉시 체결됨"을 뜻해 기존(§5.71 이전) 테스트들의 가정과 동일하다 — 그
-    테스트들은 이 두 메서드가 생기기 전부터 통과하던 그대로 수정 없이
-    계속 통과해야 한다. 미체결을 흉내내려면 테스트가
-    `fake.unfilled_orders = [{"ord_no": "0099001", "ord_qty": "1",
-    "cntr_qty": "0"}]`처럼 방금 응답의 ord_no와 일치하는 행을 채워 넣는다."""
+    PLAN.md §5.78(2026-08-26, §5.71의 `get_unfilled_orders` 기반 확인을
+    대체) — `get_account_holdings_qty` 기본 동작은 "가장 최근 매수/매도
+    호출이 그대로 반영됨"(즉시 체결 시뮬레이션)이라 기존(§5.78 이전)
+    테스트들의 가정과 동일하게 수정 없이 계속 통과한다. 주문이 응답상으로는
+    성공(return_code=0)했지만 실제로는 거부/미체결이라 보유수량이 그대로인
+    상황을 흉내내려면 테스트가 `fake.holdings_qty_override = N`으로 실제
+    보유수량을 직접 못박는다(예: 매수 거부 재현은 0, 매도 거부 재현은
+    거래 전 수량 그대로)."""
 
     instances: list["_FakeKiwoomClient"] = []
 
@@ -72,8 +73,8 @@ class _FakeKiwoomClient:
         self.sell_response = {"ord_no": "0099002", "return_code": 0}
         self.buy_error: Exception | None = None
         self.sell_error: Exception | None = None
-        self.unfilled_orders: list[dict] = []
-        self.get_unfilled_orders_error: Exception | None = None
+        self.holdings_qty_override: int | None = None
+        self.get_account_holdings_qty_error: Exception | None = None
         self.cancel_error: Exception | None = None
         _FakeKiwoomClient.instances.append(self)
 
@@ -98,10 +99,17 @@ class _FakeKiwoomClient:
             raise self.sell_error
         return self.sell_response
 
-    async def get_unfilled_orders(self):
-        if self.get_unfilled_orders_error is not None:
-            raise self.get_unfilled_orders_error
-        return {"oso": list(self.unfilled_orders), "return_code": 0}
+    async def get_account_holdings_qty(self, code):
+        if self.get_account_holdings_qty_error is not None:
+            raise self.get_account_holdings_qty_error
+        if self.holdings_qty_override is not None:
+            return self.holdings_qty_override
+        # 기본값: "가장 최근 주문대로 정확히 반영됨"(즉시 체결) 시뮬레이션.
+        if self.sell_calls:
+            return 0
+        if self.buy_calls:
+            return self.buy_calls[-1][1]
+        return 0
 
     async def cancel_order(self, code, orig_order_no, qty):
         self.cancel_calls.append((code, orig_order_no, qty))
@@ -422,22 +430,27 @@ async def test_idle_enters_when_conditions_met_and_budget_ok(monkeypatch):
     assert "golden" in logs[0].reason
 
 
-class _UnfilledBuyClient(_FakeKiwoomClient):
-    """PLAN.md §5.71 — place_buy_order의 기본 응답 ord_no("0099001")가
-    체결 안 된 채(cntr_qty=0) 미체결 목록에 그대로 남아있는 상황을 흉내낸다."""
+class _RejectedButAcceptedBuyClient(_FakeKiwoomClient):
+    """PLAN.md §5.78(2026-08-26 실사고 재현) — place_buy_order 응답은 성공
+    (return_code=0, ord_no="0099001")으로 왔지만 실제로는 거부/미체결이라
+    보유수량이 그대로(0)인 상황을 흉내낸다 — 실제로 사용자 수동 매도 직후
+    대금 미결제로 자동 매수가 거부됐는데도 §5.71 버전의 확인 로직(미체결
+    목록 부재 = 체결)이 "체결됨"으로 오판한 사고를 그대로 재현한다."""
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
-        self.unfilled_orders = [{"ord_no": self.buy_response["ord_no"], "ord_qty": "1", "cntr_qty": "0"}]
+        self.holdings_qty_override = 0
 
 
 async def test_idle_entry_unconfirmed_when_buy_order_not_filled(monkeypatch):
-    """PLAN.md §5.71 — 매수 주문이 접수는 됐지만 체결이 확인되지 않으면
-    status를 holding으로 넘기지 않고 idle을 유지해야 한다(안 그러면 실제
-    포지션이 없는데 있다고 착각해 손절 감시가 유령 포지션을 감시하게 됨)."""
+    """PLAN.md §5.78(§5.71 후속) — 매수 주문이 접수는 됐지만 실보유수량으로
+    체결이 확인되지 않으면 status를 holding으로 넘기지 않고 idle을 유지해야
+    한다(안 그러면 실제 포지션이 없는데 있다고 착각해 손절 감시가 유령
+    포지션을 감시하게 됨 — 2026-08-26 정확히 이 시나리오가 실제로 발생해
+    36분간 매도 시도가 전부 실패했다)."""
     await _set_state(enabled=True, status="idle")
     _patch_signals(monkeypatch, ma_state="golden", is_spike=True, bars_close=16000.0)
-    monkeypatch.setattr(auto_trader, "KiwoomClient", _UnfilledBuyClient)
+    monkeypatch.setattr(auto_trader, "KiwoomClient", _RejectedButAcceptedBuyClient)
     _FakeKiwoomClient.instances = []
 
     async with async_session_factory() as session:
@@ -459,9 +472,9 @@ async def test_idle_entry_unconfirmed_when_buy_order_not_filled(monkeypatch):
     assert "체결 미확인" in logs[0].reason
 
 
-async def test_idle_entry_treats_unfilled_orders_query_failure_as_unfilled(monkeypatch):
-    """get_unfilled_orders 조회 자체가 실패하면(네트워크 등) 보수적으로
-    "미체결"로 취급해 상태를 넘기지 않아야 한다("확인 안 되면 이전 상태
+async def test_idle_entry_treats_holdings_query_failure_as_unconfirmed(monkeypatch):
+    """get_account_holdings_qty 조회 자체가 실패하면(네트워크 등) 보수적으로
+    "미확인"으로 취급해 상태를 넘기지 않아야 한다("확인 안 되면 이전 상태
     유지"가 항상 더 안전한 기본값)."""
     await _set_state(enabled=True, status="idle")
     _patch_signals(monkeypatch, ma_state="golden", is_spike=True, bars_close=16000.0)
@@ -469,7 +482,7 @@ async def test_idle_entry_treats_unfilled_orders_query_failure_as_unfilled(monke
     class _QueryFailsClient(_FakeKiwoomClient):
         def __init__(self, *a, **kw):
             super().__init__(*a, **kw)
-            self.get_unfilled_orders_error = RuntimeError("kiwoom 500")
+            self.get_account_holdings_qty_error = RuntimeError("kiwoom 500")
 
     monkeypatch.setattr(auto_trader, "KiwoomClient", _QueryFailsClient)
     _QueryFailsClient.instances = []
@@ -581,26 +594,30 @@ async def test_holding_stop_loss_sells_and_resets_to_idle(monkeypatch):
     assert logs[0].event_type == "exit_stop_loss"
 
 
-class _UnfilledSellClient(_FakeKiwoomClient):
-    """PLAN.md §5.71 — place_sell_order의 기본 응답 ord_no("0099002")가
-    체결 안 된 채(cntr_qty=0) 미체결 목록에 그대로 남아있는 상황을 흉내낸다
-    (8/14 실사고 재현용). `_execute_sell`/`watch_stop_loss`는 매도 한 번에
-    `async with KiwoomClient()` 블록 하나만 여므로 인스턴스는 하나뿐이다."""
+class _RejectedButAcceptedSellClient(_FakeKiwoomClient):
+    """PLAN.md §5.78(§5.71 반대 방향 재발 방지 검증용) — place_sell_order
+    응답은 성공(return_code=0, ord_no="0099002")으로 왔지만 실제로는
+    거부/미체결이라 보유수량이 그대로(1) 남아있는 상황을 흉내낸다. 실제로
+    발생한 적은 없지만, §5.71 버전의 확인 로직이 갖고 있던 결함(미체결
+    목록 부재를 체결로 오판)은 방향과 무관하게 존재했으므로 매도쪽도 반드시
+    검증한다 — 이 케이스를 못 잡으면 원래 §5.71 사고(실제 보유 중인데
+    상태가 idle로 넘어가 손절 감시가 꺼짐)가 그대로 재발할 수 있다.
+    `_execute_sell`/`watch_stop_loss`는 매도 한 번에 `async with
+    KiwoomClient()` 블록 하나만 여므로 인스턴스는 하나뿐이다."""
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
-        self.unfilled_orders = [{"ord_no": self.sell_response["ord_no"], "ord_qty": "1", "cntr_qty": "0"}]
+        self.holdings_qty_override = 1
 
 
 async def test_holding_stop_loss_sell_unconfirmed_keeps_position(monkeypatch):
-    """PLAN.md §5.71 — 8/14 실사고 재현: 매도 주문은 접수됐지만 체결이
-    확인되지 않으면(get_unfilled_orders에 그 주문이 여전히 남아있음)
-    status를 idle로 넘기지 않고 holding을 그대로 유지해야 한다(안 그러면
-    실제 사고처럼 손절 감시가 그대로 꺼져버림 — 이게 이번 안전장치의
-    핵심 목적)."""
+    """PLAN.md §5.78(§5.71 후속) — 매도 주문은 접수됐지만 실보유수량으로
+    체결이 확인되지 않으면 status를 idle로 넘기지 않고 holding을 그대로
+    유지해야 한다(안 그러면 실제 사고처럼 손절 감시가 그대로 꺼져버림 —
+    이게 이번 안전장치의 핵심 목적)."""
     await _set_state(enabled=True, status="holding", entry_price=16000, entry_qty=1)
     _patch_signals(monkeypatch, ma_state="none", is_spike=False, bars_close=16000 * 0.98)
-    monkeypatch.setattr(auto_trader, "KiwoomClient", _UnfilledSellClient)
+    monkeypatch.setattr(auto_trader, "KiwoomClient", _RejectedButAcceptedSellClient)
     _FakeKiwoomClient.instances = []
 
     async with async_session_factory() as session:
@@ -849,13 +866,13 @@ async def test_watch_holding_triggers_stop_loss_using_live_quote(monkeypatch):
 
 
 async def test_watch_stop_loss_sell_unconfirmed_keeps_position(monkeypatch):
-    """PLAN.md §5.71 — `watch_stop_loss`는 `_execute_sell`을 안 쓰고 자체
-    구현이라(모듈 docstring "미체결 확인" 절 참고) 별도로 검증한다. 30초
-    고빈도 손절 감시가 실제로 발동해도, 매도 주문이 미체결이면 idle로
-    안 넘어가야 한다."""
+    """PLAN.md §5.78(§5.71 후속) — `watch_stop_loss`는 `_execute_sell`을 안
+    쓰고 자체 구현이라(모듈 docstring "미체결 확인" 절 참고) 별도로 검증한다.
+    30초 고빈도 손절 감시가 실제로 발동해도, 매도 주문이 실보유수량으로
+    확인되지 않으면 idle로 안 넘어가야 한다."""
     entry_price = 20000.0
     await _set_state(enabled=True, status="holding", entry_price=entry_price, entry_qty=1)
-    monkeypatch.setattr(auto_trader, "KiwoomClient", _UnfilledSellClient)
+    monkeypatch.setattr(auto_trader, "KiwoomClient", _RejectedButAcceptedSellClient)
     _FakeKiwoomClient.instances = []
 
     async with async_session_factory() as session:
