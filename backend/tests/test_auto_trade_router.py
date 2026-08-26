@@ -897,6 +897,76 @@ async def test_get_backtest_no_data_for_unknown_code_returns_empty_result():
 
 
 # ---------------------------------------------------------------------------
+# GET /api/auto-trade/intraday-backtest (PLAN.md §5.77) — 완전 읽기 전용,
+# 킬스위치/포지션과 무관. 계산 로직 자체(진입/손절/트레일, daily_reset의
+# OR 결합 임계값 검증)는 tests/test_auto_trade_intraday_backtest.py가 합성
+# 데이터로 이미 전수 검증했으므로, 여기서는 실제 dev DB의 진짜 0167A0
+# stock_intraday_bar를 그대로 써서(새로 쓰지 않음) 라우팅·응답 형태·파라미터
+# 검증만 확인한다. §5.75 수집기가 워커 재시작 전까지 스케줄에서 누락돼
+# 있었던 탓에 지금은 데이터가 하루~이틀치뿐이라(§5.77) `bars_used`/`trades`가
+# 작거나 0일 수 있다 — 수치는 단언하지 않는다.
+# ---------------------------------------------------------------------------
+
+
+async def test_get_intraday_backtest_returns_well_formed_response_using_real_data():
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/auto-trade/intraday-backtest", params={"days": 180})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["code"] == TARGET_CODE
+    assert body["trail_mode"] == "fixed_floor"
+    assert isinstance(body["bars_used"], int)
+    assert "trades" in body and isinstance(body["trades"], list)
+    assert set(body["summary"].keys()) == {
+        "n",
+        "win_rate_pct",
+        "avg_win_pct",
+        "avg_loss_pct",
+        "cumulative_return_pct",
+        "best_trade_pct",
+        "worst_trade_pct",
+    }
+    assert body["summary"]["n"] == len(body["trades"])
+
+
+async def test_get_intraday_backtest_supports_daily_reset_trail_mode():
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(
+            "/api/auto-trade/intraday-backtest", params={"days": 180, "trail_mode": "daily_reset"}
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["trail_mode"] == "daily_reset"
+
+
+async def test_get_intraday_backtest_rejects_unknown_trail_mode():
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(
+            "/api/auto-trade/intraday-backtest", params={"trail_mode": "not_a_real_mode"}
+        )
+
+    assert resp.status_code == 400
+
+
+async def test_get_intraday_backtest_no_data_for_unknown_code_returns_empty_result():
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(
+            "/api/auto-trade/intraday-backtest", params={"code": "9999999", "days": 180}
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bars_used"] == 0
+    assert body["trades"] == []
+    assert body["summary"]["n"] == 0
+
+
+# ---------------------------------------------------------------------------
 # GET /api/auto-trade/performance (PLAN.md §5.76) — 완전 읽기 전용, 킬스위치/
 # 포지션과 무관(주문/상태 변경이 전혀 없음). pairing 로직 자체(승률·평균수익률
 # 계산, KNOWN_BAD_LOG_IDS 제외)는 tests/test_auto_trade_performance.py가 합성

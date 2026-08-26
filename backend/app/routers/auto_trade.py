@@ -45,8 +45,9 @@ from ..collectors.auto_trader import (
 )
 from ..db import get_session
 from ..market_hours import KST
-from ..models import AutoTradeLog, AutoTradeState, StockOhlcv
+from ..models import AutoTradeLog, AutoTradeState, StockIntradayBar, StockOhlcv
 from ..quant.auto_trade_backtest import run_backtest
+from ..quant.auto_trade_intraday_backtest import run_intraday_backtest
 from ..quant.auto_trade_performance import (
     ENTRY_EVENT_TYPES,
     EXIT_EVENT_TYPES,
@@ -482,6 +483,62 @@ async def get_auto_trade_backtest(
     ]
 
     result = run_backtest(bars, trail_mode=trail_mode)
+    return {
+        "code": code,
+        "days": days,
+        "bars_used": len(bars),
+        "trail_mode": trail_mode,
+        **result,
+    }
+
+
+@router.get("/intraday-backtest")
+async def get_auto_trade_intraday_backtest(
+    code: str = Query(TARGET_CODE, description="종목코드(기본 자동매매 대상)"),
+    days: int = Query(180, ge=1, le=180, description="최근 며칠치 1분봉을 쓸지"),
+    trail_mode: str = Query(
+        "fixed_floor",
+        description="'fixed_floor'(현재 실거래 규칙) | 'ratchet'(비교 실험용) | 'daily_reset'(비교 실험용)",
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """§5.54 자동매매 핵심 규칙의 **진짜 1분봉** 백테스트(PLAN.md §5.77,
+    §5.74/§5.75 후속) — **완전 읽기 전용**, 주문/상태 변경 전혀 없다(`/backtest`
+    와 동일 성격). `GET /backtest`는 1분봉 이력이 없어 일봉으로 근사했지만,
+    이건 §5.75가 쌓기 시작한 `StockIntradayBar`를 그대로 쓴다. 계산 자체는
+    `quant/auto_trade_intraday_backtest.run_intraday_backtest`(순수 함수,
+    자세한 설계·`daily_reset` 모드 제약은 그 모듈 docstring 참고)에 위임한다.
+
+    §5.55 안전 규칙(진입시간필터/EOD강제청산/리스크경보 손절선/수급반전
+    조기청산)은 `/backtest`와 동일하게 이번에도 포함하지 않는다 — 트레일
+    설계 비교가 다른 조기청산 경로로 뒤섞이는 걸 막기 위해 의도적으로 뺐다.
+
+    **데이터가 아직 하루~이틀치뿐이다**(§5.75 수집기가 한동안 워커 재시작
+    없이 스케줄에서 누락돼 있었음, PLAN.md §5.77 참고) — `bars_used`가
+    작고 `trades`가 비어있을 수 있다(에러 아님, 1분봉이 쌓일수록 의미가
+    커진다).
+
+    Returns ``{"code", "days", "bars_used", "trail_mode", "trades": [...],
+    "summary": {"n","win_rate_pct","avg_win_pct","avg_loss_pct",
+    "cumulative_return_pct","best_trade_pct","worst_trade_pct"}}``.
+    """
+    if trail_mode not in ("fixed_floor", "ratchet", "daily_reset"):
+        raise HTTPException(400, "trail_mode must be 'fixed_floor', 'ratchet' or 'daily_reset'")
+
+    since = dt.date.today() - dt.timedelta(days=days)
+    stmt = (
+        select(StockIntradayBar)
+        .where(StockIntradayBar.code == code, StockIntradayBar.date >= since)
+        .order_by(StockIntradayBar.date, StockIntradayBar.time)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    bars = [
+        {"date": r.date.isoformat(), "time": r.time, "close": r.close, "volume": r.volume}
+        for r in rows
+        if r.close is not None and r.volume is not None
+    ]
+
+    result = run_intraday_backtest(bars, trail_mode=trail_mode)
     return {
         "code": code,
         "days": days,

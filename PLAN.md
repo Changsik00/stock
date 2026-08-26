@@ -4287,6 +4287,86 @@ pct:-1.0021}`, `anomalies: []`, `open_position`이 현재 보유 중인 수동
 보류, 포지션이 자연스럽게 청산된 뒤 실행 예정. `npm run build`/
 `npx oxlint` 클린(기존 경고만, 신규 없음).
 
+### Phase 5.77 — 진짜 1분봉 백테스트 + `daily_reset` 트레일 모드 (2026-08-26)
+
+**계기**: 사용자가 오버나잇 보유(§5.55-2 조건부 허용) 결과를 물어본 뒤,
+"지금 트레일청산이 진입가 고정 플로어라 여러 날 보유 시 수익을 거의 다
+반납하는 거 아니냐"고 지적 — 실계좌 숫자로 확인(당시 진입가 16,320/고점
+17,385/청산바닥 16,401.6, 최대 -5.66%p 반납 가능). "당일 수급 분위기가
+크게 작용하니 당일 변동성을 우선해야 한다"는 후속 지적에 AskUserQuestion
+으로 구체 설계를 물어 "일별 리셋 트레일링"을 선택.
+
+**설계가 한 번 틀렸다 — 직접 잡아냄**: 처음엔 "매일 giveback 기준 고점을
+그날 시가로 통째 교체"하는 방식으로 구현했는데, 합성 데이터로 실제 돌려보니
+여러 날에 걸친 완만한 하락에서 오히려 `ratchet`(§5.74, 진입 이후 전체 고점
+기준)보다 **더 많이** 반납하는 것으로 나왔다(수학적으로도 확인:
+진입 이후 전체 고점은 항상 그날 자체 고점보다 크거나 같으므로, 기준을
+매일 더 낮게 갈아 치우면 청산까지 더 멀어질 뿐). AskUserQuestion으로
+재확인 후 설계를 "OR 결합"으로 수정 — 처음엔 "같은 0.5% 기준으로 OR
+결합"을 제안했는데 이것도 수학적으로 `ratchet`과 완전히 동일함을 직접
+계산해 확인(전체 고점 >= 당일 고점이므로 전체 고점 기준 임계값이 항상
+더 느슨해 먼저 충족됨) — 다시 한번 AskUserQuestion으로 확인 후 최종
+설계: `ratchet` 조건(전체 고점 기준, 느슨한 쪽)은 그대로 두고 더 타이트한
+"오늘 자체 고점 기준" 조건(`daily_giveback_pct`, 기본 0.3% — 잠정값,
+1분봉 이력이 더 쌓이면 재보정 필요)을 OR로 추가 — `ratchet`보다 절대
+늦게 청산될 수 없고, 오늘 자체 고점 기준 급락이 유독 심할 때만 더 빨리
+반응한다.
+
+**조사 중 발견한 선행 버그**: §5.75 1분봉 수집기(`stock_intraday_history`)가
+`collectors/__init__.py::register_all()`엔 등록돼 있었지만, `stock-worker-1`
+로그 전수 확인 결과 **§5.75 커밋(8/24) 이후 스케줄 배치에서 단 한 번도
+실행된 적이 없었다**(8/25 18:00 KST 정기배치가 "17 jobs"만 실행 — 18개여야
+정상). 원인: `stock-worker-1`은 백엔드(uvicorn `--reload`)와 달리 핫리로드가
+없는 단순 장기 실행 프로세스라, 컨테이너가 §5.75 커밋보다 훨씬 전(8/8)부터
+떠 있어 새 등록을 반영하지 못했다. `docker restart stock-worker-1`로 해결
+(재시작 후 "19 jobs registered" 로그로 확인) — 이후 `POST /api/admin/
+collect/stock_intraday_history` 수동 트리거로 8/26 당일치도 즉시 확보(58개,
+장중이라 부분치). **8/25 하루치는 영구 손실**(온디맨드 조회라 과거 날짜
+재수집 불가, `_warm_stock_intraday`에 날짜 파라미터 없음) — 8/24(381개,
+§5.75 검증 때 수동 수집) + 8/26(58개, 부분) + 이후 매일 밤 자동 적재로
+계속 쌓인다.
+
+**구현**: `quant/auto_trade_intraday_backtest.py`(신규, 순수 함수) —
+`run_intraday_backtest(bars, trail_mode="fixed_floor"|"ratchet"|
+"daily_reset", ratchet_giveback_pct=0.5, daily_giveback_pct=0.3)`. §5.74와
+동일한 재사용 원칙(`moving_average_cross`/`volume_spike` 기본 5/20 인자를
+그대로 씀 — 일봉 근사 땐 "5일/20일"이라는 왜곡이 있었는데 1분봉에선 원래
+의도인 "5분/20분"이 정확히 맞아떨어짐, `auto_trade_rules.py`의 순수 판정
+함수, `collectors/auto_trader.py`의 lookback 헬퍼 인자 하나도 안 바꿈,
+`_summarize`는 `auto_trade_backtest.py`에서 그대로 import). 범위는 여전히
+§5.54 핵심 규칙만 — §5.55 안전규칙(EOD강제청산 등)은 1분봉이라 흉내낼 수는
+있지만 트레일 설계 비교가 뒤섞이는 걸 막으려고 의도적으로 제외(§5.74와
+동일한 판단). `routers/auto_trade.py`에 `GET /api/auto-trade/
+intraday-backtest?code=&days=(1~180)&trail_mode=` 추가 — `StockIntradayBar`
+를 `(date, time)` 순으로 조회해 그대로 위임, 완전 읽기전용.
+
+**검증**: 신규 순수함수 유닛테스트(`tests/test_auto_trade_intraday_backtest.py`)
+8건 — 진입/손절 분봉 이식, `daily_reset`이 하루 안에서도 타이트한 당일
+조건 덕에 `ratchet`보다 먼저(114.6 vs 114.4) 청산되는 것 직접 확인,
+오버나잇 반전 시나리오에서 `ratchet`/`daily_reset`은 peak 근처(+18.8%)에서
+청산하는데 `fixed_floor`는 트레일청산을 놓치고 결국 손절(-1.98%)까지
+밀리는 것 확인(§5.74가 이미 보인 구조적 문제의 1분봉 재확인), `daily_reset`
+이 `ratchet`보다 절대 늦게 청산되지 않음(OR 결합 속성) 확인 — 전부 통과.
+실행 시점 실계좌에 보유 중 포지션(`status: trailing`)이 있어
+`test_auto_trader_collector.py`/`test_auto_trade_router.py` 제외하고
+나머지 `pytest -q` 실행 — 878 passed(무관 기존 실패 1건 `test_markets_
+positioning_hitrate_router.py` 그대로 존재 확인, 이번 변경과 무관). 새
+라우터 테스트(`test_get_intraday_backtest_*` 4건)는 코드에 추가해 뒀으나
+포지션이 열려 있는 동안은 실행 보류(§5.76과 동일 절차). `curl localhost:
+8123/api/auto-trade/intraday-backtest?days=180&trail_mode=fixed_floor`로
+실 데이터 직접 확인 — 439개 봉(8/24+8/26 합계)으로 이미 거래 1건 산출
+(§5.74 일봉 버전은 108일 표본으로도 거래 0건이었던 것과 대조 — 1분봉이
+실제로 의미 있는 백테스트를 가능하게 함을 확인), `daily_reset`은 같은
+데이터에서 거래 2건(승률 50%)으로 다른 결과 산출. `trail_mode=bogus`
+400 확인.
+
+**하지 않은 것 / 남은 것**: 라이브 규칙(`auto_trade_rules.py`,
+`collectors/auto_trader.py`, `AutoTradeState`)은 건드리지 않음 —
+`daily_reset`을 실거래에 적용하는 건 별도 결정(데이터 더 쌓인 뒤 재검증 +
+포지션 없을 때). 프런트 UI 없음(`/backtest`와 동일하게 curl 전용 유지).
+`daily_giveback_pct` 기본값(0.3%)은 잠정치 — 1분봉 이력이 더 쌓이면
+재보정 필요.
+
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
