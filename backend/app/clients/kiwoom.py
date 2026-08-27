@@ -1569,37 +1569,36 @@ class KiwoomClient:
         **실제 보유수량을 직접 확인**하는 용도로 추가했다(추론 대신 직접 조회).
 
         요청 body `{"qry_tp": "1", "dmst_stex_tp": "KRX"}`는 2026-08-26
-        실호출로 정상 동작 확인(보유 0종목이라 `acnt_evlt_remn_indv_tot`가
-        빈 배열로 온 것까지 확인 — 이 경우가 이번 사고를 그대로 재현/검증하는
-        조건이었다). **배열 원소 안의 개별 필드명(`stk_cd`/`rmnd_qty` 추정)은
-        아직 실호출로 확정하지 못했다** — 지금 계좌가 어떤 종목도 보유하고
-        있지 않아 비어 있는 배열만 확인 가능했다(다음에 실제 보유 중일 때
-        `acnt_evlt_remn_indv_tot`의 원소 하나를 그대로 로그로 남겨 확정할 것).
-        그래서 이 메서드는 **보수적으로 설계**했다 — 배열이 비어 있거나
-        `code`에 해당하는 원소를 못 찾으면 확실히 0(빈 배열=무보유는 이미
-        실측 확인됨). 원소는 찾았는데 수량 필드를 못 읽으면(추정 필드명이
-        틀렸을 경우) 조용히 틀린 숫자를 반환하는 대신 `ValueError`를 던져
-        호출부가 "확인 불가 -> 안전하게 미확인 취급"하게 만든다(이 클라이언트
-        전체가 실측 전 필드는 이렇게 보수적으로 다루는 관례를 따름).
+        실호출로 정상 동작 확인. 개별 원소 필드명도 2026-08-27 실보유 상태로
+        실호출 확정: **`stk_cd`는 순수 종목코드가 아니라 "A" + 종목코드**
+        (실측 `"A0167A0"`, 종목코드 `"0167A0"`가 아님!) — 이 접두사 정규화를
+        빠뜨린 최초 버전이 실제 체결된 매수를 "확인 안 됨(0주)"으로 오판해
+        30분간 실보유 포지션이 무감시 상태로 방치된 사고가 있었다(PLAN.md
+        §5.78 도입 당일 재발, §5.79에서 수정). `rmnd_qty`(보유수량, 실측
+        `"000000000000001"`=1)는 추정이 맞았다.
 
         Returns:
             보유수량(정수). 종목이 보유 목록에 없으면 0.
 
         Raises:
-            ValueError: 보유 목록에 종목은 있는데 수량 필드를 못 읽음(필드명
-                재확인 필요 — 호출부는 이걸 "미확인"으로 처리해야 함).
+            ValueError: 보유 목록에 종목은 있는데 수량 필드를 못 읽음(필드가
+                또 바뀌었을 가능성 — 호출부는 이걸 "미확인"으로 처리해야 함).
         """
         body = {"qry_tp": "1", "dmst_stex_tp": "KRX"}
         data, _ = await self.call_tr("kt00018", body)
         rows = data.get("acnt_evlt_remn_indv_tot") or []
         for row in rows:
-            if str(row.get("stk_cd", "")) != code:
+            raw_stk_cd = str(row.get("stk_cd", ""))
+            # 2026-08-27 실측 확정 — kt00018은 종목코드 앞에 항상 "A"를 붙여
+            # 돌려준다(예: "A0167A0"). 접두사를 벗겨야 순수 종목코드와 비교 가능.
+            normalized_stk_cd = raw_stk_cd[1:] if raw_stk_cd.startswith("A") else raw_stk_cd
+            if normalized_stk_cd != code:
                 continue
             raw_qty = row.get("rmnd_qty")
             if raw_qty is None:
                 raise ValueError(
                     f"kt00018 응답에서 {code} 행은 찾았지만 rmnd_qty 필드가 없음 — "
-                    f"필드명 추정이 틀렸을 수 있음, 실제 행: {row!r}"
+                    f"필드명이 또 바뀌었을 수 있음, 실제 행: {row!r}"
                 )
             try:
                 return int(str(raw_qty))

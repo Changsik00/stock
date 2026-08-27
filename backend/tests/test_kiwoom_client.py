@@ -896,7 +896,13 @@ async def test_get_account_holdings_qty_empty_list_means_zero(make_client):
     assert qty == 0
 
 
-async def test_get_account_holdings_qty_finds_matching_code(make_client):
+async def test_get_account_holdings_qty_finds_matching_code_with_a_prefix(make_client):
+    """PLAN.md §5.79 — kt00018은 stk_cd를 순수 종목코드가 아니라 "A"+종목코드로
+    돌려준다(2026-08-27 실보유 상태로 실호출 확정, `acnt_evlt_remn_indv_tot`
+    응답 그대로). 이 접두사 정규화를 빠뜨린 최초 버전(§5.78)이 실제 체결된
+    매수를 "확인 안 됨"으로 오판해 30분간 실보유 포지션이 무감시 상태로
+    방치된 사고를 그대로 재현하는 회귀 테스트."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/oauth2/token":
             return _token_response(request)
@@ -906,8 +912,8 @@ async def test_get_account_holdings_qty_finds_matching_code(make_client):
                 "return_code": 0,
                 "return_msg": "",
                 "acnt_evlt_remn_indv_tot": [
-                    {"stk_cd": "005930", "rmnd_qty": "10"},
-                    {"stk_cd": "0167A0", "rmnd_qty": "1"},
+                    {"stk_cd": "A005930", "rmnd_qty": "000000000000010"},
+                    {"stk_cd": "A0167A0", "rmnd_qty": "000000000000001"},
                 ],
             },
             headers={"cont-yn": "N", "next-key": "", "api-id": "kt00018"},
@@ -931,7 +937,7 @@ async def test_get_account_holdings_qty_code_not_in_nonempty_list_is_zero(make_c
             json={
                 "return_code": 0,
                 "return_msg": "",
-                "acnt_evlt_remn_indv_tot": [{"stk_cd": "005930", "rmnd_qty": "10"}],
+                "acnt_evlt_remn_indv_tot": [{"stk_cd": "A005930", "rmnd_qty": "10"}],
             },
             headers={"cont-yn": "N", "next-key": "", "api-id": "kt00018"},
         )
@@ -946,10 +952,10 @@ async def test_get_account_holdings_qty_code_not_in_nonempty_list_is_zero(make_c
 
 
 async def test_get_account_holdings_qty_raises_when_field_name_guess_is_wrong(make_client):
-    """PLAN.md §5.78 — `rmnd_qty` 필드명은 실측 미확정 추정값이다(모듈
-    docstring 참고). 종목은 찾았는데 그 필드가 없으면(추정이 틀렸을 경우)
-    조용히 틀린 숫자(0 등)를 반환하는 대신 예외를 던져 호출부가 안전하게
-    "미확인"으로 처리하게 해야 한다."""
+    """`rmnd_qty` 필드명 자체는 2026-08-27 실측으로 확정됐지만, 혹시 다시
+    바뀌는 경우를 대비해 종목은 찾았는데 그 필드가 없으면 조용히 틀린
+    숫자(0 등)를 반환하는 대신 예외를 던져 호출부가 안전하게 "미확인"으로
+    처리하게 해야 한다."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/oauth2/token":
@@ -959,7 +965,7 @@ async def test_get_account_holdings_qty_raises_when_field_name_guess_is_wrong(ma
             json={
                 "return_code": 0,
                 "return_msg": "",
-                "acnt_evlt_remn_indv_tot": [{"stk_cd": "0167A0", "poss_qty": "1"}],  # 필드명이 다름
+                "acnt_evlt_remn_indv_tot": [{"stk_cd": "A0167A0", "poss_qty": "1"}],  # 필드명이 다름
             },
             headers={"cont-yn": "N", "next-key": "", "api-id": "kt00018"},
         )
@@ -970,6 +976,70 @@ async def test_get_account_holdings_qty_raises_when_field_name_guess_is_wrong(ma
             await client.get_account_holdings_qty("0167A0")
     finally:
         await client.aclose()
+
+
+async def test_get_account_holdings_qty_matches_real_captured_response(make_client):
+    """PLAN.md §5.79 — 2026-08-27 실계좌(0167A0 1주 실보유 상태)에 직접 호출해
+    받은 응답을 그대로 고정한 회귀 테스트 — 가장 신뢰도 높은 케이스. 이 응답의
+    stk_cd가 "A0167A0"이라는 사실 자체가 §5.78 최초 버전의 버그(정규화 없이
+    "0167A0"과 직접 비교해 못 찾음)를 실제로 유발한 원인이다."""
+
+    real_response = {
+        "tot_pur_amt": "000000000017605",
+        "tot_evlt_amt": "000000000017675",
+        "tot_evlt_pl": "000000000000070",
+        "tot_prft_rt": "0.40",
+        "prsm_dpst_aset_amt": "000000000023254",
+        "tot_loan_amt": "000000000000000",
+        "tot_crd_loan_amt": "000000000000000",
+        "tot_crd_ls_amt": "000000000000000",
+        "acnt_evlt_remn_indv_tot": [
+            {
+                "stk_cd": "A0167A0",
+                "stk_nm": "SOL AI반도체TOP2플러스",
+                "evltv_prft": "000000000000070",
+                "prft_rt": "0.40",
+                "pur_pric": "000000000017605",
+                "pred_close_pric": "000000017250",
+                "rmnd_qty": "000000000000001",
+                "trde_able_qty": "000000000000001",
+                "cur_prc": "000000017675",
+                "pred_buyq": "000000000000001",
+                "pred_sellq": "000000000000002",
+                "tdy_buyq": "000000000000001",
+                "tdy_sellq": "000000000000000",
+                "pur_amt": "000000000017605",
+                "pur_cmsn": "000000000000000",
+                "evlt_amt": "000000000017675",
+                "sell_cmsn": "000000000000000",
+                "tax": "000000000000000",
+                "sum_cmsn": "000000000000000",
+                "poss_rt": "100.00",
+                "crd_tp": "00",
+                "crd_tp_nm": "",
+                "crd_loan_dt": "",
+            }
+        ],
+        "return_code": 0,
+        "return_msg": "조회가 완료되었습니다",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return _token_response(request)
+        return httpx.Response(
+            200,
+            json=real_response,
+            headers={"cont-yn": "N", "next-key": "", "api-id": "kt00018"},
+        )
+
+    client = make_client(handler)
+    try:
+        qty = await client.get_account_holdings_qty("0167A0")
+    finally:
+        await client.aclose()
+
+    assert qty == 1
 
 
 # -- parse_quote_levels (ka10004 응답 파싱, PLAN.md §5.50-2) -------------------------
