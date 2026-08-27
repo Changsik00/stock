@@ -4476,7 +4476,54 @@ holdings_qty_matches_real_captured_response`) 추가 — 37 passed. 실행 시�
 미확정 필드가 남아있는 채로 배포할 땐, 가능하면 배포 직후 짧은 시간 안에
 실제 케이스로 검증을 마치는 쪽이 안전하다.
 
-## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
+### Phase 5.80 — 전일 대비 수급 소화 체크리스트 (범용 종목, 2026-08-27)
+
+**계기**: 사용자가 알테오젠 신주 상장 관련 유튜브 링크(youtu.be/Lp4-1yLVZ6U)
+를 주며 "영상 내용 보고 알테오젠 분석해보자"고 요청 — WebFetch로는 YouTube
+페이지가 JS 렌더링이라 제목만 나오고 실제 내용을 못 가져와서, `yt-dlp
+--write-auto-sub`로 한국어 자막을 직접 받아 실제 내용을 확인했다. 영상 핵심은
+"신주 상장 이틀째, 어제 버틴 가격이 진짜 매수세로 만들어졌는지 오늘 확인하는
+체크리스트"(고정 수치 규칙 아님) — 이걸 대화 중 알테오젠 실데이터(자체
+`/series`, `/volume-profile-history`, 셀트리온/삼성바이오로직스/리가켐바이오
+비교)로 수동 검증한 뒤, 사용자가 "이걸 참고해서 전략을 만들어보자"고 제안.
+AskUserQuestion으로 범위 확정: 실거래 없는 분석 도구, 임의 종목코드로 범용화
+(신주 상장에 국한하지 않고 "전일 대비 오늘 수급 소화 여부"로 일반화).
+
+**구현**: `quant/supply_absorption_checklist.py`(신규, 순수 함수) —
+`evaluate_supply_absorption(prices, flows, peer_changes=None, market_is_open=False)`.
+새 TR·저장소 없이 전부 기존 자산 재사용: `routers/stocks.py::_ensure_candles_
+cached`+`get_stock_series_from_db`(일봉), `_ensure_flows_cached`+`_read_flows`
+(투자자별 수급) — `/series`가 이미 쓰는 그대로. 4개 체크: (1) 어제 고가 돌파
++유지 여부, (2) 어제 종가 부근 공방(오늘 저가~고가가 어제 종가를 가로질렀는지),
+(3) 거래량-저가 4분면(영상이 설명한 "매도세 약화"/"물량 부담 지속"/"매수세
+실종 우려"/"강한 매수세 유입" 라벨 그대로, 관찰 서술일 뿐 단정 아님), (4)
+투자자별(외국인/기관계 우선) 연속 같은 방향 매매일수(streak). `peer_codes`
+쿼리파라미터로 비교 종목을 직접 넘기면 오늘 등락률 동반 여부도 서술.
+**오전/오후 수급 분리는 만들지 않음** — `intraday_investor_trading`
+(ka10063)의 투자자구분 코드 의미가 미확정이라, 신뢰 못 할 숫자를 조용히
+계산하느니 응답 `limitations` 필드에 "확인 불가"를 명시(이번 대화에서
+사용자에게 그렇게 정직하게 답했던 태도 그대로 코드에 반영). **업종 동반
+자동판별도 안 함** — `GroupSnapshot`엔 업종 집계치만 있고 종목 멤버십 매핑이
+없어(구성종목 DB 없음), `peer_codes` 수동 입력으로 대체. 라우터: `GET
+/api/stocks/{code}/supply-absorption-checklist?days=&peer_codes=` 추가,
+완전 읽기전용.
+
+**검증**: 신규 순수함수 유닛테스트(`tests/test_supply_absorption_checklist.py`)
+16건 — 고점 돌파/가짜 돌파/미돌파, 4분면 4가지 전부, 오늘 거래량 partial
+플래그(장중/장마감 분기), 투자자 streak 계산(방향 전환 시 끊김 포함), peer
+비교 3가지, insufficient_data(2일 미만) — 전부 통과. 라우터 테스트
+(`tests/test_stocks_router.py`) 2건(기존 `/series`/`/volume-profile-history`
+테스트와 동일한 관례 — naver_index/KiwoomClient monkeypatch, 실 DB 세션,
+응답 형태만 확인) 추가 — 46 passed(기존 회귀 없음). 나머지 전체 `pytest -q`
+902 passed(무관 기존 실패 1건 그대로). 실 curl로 `GET /api/stocks/196170/
+supply-absorption-checklist?peer_codes=068270,207940,141080` 호출 — 대화
+중 손으로 확인했던 값(어제 고가 320,000 미돌파, 거래량↓저가↑="매도세 약화",
+외국인 연속 순매수, peer 중 리가켐바이오만 강세)과 실제 응답이 일치함을
+확인(시간이 흘러 가격 자체는 소폭 갱신됨 — 실시간 데이터라 정상).
+
+**하지 않은 것**: 자동매매 연결 없음(순수 관찰 도구). 프런트 UI 없음
+(`/backtest`류와 동일하게 curl 전용으로 시작 — 필요하면 다음에 추가).
+
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 

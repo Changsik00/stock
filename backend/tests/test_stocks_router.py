@@ -421,6 +421,92 @@ async def test_series_include_volume_profile_query_param(monkeypatch, seeded_sto
     assert vp["levels"][0]["is_poc"] is True
 
 
+# -- 전일 대비 수급 소화 체크리스트 (PLAN.md §5.80) --------------------------------
+
+
+async def test_supply_absorption_checklist_returns_well_formed_response(monkeypatch, seeded_stock):
+    """계산 로직 자체(4분면 분류, streak 등)는 tests/test_supply_absorption_
+    checklist.py가 합성 데이터로 전수 검증했으므로, 여기서는 라우팅·배선(캔들
+    캐시 + 수급 캐시 재사용, evaluate_supply_absorption 호출)만 확인한다."""
+    monkeypatch.setattr(stocks, "is_nxt_closed", lambda now_kst: True)
+
+    target_end = stocks._latest_trading_day()
+    prev_day = target_end - dt.timedelta(days=1)
+    days_list = [target_end - dt.timedelta(days=i) for i in range(1, -1, -1)]
+
+    def fake_fetch_stock_series(code, start, end):
+        return [
+            {"date": days_list[0], "open": 300.0, "high": 320.0, "low": 296.0, "close": 311.0, "volume": 770_000},
+            {"date": days_list[1], "open": 306.0, "high": 317.0, "low": 303.0, "close": 311.0, "volume": 256_000},
+        ]
+
+    monkeypatch.setattr(stocks.naver_index, "fetch_stock_series", fake_fetch_stock_series)
+
+    flow_calls: dict = {}
+    fake_response = _fake_ka10059_response(target_end, prev_day)
+    monkeypatch.setattr(stocks, "KiwoomClient", _make_fake_kiwoom_client(flow_calls, fake_response))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/stocks/{TEST_CODE}/supply-absorption-checklist", params={"days": 10})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["code"] == TEST_CODE
+    assert body["insufficient_data"] is False
+    assert set(body.keys()) >= {
+        "prev_high_breakout",
+        "prev_close_battleground",
+        "volume_low_quadrant",
+        "investor_flow_continuity",
+        "peer_comparison",
+        "limitations",
+    }
+    assert body["peer_comparison"] is None  # peer_codes 안 넘겼으므로
+
+
+async def test_supply_absorption_checklist_with_peer_codes(monkeypatch, seeded_stock):
+    monkeypatch.setattr(stocks, "is_nxt_closed", lambda now_kst: True)
+
+    target_end = stocks._latest_trading_day()
+    prev_day = target_end - dt.timedelta(days=1)
+    days_list = [target_end - dt.timedelta(days=i) for i in range(1, -1, -1)]
+
+    def fake_fetch_stock_series(code, start, end):
+        return [
+            {"date": days_list[0], "open": 300.0, "high": 320.0, "low": 296.0, "close": 311.0, "volume": 770_000},
+            {"date": days_list[1], "open": 306.0, "high": 317.0, "low": 303.0, "close": 315.0, "volume": 256_000},
+        ]
+
+    monkeypatch.setattr(stocks.naver_index, "fetch_stock_series", fake_fetch_stock_series)
+    monkeypatch.setattr(
+        stocks, "KiwoomClient", _make_fake_kiwoom_client({}, _fake_ka10059_response(target_end, prev_day))
+    )
+
+    peer_code = "999998"
+    async with async_session_factory() as session:
+        session.add(Stock(code=peer_code, name="테스트피어전자", market="KOSPI", is_etf=False))
+        await session.commit()
+
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get(
+                f"/api/stocks/{TEST_CODE}/supply-absorption-checklist",
+                params={"days": 10, "peer_codes": peer_code},
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        # peer도 같은 fake_fetch_stock_series를 타므로(코드 무관하게 동일 캔들 반환)
+        # peer_comparison이 실제로 채워졌는지만 확인한다.
+        assert body["peer_comparison"] is not None
+        assert peer_code in body["peer_comparison"]["peer_changes"]
+    finally:
+        async with async_session_factory() as session:
+            await session.execute(delete(StockOhlcv).where(StockOhlcv.code == peer_code))
+            await session.execute(delete(Stock).where(Stock.code == peer_code))
+            await session.commit()
+
+
 # -- 종목별 프로그램매매 (ka90013, PLAN.md §5.29-3) -------------------------------
 
 

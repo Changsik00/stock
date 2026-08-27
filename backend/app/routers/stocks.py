@@ -72,7 +72,7 @@ from ..clients.kiwoom import (
 )
 from ..collectors.program_stock import parse_program_trade_rows
 from ..db import get_session
-from ..market_hours import KST, is_nxt_closed
+from ..market_hours import KST, is_market_closed, is_nxt_closed
 from ..models import (
     InvestorWarningEvent,
     ProgramTrade,
@@ -86,6 +86,7 @@ from ..models import (
 from ..quant.flow_percentile import compute_flow_percentiles
 from ..quant.investor_warning_status import classify_investor_warning_status
 from ..quant.regime_backtest import next_streak
+from ..quant.supply_absorption_checklist import evaluate_supply_absorption
 from ..quant.signals import (
     compute_vwap,
     detect_breakout,
@@ -1066,6 +1067,82 @@ async def stock_volume_profile_history(
         "days": days,
         "series": [_serialize_volume_profile_row(r) for r in rows],
     }
+
+
+@router.get("/{code}/supply-absorption-checklist")
+async def stock_supply_absorption_checklist(
+    code: str,
+    days: int = Query(10, ge=2, le=60),
+    peer_codes: str | None = Query(
+        None, description="비교하고 싶은 종목코드 쉼표구분(예: '068270,207940') — 없으면 생략"
+    ),
+    session: AsyncSession = Depends(get_session),
+):
+    """전일 대비 오늘 수급 소화 체크리스트(PLAN.md §5.80) — **완전 읽기전용**,
+    주문/상태 변경 전혀 없다. 사용자가 신주 상장 관련 유튜브 영상을 보고
+    "이걸 참고해서 전략을 만들어보자"고 제안해 만들었다 — 계산 자체는
+    `quant/supply_absorption_checklist.evaluate_supply_absorption`(순수 함수,
+    설계·제약은 그 모듈 docstring 참고)에 위임한다. **이 엔드포인트도 어떤
+    판단 문구도 만들지 않는다** — 관찰 서술만 반환한다.
+
+    `/series`와 동일한 준비 단계(`_ensure_candles_cached`/
+    `get_stock_series_from_db`, `_ensure_flows_cached`/`_read_flows`)를
+    재사용한다 — 새 TR 호출 없음. `peer_codes`를 주면 각 종목의 오늘
+    등락률만 가볍게 조회해(days=2) 비교에 포함한다.
+
+    Returns: `quant/supply_absorption_checklist.evaluate_supply_absorption`
+    반환값 그대로(+ `code`).
+    """
+    stock = await session.get(Stock, code)
+    if stock is None:
+        await _ensure_stock_master_stub(session, code, None, None, None)
+        await session.commit()
+
+    try:
+        await _ensure_candles_cached(session, code, days)
+        await session.commit()
+    except Exception as e:  # noqa: BLE001 - naver_index.NaverIndexError / requests 등
+        await session.rollback()
+        raise HTTPException(502, detail={"source": "naver_fchart", "detail": str(e)[:300]}) from e
+
+    prices = await get_stock_series_from_db(session, code, days)
+
+    try:
+        await _ensure_flows_cached(session, code)
+        await session.commit()
+    except (KiwoomAuthError, KiwoomAPIError) as e:
+        await session.rollback()
+        logger.warning("stocks: %s 수급 조회 실패(키움), flows 빈 채로 반환: %s", code, e)
+    except Exception as e:  # noqa: BLE001 - httpx 등 네트워크 계열 예외 포함
+        await session.rollback()
+        logger.warning("stocks: %s 수급 조회 실패, flows 빈 채로 반환: %s", code, e)
+
+    flows = await _read_flows(session, code, days)
+
+    peer_changes: dict[str, float] | None = None
+    if peer_codes:
+        peer_changes = {}
+        for peer_code in [c.strip() for c in peer_codes.split(",") if c.strip()]:
+            peer_stock = await session.get(Stock, peer_code)
+            if peer_stock is None:
+                await _ensure_stock_master_stub(session, peer_code, None, None, None)
+                await session.commit()
+            try:
+                await _ensure_candles_cached(session, peer_code, 2)
+                await session.commit()
+            except Exception as e:  # noqa: BLE001 - peer 하나 실패로 전체를 막지 않음
+                await session.rollback()
+                logger.warning("stocks: peer %s 캔들 조회 실패, 비교에서 제외: %s", peer_code, e)
+                continue
+            peer_prices = await get_stock_series_from_db(session, peer_code, 2)
+            if peer_prices:
+                peer_changes[peer_code] = peer_prices[-1]["changeRate"]
+
+    now_kst = dt.datetime.now(KST)
+    result = evaluate_supply_absorption(
+        prices, flows, peer_changes=peer_changes, market_is_open=not is_market_closed(now_kst)
+    )
+    return {"code": code, **result}
 
 
 @router.get("/{code}/whale")
