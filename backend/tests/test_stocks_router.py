@@ -507,6 +507,57 @@ async def test_supply_absorption_checklist_with_peer_codes(monkeypatch, seeded_s
             await session.commit()
 
 
+# -- 공매도 잔고 추이 (PLAN.md §5.81) ----------------------------------------------
+
+
+async def test_short_balance_trend_returns_well_formed_response(monkeypatch, seeded_stock):
+    """계산 로직 자체(방향/streak/peak/phase)는 tests/test_short_balance_trend.py
+    가 합성 데이터로 전수 검증했으므로, 여기서는 라우팅·배선(공매도 캐시 재사용,
+    evaluate_short_balance_trend 호출)만 확인한다."""
+    target_end = stocks._latest_trading_day()
+
+    def fake_fetch_short_selling(code, start, end, timeout=15):
+        return [
+            {"date": target_end - dt.timedelta(days=i), "volume": 1000, "value": 100, "balance_qty": qty, "balance_value": 0}
+            for i, qty in zip(range(4, -1, -1), [1000, 1500, 2000, 1800, 1600])
+        ]
+
+    monkeypatch.setattr(stocks.krx_short_selling, "fetch_stock_short_selling", fake_fetch_short_selling)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/stocks/{TEST_CODE}/short-balance-trend", params={"days": 30})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["code"] == TEST_CODE
+    assert body["insufficient_data"] is False
+    assert set(body.keys()) >= {
+        "current_direction",
+        "consecutive_days_same_direction",
+        "peak",
+        "days_since_peak",
+        "pct_off_peak",
+        "phase",
+        "limitations",
+    }
+
+
+async def test_short_balance_trend_insufficient_data_when_not_a_reporting_stock(monkeypatch, seeded_stock):
+    """대부분 종목은 순보유잔고가 없다(보고의무 발생 종목만 채워짐) —
+    insufficient_data:true가 에러 없이 정직하게 나와야 한다."""
+
+    def fake_fetch_short_selling_empty(code, start, end, timeout=15):
+        return []
+
+    monkeypatch.setattr(stocks.krx_short_selling, "fetch_stock_short_selling", fake_fetch_short_selling_empty)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/stocks/{TEST_CODE}/short-balance-trend")
+
+    assert resp.status_code == 200
+    assert resp.json()["insufficient_data"] is True
+
+
 # -- 종목별 프로그램매매 (ka90013, PLAN.md §5.29-3) -------------------------------
 
 

@@ -4524,6 +4524,46 @@ supply-absorption-checklist?peer_codes=068270,207940,141080` 호출 — 대화
 **하지 않은 것**: 자동매매 연결 없음(순수 관찰 도구). 프런트 UI 없음
 (`/backtest`류와 동일하게 curl 전용으로 시작 — 필요하면 다음에 추가).
 
+### Phase 5.81 — 공매도 잔고 추이(숏커버링 감지) 도구 (2026-08-29)
+
+**계기**: 사용자가 또 다른 유튜브 영상(youtu.be/cqY8ajo6T-I, yt-dlp로 자막
+확보해 실제 내용 확인)을 공유 — "자사주 매입 잔여 실탄 vs 공매도 잔고 추이,
+누가 방어/공격 중인지"를 분석하는 방식이었으나, 영상 자체는 특정 종목
+홍보 + 유료 텔레그램 리딩방 가입 유도(전화번호로 "시초가" 문자 보내라는
+전형적 패턴)로 끝나는 콘텐츠였다 — 이 부분은 신뢰도 낮음을 사용자에게
+먼저 명확히 알리고, "채널 홍보는 배제하고 분석 방식만 취득하자"는 사용자
+요청에 따라 방법론만 분리했다. 두 다리 중 자사주 매입 공시는 DART 연동
+(신규 API 키 발급 필요)이 필요해 AskUserQuestion으로 확인 후 이번 범위
+에서 제외, 이미 데이터가 있는 공매도 잔고 추이만 먼저 구현.
+
+**구현**: `quant/short_balance_trend.py`(신규, 순수 함수) —
+`evaluate_short_balance_trend(balance_history)`. 새 TR·저장소 없이 기존
+`routers/stocks.py::_ensure_short_selling_cached`+`_read_short_selling`
+(`ShortSellingStock.balance_qty`, KRX 정보데이터시스템, `/series`가 이미
+쓰는 그대로)만 재사용. **중요한 제약**: 순보유잔고는 "보고의무 발생
+종목만 T+2 지연으로 채워지고 그 외엔 NULL"(기존 모델 docstring에 이미
+명시돼 있던 제약) — 유효 데이터 2개 미만이면 `insufficient_data`로 정직한
+실패(대부분 종목에서 정상 응답). 방향/연속일수(streak), 조회 구간 내
+peak 대비 며칠·몇 % 줄었는지(`days_since_peak`/`pct_off_peak`), 이를
+조합한 관찰 라벨(`phase`) 3가지 — "공매도 잔고 확대 중"/"공매도 잔고
+감소 중(숏커버링 국면일 수 있음)"/"방향 불분명" — 영상이 쓴 "숏커버링"
+용어는 서술에만 쓰고 판단 문구는 없음(house rule §5). 라우터: `GET
+/api/stocks/{code}/short-balance-trend?days=` 추가, 완전 읽기전용.
+
+**검증**: 신규 순수함수 유닛테스트(`tests/test_short_balance_trend.py`)
+10건 — None 섞인 sparse 데이터 스킵, 상승/하락 방향, peak 이후 감소폭
+계산, 소폭 감소는 "국면"이라고 과장하지 않음, 방향 전환 시 streak 끊김,
+insufficient_data 케이스들 — 전부 통과. 라우터 테스트 2건(`test_stocks_
+router.py`, 기존 관례와 동일 — krx_short_selling monkeypatch, 실 DB 세션,
+응답 형태만 확인). 나머지 전체 `pytest -q` 914 passed(무관 기존 실패
+1건 그대로). 실 curl로 `GET /api/stocks/196170/short-balance-trend` 확인
+— T+2 지연이 실제로 보임(`today_date`가 오늘이 아니라 8/25로 나옴, 문서화된
+그대로), peak(8/12) 대비 -12.34%, streak=1이라 "방향 불분명"으로 과장 없이
+정직하게 응답.
+
+**하지 않은 것**: 자사주 매입 공시(DART)는 범위 밖 — 사용자가 API 키
+발급받으면 후속 작업. 자동매매 연결 없음, 프런트 UI 없음(curl 전용).
+
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 

@@ -86,6 +86,7 @@ from ..models import (
 from ..quant.flow_percentile import compute_flow_percentiles
 from ..quant.investor_warning_status import classify_investor_warning_status
 from ..quant.regime_backtest import next_streak
+from ..quant.short_balance_trend import evaluate_short_balance_trend
 from ..quant.supply_absorption_checklist import evaluate_supply_absorption
 from ..quant.signals import (
     compute_vwap,
@@ -1142,6 +1143,46 @@ async def stock_supply_absorption_checklist(
     result = evaluate_supply_absorption(
         prices, flows, peer_changes=peer_changes, market_is_open=not is_market_closed(now_kst)
     )
+    return {"code": code, **result}
+
+
+@router.get("/{code}/short-balance-trend")
+async def stock_short_balance_trend(
+    code: str,
+    days: int = Query(30, ge=2, le=180),
+    session: AsyncSession = Depends(get_session),
+):
+    """공매도 잔고 추이(숏커버링 감지, PLAN.md §5.81) — **완전 읽기전용**,
+    주문/상태 변경 전혀 없다. 사용자가 유튜브 영상(채널 홍보 부분은 배제하고
+    분석 방식만 취득)을 보고 "자사주 매입 잔여 실탄 vs 공매도 잔고 추이"
+    프레임워크 중 이미 데이터가 있는 공매도 잔고 절반을 요청해 만들었다 —
+    자사주 매입(DART 연동 필요)은 이번 범위 밖. 계산은 `quant/short_balance_
+    trend.evaluate_short_balance_trend`(순수 함수, 설계·제약은 그 모듈
+    docstring 참고)에 위임한다. **이 엔드포인트도 판단 문구를 만들지 않는다**
+    — 관찰 서술만 반환한다.
+
+    `/series`와 동일한 준비 단계(`_ensure_short_selling_cached`/
+    `_read_short_selling`)를 재사용한다 — 새 TR 호출 없음. 순보유잔고는
+    보고의무 발생 종목만 채워지므로, 대부분 종목은 `insufficient_data: true`
+    가 정상 응답이다(에러 아님).
+
+    Returns: `quant/short_balance_trend.evaluate_short_balance_trend`
+    반환값 그대로(+ `code`).
+    """
+    stock = await session.get(Stock, code)
+    if stock is None:
+        await _ensure_stock_master_stub(session, code, None, None, None)
+        await session.commit()
+
+    try:
+        await _ensure_short_selling_cached(session, code)
+        await session.commit()
+    except Exception as e:  # noqa: BLE001 - httpx/requests 등 네트워크 계열 예외 포함
+        await session.rollback()
+        logger.warning("stocks: %s 공매도 조회 실패, 빈 채로 반환: %s", code, e)
+
+    balance_history = await _read_short_selling(session, code, days)
+    result = evaluate_short_balance_trend(balance_history)
     return {"code": code, **result}
 
 
