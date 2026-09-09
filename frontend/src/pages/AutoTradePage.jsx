@@ -5,6 +5,7 @@ import {
   fetchAutoTradeState,
   manualBuyAutoTrade,
   manualSellAutoTrade,
+  syncAutoTradeState,
   toggleAutoTrade,
 } from '../api'
 
@@ -74,7 +75,7 @@ const STRATEGY_RULES = [
   { label: '진입 조건', value: 'ma_cross.state == "golden" AND volume_spike.is_spike == true' },
   {
     label: '청산(트레일링 스탑)',
-    value: '진입가 대비 +1% 도달 시 트레일 모드 전환 → 이후 ma_cross.state == "dead" AND 진입가 대비 +0.5% 이하 도달 시 매도',
+    value: '진입가 대비 +1% 도달 시 트레일 모드 전환 → 이후 고점(peak) 대비 -0.5% 이상 반납 시 매도 (§5.83, ratchet 방식)',
   },
   { label: '손절', value: '상태 무관, 진입가 대비 -1.5% 이하 도달 시 즉시 매도(리스크 경보 활성 중엔 -0.8%로 임시 축소)' },
   {
@@ -188,6 +189,21 @@ function StatusPanel({ state }) {
               <div className="stat-value">{priceLabel(state.peak_price)}</div>
             </div>
           )}
+          {/* PLAN.md §5.83 — 트레일 청산이 고점 기준 반납폭(ratchet)으로
+              바뀌어, 이제 이 값이 실제 청산 트리거를 그대로 보여준다(-0.5%
+              이하 도달 시 매도). */}
+          {status === 'trailing' && state.peak_price != null && state.current_price != null && (
+            <div>
+              <div className="stat-label">고점 대비</div>
+              <div
+                className={`stat-value ${rateClass(
+                  ((state.current_price - state.peak_price) / state.peak_price) * 100
+                )}`}
+              >
+                {rateLabel(((state.current_price - state.peak_price) / state.peak_price) * 100)}
+              </div>
+            </div>
+          )}
           <div>
             <div className="stat-label">주문번호</div>
             <div className="stat-value" style={{ fontSize: 14 }}>
@@ -285,6 +301,52 @@ function ManualTradeButtons({ state, onBuy, onSell, buyBusy, sellBusy }) {
           {sellBusy ? '매도 처리 중…' : '수동 매도'}
         </button>
         {!canSell && <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>{sellDisabledReason}</span>}
+      </div>
+    </section>
+  )
+}
+
+// 동기화 버튼(PLAN.md §5.82) — DB status와 실계좌(kt00018) 보유수량이
+// `_confirm_holdings_qty`의 재시도(같은 Phase)로도 못 잡을 만큼 어긋났을 때
+// 쓰는 수동 재점검. 2026-09-04 실사고(실제론 팔렸는데 DB는 trailing으로
+// 남아있던 것)처럼 발견까지 며칠 걸리는 걸 막으려고, 사용자가 이상하다 싶을
+// 때 아무 때나 눌러서 바로 확인할 수 있게 한다. 킬스위치 상태와 무관하게
+// 항상 활성(수동 매도와 같은 이유 — 사실을 확인/정정하는 조회 작업이지
+// 새 주문이 아니다).
+function SyncButton({ onSync, busy, result, error }) {
+  return (
+    <section style={{ border: '1px solid var(--border, #333)', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 8 }}>
+        동기화 — 화면 상태(위 보유 현황)가 실제 계좌와 다른 것 같으면 눌러서 바로 확인·정정합니다
+        (실계좌 잔고를 직접 조회해 비교, 새 주문은 내지 않습니다).
+      </div>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onSync}
+          style={{
+            padding: '10px 20px',
+            fontSize: 15,
+            fontWeight: 700,
+            borderRadius: 8,
+            border: '1px solid var(--border, #333)',
+            cursor: busy ? 'default' : 'pointer',
+            background: 'transparent',
+            color: 'var(--text)',
+            opacity: busy ? 0.5 : 1,
+          }}
+        >
+          {busy ? '확인 중…' : '동기화'}
+        </button>
+        {error && <span style={{ fontSize: 13, color: 'var(--down, #256abf)' }}>정정 실패: {error}</span>}
+        {!error && result && (
+          <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+            {result.corrected
+              ? `정정함 — ${result.detail}`
+              : `일치 확인 — 실보유 ${result.actual_qty}주, 변경 없음`}
+          </span>
+        )}
       </div>
     </section>
   )
@@ -538,6 +600,11 @@ export default function AutoTradePage() {
   const [manualSellBusy, setManualSellBusy] = useState(false)
   const [manualSellError, setManualSellError] = useState(null)
 
+  // PLAN.md §5.82 — DB status와 실계좌 잔고를 직접 비교하는 동기화 버튼.
+  const [syncBusy, setSyncBusy] = useState(false)
+  const [syncResult, setSyncResult] = useState(null)
+  const [syncError, setSyncError] = useState(null)
+
   const loadState = () => {
     setStateError(null)
     return fetchAutoTradeState()
@@ -647,6 +714,21 @@ export default function AutoTradePage() {
     }
   }
 
+  const handleSync = async () => {
+    setSyncError(null)
+    setSyncResult(null)
+    setSyncBusy(true)
+    try {
+      const result = await syncAutoTradeState()
+      setSyncResult(result)
+      await Promise.all([loadState(), loadLog(), loadPerformance()])
+    } catch (err) {
+      setSyncError(err.message)
+    } finally {
+      setSyncBusy(false)
+    }
+  }
+
   return (
     <div>
       <div className="toggle-hint" style={{ marginBottom: 16 }}>
@@ -668,6 +750,7 @@ export default function AutoTradePage() {
         buyBusy={manualBuyBusy}
         sellBusy={manualSellBusy}
       />
+      <SyncButton onSync={handleSync} busy={syncBusy} result={syncResult} error={syncError} />
       <StrategyPanel />
       <PerformancePanel data={perfData} loading={perfLoading} error={perfError} />
       <LogPanel

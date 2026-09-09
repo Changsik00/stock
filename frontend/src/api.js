@@ -629,6 +629,15 @@ export async function manualSellAutoTrade() {
   return postJson('/api/auto-trade/manual-sell', {})
 }
 
+// POST /api/auto-trade/sync -> { corrected, actual_qty, detail, state } (PLAN.md
+// §5.82). DB status와 실계좌(kt00018) 보유수량을 직접 비교해 어긋나면 정정하는
+// "동기화" 버튼 — 킬스위치 상태와 무관하게 항상 허용된다. 자동 정정이 애매한
+// 조합(예: 실보유가 기대 수량과도 0과도 안 맞음, 백필할 참고 로그가 없음)이면
+// 서버가 409를 던지고 throw된 Error의 message에 detail이 그대로 담긴다.
+export async function syncAutoTradeState() {
+  return postJson('/api/auto-trade/sync', {})
+}
+
 // GET /api/auto-trade/performance -> { by_source: { auto: {n, win_rate_pct,
 // avg_return_pct, cumulative_return_pct}, manual: {...} }, trades: [...],
 // anomalies: [...], open_position: {...}|null } (PLAN.md §5.76). AutoTradeLog

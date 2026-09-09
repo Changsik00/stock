@@ -1004,3 +1004,217 @@ async def test_get_performance_excludes_known_bad_log_id_1920():
     body = resp.json()
     exit_ids = {t["exit_id"] for t in body["trades"]}
     assert 1920 not in exit_ids
+
+
+# ---------------------------------------------------------------------------
+# POST /api/auto-trade/sync (PLAN.md §5.82) — DB status와 실계좌(kt00018)
+# 보유수량을 직접 비교해 어긋나면 정정하는 대시보드 "동기화" 버튼. 2026-09-04
+# 실사고(매도가 실제로는 체결됐는데 DB는 trailing으로 계속 남아있던 것)와
+# 2026-08-27 실사고(매수가 실제로는 체결됐는데 DB는 idle로 남아있던 것) 둘 다
+# 재현해 검증한다.
+# ---------------------------------------------------------------------------
+
+
+async def test_sync_reports_no_correction_when_idle_and_no_real_holdings(monkeypatch):
+    await _set_state(enabled=True, status="idle")
+    fake_cls = _patch_kiwoom_client(monkeypatch)
+    fake_cls.instances = []  # holdings_qty_override 기본 None -> 매도/매수 이력 없음 -> 0
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/auto-trade/sync")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["corrected"] is False
+    assert body["actual_qty"] == 0
+    assert body["state"]["status"] == "idle"
+
+
+async def test_sync_reports_no_correction_when_holding_matches_real_holdings(monkeypatch):
+    await _set_state(enabled=True, status="holding", entry_price=16000, entry_qty=1)
+
+    class _MatchingClient(_FakeKiwoomClient):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.holdings_qty_override = 1
+
+    monkeypatch.setattr(auto_trade, "KiwoomClient", _MatchingClient)
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/auto-trade/sync")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["corrected"] is False
+    assert body["actual_qty"] == 1
+    state = await _get_state()
+    assert state.status == "holding"  # 안 건드림
+
+
+async def test_sync_corrects_trailing_to_idle_when_real_holdings_are_zero(monkeypatch):
+    """2026-09-04 실사고 재현 — 실제로는 팔렸는데 DB가 trailing으로 남아있던
+    바로 그 상황."""
+    await _set_state(enabled=True, status="trailing", entry_price=16845, entry_qty=1, peak_price=17965)
+
+    class _ZeroHoldingsClient(_FakeKiwoomClient):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.holdings_qty_override = 0
+
+    monkeypatch.setattr(auto_trade, "KiwoomClient", _ZeroHoldingsClient)
+
+    start_max_log_id = await _current_max_log_id()
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/auto-trade/sync")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["corrected"] is True
+    assert body["actual_qty"] == 0
+    assert body["state"]["status"] == "idle"
+
+    state = await _get_state()
+    assert state.status == "idle"
+    assert state.entry_price is None
+    assert state.entry_qty is None
+    assert state.peak_price is None
+
+    logs = await _log_rows_since(start_max_log_id)
+    assert len(logs) == 1
+    assert logs[0].event_type == "error"
+    assert "idle로 정정" in logs[0].reason
+
+
+async def test_sync_backfills_idle_to_holding_from_recent_entry_log(monkeypatch):
+    """2026-08-27 실사고 재현 — 실제로는 체결됐는데 DB가 idle로 남아있던
+    바로 그 상황. 가장 최근 manual_entry 로그의 가격으로 백필돼야 한다."""
+    await _set_state(enabled=True, status="idle")
+
+    async with async_session_factory() as session:
+        session.add(
+            AutoTradeLog(
+                event_type="manual_entry",
+                code=TARGET_CODE,
+                price=17605,
+                reason="사용자가 대시보드에서 수동으로 매수 주문을 실행함(지정가 17605.0원, 1주)",
+            )
+        )
+        await session.commit()
+
+    class _OneHoldingClient(_FakeKiwoomClient):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.holdings_qty_override = 1
+
+    monkeypatch.setattr(auto_trade, "KiwoomClient", _OneHoldingClient)
+
+    start_max_log_id = await _current_max_log_id()
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/auto-trade/sync")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["corrected"] is True
+    assert body["actual_qty"] == 1
+    assert body["state"]["status"] == "holding"
+    assert body["state"]["entry_price"] == pytest.approx(17605.0)
+
+    state = await _get_state()
+    assert state.status == "holding"
+    assert float(state.entry_price) == pytest.approx(17605.0)
+    assert state.entry_qty == 1
+
+    logs = await _log_rows_since(start_max_log_id)
+    assert len(logs) == 1
+    assert logs[0].event_type == "error"
+    assert "holding으로 정정" in logs[0].reason
+
+
+async def test_sync_gives_up_with_409_when_no_recent_log_to_backfill_from(monkeypatch):
+    """실보유는 있는데 참고할 매수 로그가 전혀 없으면(추정 근거 전무) 자동
+    정정을 포기하고 사람에게 넘겨야 한다 — 틀린 진입가를 지어내면 안 된다.
+    실 DB엔 TARGET_CODE(0167A0)로 이미 매매 로그가 쌓여 있으므로(공유 테이블),
+    로그가 절대 없을 가짜 종목코드로 상태를 맞춰 이 케이스를 재현한다."""
+    await _set_state(enabled=True, status="idle", code="9999999")
+
+    class _OneHoldingClient(_FakeKiwoomClient):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.holdings_qty_override = 1
+
+    monkeypatch.setattr(auto_trade, "KiwoomClient", _OneHoldingClient)
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/auto-trade/sync")
+
+    assert resp.status_code == 409
+    state = await _get_state()
+    assert state.status == "idle"  # 정정 안 됨 — 상태 그대로
+
+
+async def test_sync_rejects_ambiguous_mismatch_when_already_holding(monkeypatch):
+    """status가 이미 holding인데 실보유가 0도 기대 수량도 아니면(이 전략에서
+    나올 수 없는 조합) 자동 정정하지 않고 사람에게 넘겨야 한다."""
+    await _set_state(enabled=True, status="holding", entry_price=16000, entry_qty=1)
+
+    class _TwoHoldingsClient(_FakeKiwoomClient):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.holdings_qty_override = 2
+
+    monkeypatch.setattr(auto_trade, "KiwoomClient", _TwoHoldingsClient)
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/auto-trade/sync")
+
+    assert resp.status_code == 409
+    state = await _get_state()
+    assert state.status == "holding"  # 정정 안 됨 — 상태 그대로
+    assert state.entry_qty == 1
+
+
+async def test_sync_holdings_query_failure_returns_502_without_changing_state(monkeypatch):
+    await _set_state(enabled=True, status="holding", entry_price=16000, entry_qty=1)
+
+    class _FailingHoldingsClient(_FakeKiwoomClient):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.get_account_holdings_qty_error = RuntimeError("kiwoom 500")
+
+    monkeypatch.setattr(auto_trade, "KiwoomClient", _FailingHoldingsClient)
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/auto-trade/sync")
+
+    assert resp.status_code == 502
+    state = await _get_state()
+    assert state.status == "holding"
+
+
+async def test_sync_works_even_when_kill_switch_off(monkeypatch):
+    """동기화는 판단/주문이 아니라 상태를 사실대로 맞추는 조회 작업이라 매도
+    (`manual-sell`)와 같은 이유로 킬스위치와 무관하게 항상 허용돼야 한다."""
+    await _set_state(enabled=False, status="trailing", entry_price=16845, entry_qty=1)
+
+    class _ZeroHoldingsClient(_FakeKiwoomClient):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.holdings_qty_override = 0
+
+    monkeypatch.setattr(auto_trade, "KiwoomClient", _ZeroHoldingsClient)
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/auto-trade/sync")
+
+    assert resp.status_code == 200
+    assert resp.json()["corrected"] is True

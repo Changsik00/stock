@@ -5,6 +5,19 @@
 직접 계산해보고 "추천이 뭐냐"고 물어 만들었다. 백테스트 결과를 근거로 실제
 전략 규칙을 바꾸는 건 이 모듈의 범위가 아니다 — 측정 도구만 제공한다.
 
+**2026-09-09 후속(PLAN.md §5.83)** — 아래 `trail_mode="ratchet"` 절이 설명하는
+바로 그 구조적 의심이 실거래 데이터로 확인돼, 라이브 트레일 청산 규칙 자체가
+`ratchet` 방식(고점 대비 반납폭, `quant/auto_trade_rules.py::evaluate_trail_
+exit`)으로 교체됐다. 이 모듈은 그 결정에 관여하지 않았고(위 원칙 그대로 —
+백테스트는 측정 도구, 판단은 사용자 몫) 이후로도 계속 독립적으로 남아있다 —
+`fixed_floor`는 이제 "지금 실거래 규칙"이 아니라 **2026-08-04~2026-09-09에
+쓰였던 원래 규칙(레거시)**을 뜻하고, `evaluate_trail_exit`를 더 이상 가져다
+쓰지 않고 그 원래 공식(데드크로스 AND 진입가+0.5% 이하)을 이 모듈 안에
+그대로 고정해 둔다 — 라이브 규칙이 앞으로 또 바뀌어도 "그때그때의 라이브
+규칙"이 아니라 항상 이 세 가지 고정된 대안을 나란히 비교할 수 있게 하기
+위함이다(아래 `ratchet_giveback_pct` 인자로 지금 라이브 값과 다른 반납폭도
+계속 실험해 볼 수 있다).
+
 ## 중요한 제약 — 1분봉이 아니라 일봉 근사다
 
 실제 자동매매는 1분봉 기준(5분/20분 이동평균 교차)으로 동작하지만, 그 1분봉
@@ -33,16 +46,18 @@
 백테스트가 "다른 규칙"을 테스트하는 게 아니라 "같은 규칙을 다른 봉 주기에
 적용"한다는 걸 보장하기 위함이다.
 
-``trail_mode="ratchet"``만 예외 — 사용자가 코드 리뷰 중 발견한 구조적 의심점
-("트레일 청산 기준이 고점이 아니라 진입가 기준 고정값이라, 트레일링 중 크게
-올랐다가 반전되면 수익을 거의 다 반납할 수 있다")을 검증하려고 만든 **비교
-실험용 대안**이다 — 실거래 규칙이 아니다. 트레일 청산 조건을 데드크로스
-확인 없이 순수 가격만으로 "현재가 <= peak*(1-RATCHET_GIVEBACK_PCT)"로 바꿔
-고정 플로어(``fixed_floor``, 기본값·현재 실거래 규칙)와 나란히 비교할 수
-있게 한다. 데드크로스 확인을 요구하지 않는 이유: 데드크로스는 "전환되는 그
-봉에서만" 참인 순간 이벤트라, 확인까지 요구하면 fixed_floor와 똑같이
-"그 순간 가격도 마침 플로어 밑"이어야 하는 우연이 겹쳐야만 청산돼 비교
-의미가 없어진다(`run_backtest` 구현부 주석 참고).
+**트레일 청산(`fixed_floor`/`ratchet`)만 예외** — 이 둘은 `quant/auto_trade_
+rules.py`에서 가져오지 않고 이 모듈 안에 직접 고정해 둔다(위 "2026-09-09
+후속" 절 참고, `run_backtest` 구현부의 `trail_mode` 분기 주석도 함께 참고).
+`ratchet`은 사용자가 코드 리뷰 중 발견한 구조적 의심점("트레일 청산 기준이
+고점이 아니라 진입가 기준 고정값이라, 트레일링 중 크게 올랐다가 반전되면
+수익을 거의 다 반납할 수 있다")을 검증하려고 만든 비교 대안이었고, 이후
+§5.83에서 실제 라이브 규칙이 됐다 — 데드크로스 확인 없이 순수 가격만으로
+"현재가 <= peak*(1-ratchet_giveback_pct)"로 청산 여부를 본다. 데드크로스
+확인을 요구하지 않는 이유: 데드크로스는 "전환되는 그 봉에서만" 참인 순간
+이벤트라, 확인까지 요구하면 `fixed_floor`와 똑같이 "그 순간 가격도 마침
+플로어 밑"이어야 하는 우연이 겹쳐야만 청산돼 비교 의미가 없어진다(`run_
+backtest` 구현부 주석 참고).
 """
 
 from __future__ import annotations
@@ -57,16 +72,21 @@ from ..quant.auto_trade_rules import (
     decide_idle_action,
     evaluate_stop_loss,
     evaluate_trail_activate,
-    evaluate_trail_exit,
     next_peak_price,
 )
 from ..quant.signals import Bar, moving_average_cross, volume_spike
 
 TrailMode = Literal["fixed_floor", "ratchet"]
 
-# 비교 실험용 대안(위 모듈 docstring 참고) — 현재 TRAIL_EXIT_FLOOR_PCT(0.5,
-# 진입가 기준)와 같은 숫자를 "고점 기준 반납폭"으로 바꿔 써서 두 기준선의
-# 절대 크기를 맞춰 비교하기 쉽게 한다. 실거래 상수가 아니다.
+# `fixed_floor`(레거시, 2026-08-04~2026-09-09) 전용 상수 — quant/auto_trade_
+# rules.py의 TRAIL_GIVEBACK_PCT와 우연히 같은 0.5였지만 의미가 다르므로(고점
+# 기준 vs 진입가 기준) 별도 이름으로 이 모듈에 고정해 둔다. 라이브 상수가
+# 바뀌어도 이 레거시 비교 기준선은 그대로 유지된다.
+LEGACY_FIXED_FLOOR_PCT = 0.5
+
+# ratchet 비교 실험용 기본값(위 모듈 docstring 참고) — 2026-09-09부터는 라이브
+# 규칙(quant/auto_trade_rules.py::TRAIL_GIVEBACK_PCT)과 같은 값이지만, 이
+# 인자로 다른 반납폭도 실험해 볼 수 있게 별도 상수로 유지한다.
 RATCHET_GIVEBACK_PCT_DEFAULT = 0.5
 
 
@@ -172,12 +192,14 @@ def run_backtest(
         peak_price = new_peak
 
         if trail_mode == "fixed_floor":
-            # 청산(dead cross) 판정은 라이브와 동일하게 lookback 없이 "최신
-            # 봉 기준" ma_cross를 그대로 쓴다(모듈 상단 docstring, collectors/
-            # auto_trader.py 모듈 docstring "청산 판정은 이번 수정 범위 밖"
-            # 절 참고).
+            # 레거시 규칙(2026-08-04~2026-09-09, §5.83로 교체됨) — 이 모듈에
+            # 고정된 공식이라 quant/auto_trade_rules.py를 더 이상 참조하지
+            # 않는다(위 모듈 docstring "2026-09-09 후속" 절 참고). lookback
+            # 없이 "최신 봉 기준" ma_cross를 그대로 쓴다(당시 그대로 재현).
             ma_cross = moving_average_cross(window)
-            should_exit = evaluate_trail_exit(ma_cross["state"], entry_price, current_price)
+            should_exit = ma_cross["state"] == "dead" and (
+                (current_price - entry_price) / entry_price * 100
+            ) <= LEGACY_FIXED_FLOOR_PCT
         else:  # ratchet — 비교 실험용 대안(위 모듈 docstring 참고, 실거래 규칙
             # 아님). 데드크로스 확인을 요구하지 않는 순수 가격 기반 트레일링
             # 스탑이다 — 데드크로스는 "전환되는 그 봉에서만" 참인 순간

@@ -362,6 +362,154 @@ async def manual_sell_auto_trade(session: AsyncSession = Depends(get_session)) -
         return _serialize_state(state, current_price=None)
 
 
+@router.post("/sync")
+async def sync_auto_trade_state(session: AsyncSession = Depends(get_session)) -> dict:
+    """대시보드 "동기화" 버튼(PLAN.md §5.82) — DB `AutoTradeState`와 실계좌
+    (`get_account_holdings_qty`, kt00018) 보유수량을 직접 비교해 어긋나면
+    수동으로 정정한다. `_confirm_holdings_qty`에 재시도를 추가했어도(같은
+    Phase) 렉이 그보다 길면 여전히 놓칠 수 있어(§5.82의 두 실사고 모두 정확한
+    지연 시간이 불명) — 그 경우를 위한 사용자 직접 트리거 안전망이다.
+    `_position_lock`을 잡아 자동 엔진과 동시에 상태를 건드리지 않는다.
+
+    비교 기준: status가 "holding"/"trailing"이면 기대 수량은 `TARGET_QTY`,
+    "idle"이면 0.
+
+    - 일치하면 아무 것도 바꾸지 않고 ``{"corrected": false, ...}``.
+    - 실보유가 0인데 DB가 보유 중으로 남아있으면(9/4 실사고와 동일 방향) —
+      status를 idle로, 포지션 필드를 전부 초기화. 진입가를 알고 있으니 항상
+      안전하게 자동 정정할 수 있다.
+    - 실보유가 있는데 DB가 idle이면(8/27 실사고와 동일 방향, 반대로 위험한
+      쪽) — 이 프로젝트가 이미 갖고 있는 기록(`AutoTradeLog`의 가장 최근
+      `entry`/`manual_entry`/`buy_unconfirmed`)에서 진입가를 그대로 가져와
+      백필한다. kt00018 응답 자체에서 평균단가를 새로 파싱하지 않는다 — 이
+      TR의 개별 필드명은 이미 두 번 실측 오판(§5.78/§5.79)이 있었던 곳이라
+      새 필드를 또 추측하지 않고, 이미 검증된 우리 로그값만 재사용한다.
+      참고할 로그가 없으면(추정 근거 전무) 자동 정정을 포기하고 409로
+      사람에게 직접 확인을 요청한다 — 틀린 진입가로 손절/트레일 기준을
+      잘못 세우는 것보다 아무것도 안 하는 게 안전하다.
+
+    Returns ``{"corrected": bool, "actual_qty": int, "detail": str | None,
+    "state": {...GET /state와 동일 직렬화...}}``."""
+    async with _position_lock:
+        state = await _get_or_create_state(session)
+        code = state.code or TARGET_CODE
+        expected_qty = TARGET_QTY if state.status in ("holding", "trailing") else 0
+
+        try:
+            async with KiwoomClient() as client:
+                actual_qty = await client.get_account_holdings_qty(code)
+        except Exception as e:  # noqa: BLE001 - 조회 실패는 명확한 에러로 응답, 상태는 건드리지 않음
+            raise HTTPException(status_code=502, detail=f"실계좌 잔고 조회 실패: {e}") from e
+
+        if actual_qty == expected_qty:
+            return {
+                "corrected": False,
+                "actual_qty": actual_qty,
+                "detail": None,
+                "state": _serialize_state(state, current_price=None),
+            }
+
+        if actual_qty == 0:
+            prev_status = state.status
+            await _log(
+                session,
+                event_type="error",
+                code=code,
+                price=float(state.entry_price) if state.entry_price is not None else None,
+                reason=(
+                    f"수동 동기화(대시보드): DB status={prev_status!r}(진입가 "
+                    f"{state.entry_price}, {state.entry_qty}주)였으나 kt00018 실계좌 조회 결과 "
+                    "실보유 0주 -> idle로 정정"
+                ),
+                signal_snapshot={"actual_holdings_qty": actual_qty, "expected_qty": expected_qty, "source": "manual_sync"},
+            )
+            state.status = "idle"
+            state.entry_price = None
+            state.entry_qty = None
+            state.entry_at = None
+            state.entry_order_no = None
+            state.peak_price = None
+            state.entry_foreign_flow_sign = None
+            await session.commit()
+            await session.refresh(state)
+            return {
+                "corrected": True,
+                "actual_qty": actual_qty,
+                "detail": f"status={prev_status!r} -> idle로 정정(실보유 0주 확인)",
+                "state": _serialize_state(state, current_price=None),
+            }
+
+        if state.status != "idle":
+            # 이 전략은 항상 단일 종목·단일 수량(TARGET_QTY=1)만 다루므로 status가
+            # 이미 holding/trailing인데 실보유수량이 0도 TARGET_QTY도 아닌 조합은
+            # 정상 흐름에서 나올 수 없다 — 뭘 근거로 자동 정정할지 애매하니(예:
+            # peak_price/entry_order_no를 지워도 되는지 불확실) 사람 확인으로 넘긴다.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"실보유 {actual_qty}주가 DB status={state.status!r}의 기대 수량({expected_qty}주)과도, "
+                    "0주와도 맞지 않는 조합입니다 — 자동 정정 로직이 다루지 않는 경우라 직접 확인이 "
+                    "필요합니다."
+                ),
+            )
+
+        # actual_qty > 0인데 DB는 idle — 실계좌에는 있는데 DB가 모르는 포지션.
+        # 우리 로그에서 가장 최근 매수 시도가를 근거로만 백필한다(위 docstring
+        # 참고, kt00018 새 필드 추측 안 함).
+        recent_stmt = (
+            select(AutoTradeLog)
+            .where(AutoTradeLog.code == code, AutoTradeLog.event_type.in_(["entry", "manual_entry", "buy_unconfirmed"]))
+            .order_by(AutoTradeLog.ts.desc())
+            .limit(1)
+        )
+        recent = (await session.execute(recent_stmt)).scalars().first()
+        if recent is None or recent.price is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"실계좌에 {code} {actual_qty}주가 있는데 DB엔 포지션 기록이 없고(status="
+                    f"{state.status!r}), 진입가를 추정할 참고 로그도 없습니다 — 자동 정정을 "
+                    "포기합니다. 직접 확인 후 수동으로 상태를 맞춰야 합니다."
+                ),
+            )
+
+        prev_status = state.status
+        await _log(
+            session,
+            event_type="error",
+            code=code,
+            price=float(recent.price),
+            reason=(
+                f"수동 동기화(대시보드): kt00018 실계좌 조회 결과 {code} {actual_qty}주 보유 확인됐으나 "
+                f"DB status={prev_status!r}(포지션 없음)로 불일치 -> 가장 최근 매수 로그(id={recent.id}, "
+                f"{recent.ts.isoformat()}, 지정가 {recent.price}원)를 근거로 status=holding으로 정정"
+            ),
+            signal_snapshot={
+                "actual_holdings_qty": actual_qty,
+                "source": "manual_sync",
+                "backfilled_from_log_id": recent.id,
+            },
+        )
+        state.status = "holding"
+        state.entry_price = recent.price
+        state.entry_qty = actual_qty
+        state.entry_at = recent.ts
+        state.entry_order_no = None
+        state.peak_price = None
+        state.entry_foreign_flow_sign = None
+        await session.commit()
+        await session.refresh(state)
+        return {
+            "corrected": True,
+            "actual_qty": actual_qty,
+            "detail": (
+                f"status={prev_status!r}에서 holding으로 정정 — 진입가는 로그 id={recent.id} 기준 "
+                f"{recent.price}원으로 백필"
+            ),
+            "state": _serialize_state(state, current_price=None),
+        }
+
+
 @router.get("/log")
 async def get_auto_trade_log(
     limit: int = Query(30, ge=1, le=200, description="페이지당 행 수"),

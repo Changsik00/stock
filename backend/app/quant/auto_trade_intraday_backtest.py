@@ -7,6 +7,16 @@
 average_cross`/`volume_spike`의 기본 5/20 윈도우가 일봉 버전에선 "5일/20일"
 로 왜곡됐던 것이, 여기선 원래 의도인 "5분/20분"으로 그대로 맞아떨어진다.
 
+**2026-09-09 후속(PLAN.md §5.83)** — 이 모듈로 쌓은 1분봉(그때는 하루~이틀
+치뿐이었지만 이후 계속 쌓여 지금은 약 2.5주치)으로 `fixed_floor`/`ratchet`/
+`daily_reset`를 다시 비교해보니 `fixed_floor`(당시 실거래 규칙)만 뚜렷하게
+나빴고(누적수익률 -10.97% vs -1.43% vs +4.61%), 실거래 감사 로그(5주 26건)도
+같은 방향을 가리켜(트레일 청산이 사실상 발동 안 함) 라이브 규칙을 `ratchet`
+으로 교체했다(`quant/auto_trade_rules.py::evaluate_trail_exit`). 이 모듈은
+그 결정 이후에도 계속 독립적으로 남는다 — `auto_trade_backtest.py`와 동일한
+이유로 `fixed_floor` 상수(`LEGACY_FIXED_FLOOR_PCT`)를 그쪽에서 그대로
+가져다 쓰고 `quant/auto_trade_rules.py`는 더 이상 참조하지 않는다.
+
 ## 계기 — 진입가 고정 플로어의 여러 날 보유 반납 문제
 
 사용자가 실계좌 트레일 청산(`TRAIL_EXIT_FLOOR_PCT`, 진입가 기준 고정값)이
@@ -75,12 +85,15 @@ from ..collectors.auto_trader import (
     _golden_cross_in_lookback,
     _volume_spike_in_lookback,
 )
-from ..quant.auto_trade_backtest import RATCHET_GIVEBACK_PCT_DEFAULT, _summarize
+from ..quant.auto_trade_backtest import (
+    LEGACY_FIXED_FLOOR_PCT,
+    RATCHET_GIVEBACK_PCT_DEFAULT,
+    _summarize,
+)
 from ..quant.auto_trade_rules import (
     decide_idle_action,
     evaluate_stop_loss,
     evaluate_trail_activate,
-    evaluate_trail_exit,
     next_peak_price,
 )
 from ..quant.signals import Bar, moving_average_cross, volume_spike
@@ -180,8 +193,13 @@ def run_intraday_backtest(
         peak_price = new_peak
 
         if trail_mode == "fixed_floor":
+            # 레거시 규칙(2026-08-04~2026-09-09, PLAN.md §5.83로 교체됨) —
+            # `auto_trade_backtest.py`와 동일하게 이 상수를 그대로 가져다
+            # 쓴다(quant/auto_trade_rules.py는 더 이상 참조하지 않음).
             ma_cross = moving_average_cross(window)
-            should_exit = evaluate_trail_exit(ma_cross["state"], entry_price, current_price)
+            should_exit = ma_cross["state"] == "dead" and (
+                (current_price - entry_price) / entry_price * 100
+            ) <= LEGACY_FIXED_FLOOR_PCT
         elif trail_mode == "ratchet":
             should_exit = current_price <= new_peak * (1 - ratchet_giveback_pct / 100)
         else:  # daily_reset — ratchet 조건 OR 오늘 자체 고점 기준 타이트한 조건

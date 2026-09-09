@@ -451,6 +451,8 @@ async def test_idle_entry_unconfirmed_when_buy_order_not_filled(monkeypatch):
     await _set_state(enabled=True, status="idle")
     _patch_signals(monkeypatch, ma_state="golden", is_spike=True, bars_close=16000.0)
     monkeypatch.setattr(auto_trader, "KiwoomClient", _RejectedButAcceptedBuyClient)
+    # PLAN.md §5.82 — 재시도 간격을 0으로 줄여 테스트가 실제로 몇 초씩 sleep하지 않게 한다.
+    monkeypatch.setattr(auto_trader, "_CONFIRM_HOLDINGS_RETRY_DELAYS_SEC", ())
     _FakeKiwoomClient.instances = []
 
     async with async_session_factory() as session:
@@ -485,6 +487,7 @@ async def test_idle_entry_treats_holdings_query_failure_as_unconfirmed(monkeypat
             self.get_account_holdings_qty_error = RuntimeError("kiwoom 500")
 
     monkeypatch.setattr(auto_trader, "KiwoomClient", _QueryFailsClient)
+    monkeypatch.setattr(auto_trader, "_CONFIRM_HOLDINGS_RETRY_DELAYS_SEC", ())
     _QueryFailsClient.instances = []
 
     async with async_session_factory() as session:
@@ -618,6 +621,7 @@ async def test_holding_stop_loss_sell_unconfirmed_keeps_position(monkeypatch):
     await _set_state(enabled=True, status="holding", entry_price=16000, entry_qty=1)
     _patch_signals(monkeypatch, ma_state="none", is_spike=False, bars_close=16000 * 0.98)
     monkeypatch.setattr(auto_trader, "KiwoomClient", _RejectedButAcceptedSellClient)
+    monkeypatch.setattr(auto_trader, "_CONFIRM_HOLDINGS_RETRY_DELAYS_SEC", ())
     _FakeKiwoomClient.instances = []
 
     async with async_session_factory() as session:
@@ -873,6 +877,7 @@ async def test_watch_stop_loss_sell_unconfirmed_keeps_position(monkeypatch):
     entry_price = 20000.0
     await _set_state(enabled=True, status="holding", entry_price=entry_price, entry_qty=1)
     monkeypatch.setattr(auto_trader, "KiwoomClient", _RejectedButAcceptedSellClient)
+    monkeypatch.setattr(auto_trader, "_CONFIRM_HOLDINGS_RETRY_DELAYS_SEC", ())
     _FakeKiwoomClient.instances = []
 
     async with async_session_factory() as session:
@@ -1223,7 +1228,9 @@ async def test_eod_overnight_allowed_when_all_conditions_met(monkeypatch):
     스트릭 아님 -> 오버나잇 허용, 매도하지 않는다."""
     entry_price = 16000.0
     peak_price = entry_price * 1.03
-    current_price = entry_price * 1.02  # peak보다 낮아 dead cross 없이도 "none"
+    # PLAN.md §5.83(ratchet 전환) — 고점 대비 -0.5% 이내여야 트레일 청산이
+    # 안 나간다(더 이상 dead cross 여부와 무관).
+    current_price = peak_price * 0.998  # 고점 대비 -0.2% 반납, 진입가 대비는 여전히 플러스
     await _set_state(
         enabled=True, status="trailing", entry_price=entry_price, entry_qty=1, peak_price=peak_price
     )

@@ -22,9 +22,28 @@
   "trailing"으로 전환, `peak_price`를 현재가로 초기화.
   전환 전(순수 "holding")에는 손절 조건만 감시한다 — 그 밖의 이유로는
   매도하지 않는다.
-- **트레일 청산**: "trailing" 상태에서 `ma_cross.state == "dead"`(추세 반전
-  확인) **AND** 현재가가 진입가 대비 +0.5% 이하로 되돌아왔으면 매도.
-  그 전까지는 신고가(`peak_price`)를 계속 갱신하며 보유한다.
+- **트레일 청산**: "trailing" 상태에서 현재가가 신고가(`peak_price`) 대비
+  `TRAIL_GIVEBACK_PCT`(0.5%) 이상 반납하면 매도. 그 전까지는 신고가를 계속
+  갱신하며 보유한다.
+
+  **2026-09-09 교체(PLAN.md §5.83, ratchet 방식으로 전환)** — 원래는
+  "`ma_cross.state == "dead"`(추세 반전 확인) AND 진입가 대비 +0.5% 이하로
+  되돌아옴" 둘 다 요구했다(`quant/auto_trade_backtest.py` 모듈 docstring이
+  `trail_mode="ratchet"`이라는 이름으로 붙여둔 비교 실험용 대안이 바로 이
+  전환 후 규칙). 실거래 5주(26건) 감사 로그를 보니 이 원래 조건이 사실상
+  작동하지 않았다 — dead cross는 교차가 일어난 바로 그 1분봉에서만 참인
+  순간 이벤트라(`quant/signals.py::moving_average_cross` docstring), 진입
+  골든크로스가 겪었던 것과 같은 폴링 타이밍 미스(§5.54-6 "2026-08-05 실측
+  버그 수정" 절 참고, 그쪽은 lookback으로 고쳤지만 트레일 청산 쪽은 "이번
+  수정 범위 밖"으로 남겨뒀었다)를 그대로 겪어, 트레일 진입 후 반전되면
+  거의 항상 이 조건을 못 맞고 그대로 `STOP_LOSS_PCT`(-1.5%)까지 밀려버렸다
+  (실거래 손절 15건이 전체 손실의 거의 전부, 트레일 청산은 5주간 딱 1번).
+  같은 실 1분봉 데이터로 세 방식(원래 방식/`ratchet`/`daily_reset`)을
+  비교한 백테스트에서도 원래 방식만 뚜렷하게 나빴다(누적수익률 -10.97% vs
+  -1.43% vs +4.61%, `quant/auto_trade_intraday_backtest.py`) — 사용자
+  확인 후 `ratchet`으로 교체를 확정했다. 새 조건은 진입가가 아니라
+  **고점** 기준이고 dead cross 확인도 요구하지 않는다(순수 가격 임계값이라
+  "순간 이벤트를 놓친다"는 문제 자체가 없다).
 
 ## 안전 규칙 추가 (PLAN.md §5.55, 2026-08-06 — 실제 손실 사고 이후)
 
@@ -60,7 +79,7 @@ TARGET_QTY = 1  # 1주 고정
 
 STOP_LOSS_PCT = -1.5  # 진입가 대비 -1.5% 이하 -> 즉시 손절 (상태 무관)
 TRAIL_ACTIVATE_PCT = 1.0  # 진입가 대비 +1% 이상 -> holding에서 trailing으로 전환
-TRAIL_EXIT_FLOOR_PCT = 0.5  # trailing 중 dead cross + 진입가 대비 +0.5% 이하 -> 청산
+TRAIL_GIVEBACK_PCT = 0.5  # PLAN.md §5.83(2026-09-09, ratchet 전환) — 신고가(peak_price) 대비 -0.5% 이하 반납 -> 청산
 
 # -- 안전 규칙 상수 (PLAN.md §5.55, 사용자 확정값 — 바꾸지 말 것) --------------------
 
@@ -111,11 +130,12 @@ def evaluate_trail_activate(entry_price: float, current_price: float) -> bool:
     return _pct_change(entry_price, current_price) >= TRAIL_ACTIVATE_PCT
 
 
-def evaluate_trail_exit(ma_cross_state: str | None, entry_price: float, current_price: float) -> bool:
-    """트레일 청산 조건: 추세 반전(dead cross) 확인 AND 현재가가 진입가 대비
-    +0.5% 이하로 되돌아옴. 둘 다 충족해야 한다 — dead cross만으로는(플로어
-    도달 전) 아직 매도하지 않는다(신고가 갱신 중일 수도 있으므로)."""
-    return ma_cross_state == "dead" and _pct_change(entry_price, current_price) <= TRAIL_EXIT_FLOOR_PCT
+def evaluate_trail_exit(peak_price: float, current_price: float) -> bool:
+    """트레일 청산 조건(PLAN.md §5.83, ratchet 방식) — 현재가가 신고가
+    (`peak_price`) 대비 `TRAIL_GIVEBACK_PCT`(0.5%) 이상 반납하면 청산.
+    dead cross 확인은 요구하지 않는다 — 모듈 docstring "2026-09-09 교체"
+    절 참고(dead cross는 순간 이벤트라 폴링과 맞아떨어지기 어려웠다)."""
+    return current_price <= peak_price * (1 - TRAIL_GIVEBACK_PCT / 100)
 
 
 def next_peak_price(peak_price: float, current_price: float) -> float:
@@ -148,7 +168,6 @@ def decide_position_action(
     status: Status,
     entry_price: float,
     peak_price: float | None,
-    ma_cross_state: str | None,
     current_price: float,
     risk_alert_active: bool = False,
 ) -> dict[str, Any]:
@@ -167,6 +186,11 @@ def decide_position_action(
     `risk_alert_active`(§5.55-3, 기본 False — 기존 호출부와 하위호환)가 True면
     손절 임계값으로 `STOP_LOSS_PCT`(-1.5%) 대신 `STOP_LOSS_PCT_RISK_ALERT`
     (-0.8%)를 쓴다 — 그 밖의 판정(트레일 전환/청산)은 영향받지 않는다.
+
+    **2026-09-09(PLAN.md §5.83)** — 트레일 청산이 ratchet 방식(고점 대비
+    반납폭)으로 바뀌면서 더 이상 ma_cross가 필요 없어 `ma_cross_state`
+    매개변수를 없앴다(모듈 상단 docstring "트레일 청산" 절 참고) — 호출부
+    (`collectors/auto_trader.py::_handle_position`)도 함께 갱신했다.
 
     Returns ``{"action": "stop_loss"|"trail_activate"|"exit_trail"|
     "peak_update"|"none", "reason": str, "new_peak_price": float (해당 시)}``.
@@ -207,13 +231,13 @@ def decide_position_action(
     prev_peak = peak_price if peak_price is not None else entry_price
     new_peak = next_peak_price(prev_peak, current_price)
 
-    if evaluate_trail_exit(ma_cross_state, entry_price, current_price):
+    if evaluate_trail_exit(new_peak, current_price):
+        giveback_pct = round((new_peak - current_price) / new_peak * 100, 4)
         return {
             "action": "exit_trail",
             "reason": (
-                f"트레일 청산 조건 충족: ma_cross.state={ma_cross_state!r} == 'dead' AND "
-                f"현재가 {current_price} vs 진입가 {entry_price} ({pct:+.2f}%) <= "
-                f"{TRAIL_EXIT_FLOOR_PCT}% (peak={new_peak})"
+                f"트레일 청산 조건 충족: 현재가 {current_price}가 고점 {new_peak} 대비 "
+                f"-{giveback_pct:.2f}% 반납(>= {TRAIL_GIVEBACK_PCT}%) (진입가 대비 {pct:+.2f}%)"
             ),
             "new_peak_price": new_peak,
         }
@@ -228,8 +252,8 @@ def decide_position_action(
     return {
         "action": "none",
         "reason": (
-            f"trailing 유지: 청산 조건 미충족 (ma_cross.state={ma_cross_state!r}, "
-            f"현재가 {current_price} vs 진입가 {entry_price}, {pct:+.2f}%, peak={new_peak})"
+            f"trailing 유지: 청산 조건 미충족 (현재가 {current_price} vs 고점 {new_peak}, "
+            f"진입가 대비 {pct:+.2f}%)"
         ),
     }
 

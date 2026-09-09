@@ -47,6 +47,13 @@ kt10000/kt10001, 2026-08-04 실호출 확정)를 실제로 호출해 진짜 돈�
 넓혀 이 폴링 타이밍 미스를 없앤다. 청산(dead cross) 판정은 이번 수정 범위
 밖이다(최신 봉 기준 그대로) — 진입에서 실제로 관측된 문제만 고쳤다.
 
+**2026-09-09 후속(PLAN.md §5.83)** — 트레일 청산 쪽도 결국 똑같은 문제를
+겪었다(dead cross가 순간 이벤트라 폴링과 못 맞아떨어짐, 실거래 5주 동안
+트레일 청산이 딱 1번만 발동). 이번엔 lookback을 넓히는 대신 `quant/
+auto_trade_rules.py::evaluate_trail_exit`를 dead cross 확인이 필요 없는
+ratchet 방식(고점 대비 반납폭)으로 교체해 이 순간 이벤트 의존 자체를
+없앴다 — 자세한 경위는 그 모듈 docstring "트레일 청산" 절 참고.
+
 ## 스케줄링 배선
 
 `collectors/live_refresh.py`의 60초 잡에서 `positioning_snapshot.
@@ -324,6 +331,13 @@ async def _best_fill_price(client: KiwoomClient, code: str, side: str) -> float 
     return None
 
 
+_CONFIRM_HOLDINGS_RETRY_DELAYS_SEC: tuple[float, ...] = (1.0, 1.0)
+"""PLAN.md §5.82 — 첫 조회가 불일치할 때만 이 간격으로 추가 재조회한다(최대
+2회, 총 대기 2초). 첫 조회가 바로 일치하면 이 재시도는 전혀 실행되지
+않는다 — kt00018은 TR별 독립 토큰버킷(1req/s)이라 이 정도 추가 호출은
+무시할 수준(모듈 docstring "미체결 확인" 절 참고)."""
+
+
 async def _confirm_holdings_qty(client: KiwoomClient, code: str, expected_qty: int) -> bool:
     """주문 직후 실제 보유수량이 `expected_qty`와 일치하는지 **직접** 확인한다.
 
@@ -342,16 +356,33 @@ async def _confirm_holdings_qty(client: KiwoomClient, code: str, expected_qty: i
     하나만 다루므로 기대값이 항상 명확하다(매수 직후엔 `TARGET_QTY`, 매도
     직후엔 0).
 
+    **2026-09-07 재시도 추가(PLAN.md §5.82)** — 첫 조회가 불일치하면 즉시
+    미확인으로 단정하지 않고 `_CONFIRM_HOLDINGS_RETRY_DELAYS_SEC` 간격으로
+    최대 2회 더 조회한다. 실제로 주문이 체결됐는데 kt00018 잔고 스냅샷이
+    그 찰나에 아직 반영되지 않아 "미확인"으로 오판된 사고가 매수(8/27)·
+    매도(9/4) 양방향에서 각 1회씩 있었고, 둘 다 며칠 뒤 사용자가 실계좌를
+    직접 봐서야 발견해 수동으로 정정했다 — 이 재시도는 그 좁은 타이밍
+    창(수 초 이내 반영)만 메운다. 렉이 이보다 길면(과거 두 사고 모두 정확한
+    지연 시간은 불명) 여전히 못 잡을 수 있어 `POST /api/auto-trade/sync`
+    (routers/auto_trade.py)로 언제든 수동 재동기화할 수 있게 별도로 열어
+    둔다.
+
     조회 자체가 실패하거나(네트워크 등) 응답 파싱이 불가능하면(`get_account_
     holdings_qty`가 `ValueError` — kt00018 개별 행 필드명이 아직 실측 미확정,
-    그 메서드 docstring 참고) 판정 불가로 보수적으로 False(미확인)를 반환한다
-    — "확인 안 되면 이전 상태 유지"가 항상 더 안전한 기본값이다(모듈 상단
+    그 메서드 docstring 참고) 그 시도는 불일치로 취급하고 재시도를 계속한다
+    (재시도가 소진되면 최종적으로 판정 불가로 보수적으로 False를 반환) —
+    "확인 안 되면 이전 상태 유지"가 항상 더 안전한 기본값이다(모듈 상단
     안전 원칙, 이전 버전과 동일한 태도)."""
-    try:
-        actual_qty = await client.get_account_holdings_qty(code)
-    except Exception:  # noqa: BLE001 - 조회 실패 -> 모름 -> 안전하게 "미확인"으로 취급
-        return False
-    return actual_qty == expected_qty
+    for attempt, delay in enumerate((0.0, *_CONFIRM_HOLDINGS_RETRY_DELAYS_SEC)):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            actual_qty = await client.get_account_holdings_qty(code)
+        except Exception:  # noqa: BLE001 - 조회 실패 -> 이번 시도는 불일치로 취급하고 재시도
+            continue
+        if actual_qty == expected_qty:
+            return True
+    return False
 
 
 async def _cancel_unfilled_order_silently(
@@ -498,7 +529,7 @@ async def run_auto_trade(
             )
 
         return await _handle_position(
-            session, state, code, current_price, ma_cross, signal_snapshot, result, effective_now_kst, risk_alert_active
+            session, state, code, current_price, signal_snapshot, result, effective_now_kst, risk_alert_active
         )
 
 
@@ -821,17 +852,19 @@ async def _handle_position(
     state: AutoTradeState,
     code: str,
     current_price: float,
-    ma_cross: dict,
     signal_snapshot: dict,
     result: dict,
     now_kst: dt.time,
     risk_alert_active: bool,
 ) -> dict:
+    # PLAN.md §5.83(2026-09-09) — 트레일 청산이 ratchet 방식(고점 대비 반납폭)
+    # 으로 바뀌면서 ma_cross가 더 이상 필요 없다(quant/auto_trade_rules.py
+    # 모듈 docstring 참고) — 이 호출에서 ma_cross를 넘기지 않는다. 호출부
+    # (아래 run_auto_trade)는 여전히 signal_snapshot 로깅용으로 계산해 둔다.
     decision = decide_position_action(
         state.status,
         float(state.entry_price),
         float(state.peak_price) if state.peak_price is not None else None,
-        ma_cross["state"],
         current_price,
         risk_alert_active=risk_alert_active,
     )

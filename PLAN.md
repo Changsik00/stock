@@ -4564,6 +4564,114 @@ router.py`, 기존 관례와 동일 — krx_short_selling monkeypatch, 실 DB �
 **하지 않은 것**: 자사주 매입 공시(DART)는 범위 밖 — 사용자가 API 키
 발급받으면 후속 작업. 자동매매 연결 없음, 프런트 UI 없음(curl 전용).
 
+### Phase 5.82 — 매도 확인 지연으로 인한 상태 불일치 수정 + 수동 동기화 버튼 (2026-09-07)
+
+**계기**: 사용자가 대시보드를 보고 "지금 보유하고 있는 게 없는데 자동매매는
+보유한 것처럼 되어 있다"고 지적. 조사 결과 9/4 09:21 KST 수동 매도가 실제로는
+체결됐지만(키움 실계좌 kt00018 재조회로 0주 확인, 이후 EOD 강제청산·재수동
+매도 시도가 전부 "매도가능수량 0"으로 실패한 로그가 뒷받침), 매도 직후
+`_confirm_holdings_qty`가 그 찰나에 kt00018 스냅샷이 아직 안 따라와 "미확인"
+으로 오판해 `AutoTradeState`가 `trailing`에 그대로 멈춰 있었던 것으로 확인.
+전체 로그(`/performance` pairing, anomalies=[])를 다시 훑어 다른 놓친 매매는
+없음을 확인했으나, 정확히 반대 방향(매수는 체결됐는데 상태는 idle)의 같은
+버그가 2026-08-27에도 한 번 있었고(log id 3233→3234, 그때는 사용자가 직접
+발견해 수동 정정) — 이번이 두 번째 발생. 즉시 조치로 DB `AutoTradeState`를
+`idle`로 수동 정정(스크립트로, `AutoTradeLog`에 사유 기록)한 뒤, 재발방지
+방안을 사용자와 논의해 "①`_confirm_holdings_qty` 재시도 추가 + ②수동
+동기화 버튼" 조합으로 확정.
+
+**구현 1 — `_confirm_holdings_qty` 재시도**(`collectors/auto_trader.py`):
+첫 조회가 불일치하면 즉시 미확인으로 단정하지 않고 `_CONFIRM_HOLDINGS_
+RETRY_DELAYS_SEC`(1초, 1초) 간격으로 최대 2회 더 조회 — 불일치 없으면
+추가 호출 0회, kt00018은 TR별 독립 토큰버킷(1req/s)이라 불일치 시에도
+부담 무시할 수준. 렉이 이보다 길면(과거 두 사고 모두 정확한 지연 시간은
+불명) 여전히 못 잡을 수 있어 아래 수동 동기화로 보완.
+
+**구현 2 — `POST /api/auto-trade/sync`**(`routers/auto_trade.py`, 신규,
+`_position_lock` 사용): DB status와 실계좌 보유수량(kt00018)을 직접 비교.
+일치하면 무변경. 실보유 0인데 DB가 보유 중(9/4 방향)이면 항상 안전하게
+idle로 자동 정정(진입가를 이미 알고 있으므로). 실보유가 있는데 DB가
+idle(8/27 방향, 더 위험한 쪽)이면 kt00018 새 필드를 추측하지 않고(이
+TR은 이미 §5.78/§5.79에서 두 번 실측 오판이 있었던 곳) 우리 로그의 가장
+최근 `entry`/`manual_entry`/`buy_unconfirmed` 가격으로만 백필, 참고할
+로그가 없거나 그 외 애매한 조합(이미 holding/trailing인데 실보유가 0도
+기대수량도 아님)이면 자동 정정을 포기하고 409로 사람에게 넘김(틀린
+진입가를 지어내는 것보다 안전). 매도와 동일한 이유로 킬스위치 상태와
+무관하게 항상 허용. 프런트: `ManualTradeButtons` 바로 아래 "동기화"
+버튼(`SyncButton`, `AutoTradePage.jsx`) — 새 주문 없이 조회·정정만 하므로
+확인 대화상자 없이 바로 실행, 결과(정정 여부/사유)를 인라인으로 표시.
+
+**검증**: `tests/test_auto_trader_collector.py`의 기존 미확인 케이스 4건에
+재시도 지연을 0으로 몽키패치해 속도 유지하며 그대로 통과 확인(50 passed).
+`tests/test_auto_trade_router.py`에 `/sync` 신규 테스트 9건 추가 — 무변경
+케이스(idle/holding 각각), 9/4 방향 자동 정정, 8/27 방향 백필 정정, 백필
+근거 로그 없을 때 409, 애매한 수량 조합일 때 409, 잔고조회 실패 시 502(상태
+불변), 킬스위치 꺼져 있어도 동작 — 전부 통과(41 passed). 전체 `pytest -q`
+1005 passed(무관 기존 실패 1건 그대로, §5.76 이후와 동일). 실 배포 컨테이너
+킬스위치를 테스트 시작 전 끄고 끝난 뒤 즉시 원상복구(끄기/켜기 상태 확인
+완료), 이 과정에서 DB 상태를 idle로 정정한 것도 실제 `curl`로 확인.
+
+**하지 않은 것**: 주기적 자동 재점검(폴링에 얹어 상시 비교)은 사용자가
+명시적으로 거절 — 사람이 필요할 때 누르는 수동 버튼만 추가.
+
+### Phase 5.83 — 트레일 청산을 ratchet 방식(고점 기준)으로 교체 (2026-09-09)
+
+**계기**: 사용자가 "수동 매수 후 자동매매가 손절/익절한 경우 성과를 누구
+공으로 잡아야 하냐"고 물어 `/performance`(§5.76)를 진입×청산 방식 4분할로
+다시 뜯어봤다. 실거래 26건을 청산 이유별로 쪼개보니 `exit_stop_loss`가
+15건(전체 손실 -25.38%의 거의 전부)인 반면 `exit_trail`(트레일 청산, dead
+cross AND 진입가+0.5% 이하)은 5주 동안 **딱 1번**만 발동했다 — 트레일
+진입(+1%) 후 반전되면 이 조건을 거의 못 맞고 그대로 `STOP_LOSS_PCT`
+(-1.5%)까지 밀려버린다는 뜻. `quant/signals.py::moving_average_cross`의
+dead cross는 교차가 일어난 바로 그 1분봉에서만 참인 순간 이벤트라, 진입
+골든크로스가 §5.54-6(2026-08-05)에서 겪었던 것과 똑같은 폴링 타이밍 미스를
+청산 쪽도 그대로 겪고 있었던 것 — 다만 그때는 "청산 판정은 이번 수정
+범위 밖"으로 명시적으로 남겨뒀던 부분이다. 이 구조적 의심 자체는 §5.74/
+§5.77에서 이미 `ratchet`/`daily_reset` 비교 백테스트로 만들어뒀었지만
+"1분봉이 더 쌓이면 재보정 필요"로 유보 중이었다 — 이제 1분봉이 약 2.5주치
+(4,191개) 쌓여 재판단했다. 같은 1분봉으로 세 방식을 비교하니 `fixed_floor`
+(당시 실거래 규칙) -10.97%(승률 12.5%, 8건), `ratchet` -1.43%(승률 52.6%,
+19건), `daily_reset` +4.61%(승률 60%, 20건)로 `fixed_floor`만 뚜렷하게
+나빴다. `daily_reset`이 숫자는 더 좋았지만 `daily_giveback_pct`(0.3%)가
+아직 실측 보정 안 된 값이라고 그 모듈 docstring에 명시돼 있어, 더 단순하고
+한 번 더 검증된 `ratchet`으로 교체하기로 사용자와 확정했다(house rule §5 —
+백테스트 도구 자체는 "측정만, 판단은 사용자 몫"이라고 명시돼 있어 AskUser
+Question으로 명시 확인 후 진행).
+
+**구현**: `quant/auto_trade_rules.py` — `TRAIL_EXIT_FLOOR_PCT`(진입가 기준)를
+`TRAIL_GIVEBACK_PCT`(고점 기준, 값은 그대로 0.5)로 교체, `evaluate_trail_
+exit`를 `(peak_price, current_price)` 시그니처로 바꿔 "현재가 <= peak*(1-
+0.5%)"만 확인(dead cross 확인 제거). `decide_position_action`에서 더 이상
+필요 없어진 `ma_cross_state` 매개변수를 제거하고, 호출부(`collectors/
+auto_trader.py::_handle_position`)도 `ma_cross` 인자 없이 호출하도록 갱신
+(ma_cross 자체는 `signal_snapshot` 로깅용으로는 계속 계산해 둠). 백테스트
+두 모듈(`auto_trade_backtest.py`/`auto_trade_intraday_backtest.py`)의
+`fixed_floor` 비교 모드는 이제 라이브 규칙과 분리해 원래 공식(데드크로스 AND
+진입가+0.5%)을 자체 상수(`LEGACY_FIXED_FLOOR_PCT`)로 그 모듈 안에 고정 —
+라이브 규칙이 앞으로 또 바뀌어도 세 비교 대안(`fixed_floor`/`ratchet`/
+`daily_reset`)이 흔들리지 않는다.
+
+**검증**: `tests/test_auto_trade_rules.py` — `evaluate_trail_exit`/
+`decide_position_action` trailing 케이스 전부 새 시그니처·ratchet 조건으로
+재작성(48 passed). `tests/test_auto_trader_collector.py`의 EOD 오버나잇
+허용 테스트 1건이 새 규칙에서 실제로 의미가 달라져(고점 대비 -0.97% 반납은
+이제 청산 대상) 가격을 고점 대비 -0.2%로 조정해 통과(50 passed) — 이 외
+회귀 없음. `tests/test_auto_trade_router.py`/`test_auto_trade_backtest.py`/
+`test_auto_trade_intraday_backtest.py` 전부 그대로 통과(55 passed) —
+백테스트 두 엔드포인트를 실 curl로도 재확인해 리팩터 전후 숫자가 완전히
+동일함을 확인(fixed_floor -10.97%/ratchet -1.43%, 위 숫자 그대로). 전체
+`pytest -q` 1005 passed(무관 기존 실패 1건 그대로). 실 배포 컨테이너
+킬스위치를 테스트 시작 전 끄고 끝난 뒤 즉시 원상복구, `--reload`가 각 파일
+저장마다 정상 재시작하는 것도 로그로 확인. 이 변경이 반영된 시점에 실제로
+보유 중이던 포지션(9/9 10:09 KST 진입, 0167A0)에도 그대로 적용된다.
+
+**하지 않은 것**: 실거래 감사 로그를 보면 손절의 대부분(15건 중 13건)이
+60초 `run_auto_trade`가 아니라 30초 `watch_stop_loss`(실시간 호가 기반)
+에서 발동했다 — ratchet 조건은 dead cross 확인이 없어 순수 가격 임계값
+이라 이 30초 잡에도 얹을 수 있지만(현재는 여전히 진입가 기준 고정 손절만
+확인), 이번 범위에는 포함하지 않았다. 트레일 청산이 실제로 얼마나 더
+빨리 발동하는지 며칠 지켜본 뒤 필요하면 별도로 다룬다.
+
 
 ## 6.5 개발 진행 방식 (컨텍스트/토큰 운영)
 

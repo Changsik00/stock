@@ -68,12 +68,13 @@ def test_evaluate_trail_activate_not_triggered_below_threshold():
     assert rules.evaluate_trail_activate(entry, entry * 1.005) is False
 
 
-def test_evaluate_trail_exit_requires_both_dead_cross_and_floor():
-    entry = 10000.0
-    floor_price = entry * 1.005
-    assert rules.evaluate_trail_exit("dead", entry, floor_price) is True
-    assert rules.evaluate_trail_exit("none", entry, floor_price) is False  # dead cross 없음
-    assert rules.evaluate_trail_exit("dead", entry, entry * 1.02) is False  # 플로어 도달 전
+def test_evaluate_trail_exit_triggers_at_giveback_threshold():
+    """PLAN.md §5.83(2026-09-09, ratchet 전환) — 고점 대비 -0.5% 이하 반납이면
+    청산, dead cross 확인은 더 이상 필요 없다."""
+    peak = 10000.0
+    assert rules.evaluate_trail_exit(peak, peak * 0.995) is True  # 정확히 -0.5%
+    assert rules.evaluate_trail_exit(peak, peak * 0.996) is False  # 아직 반납 전
+    assert rules.evaluate_trail_exit(peak, peak * 1.01) is False  # 오히려 신고가
 
 
 def test_next_peak_price_updates_only_on_new_high():
@@ -90,20 +91,20 @@ def test_holding_stop_loss_has_priority_over_trail_activate():
     """이론상 동시에 성립할 수 없는 두 조건이지만, 손절이 항상 먼저 확인돼야
     한다는 계약을 명시적으로 검증(§5.54 "상태 무관 항상 감시" 요구)."""
     entry = 10000.0
-    decision = rules.decide_position_action("holding", entry, None, "golden", entry * 0.98)
+    decision = rules.decide_position_action("holding", entry, None, entry * 0.98)
     assert decision["action"] == "stop_loss"
 
 
 def test_holding_no_action_when_neither_condition_met():
     entry = 10000.0
-    decision = rules.decide_position_action("holding", entry, None, "none", entry * 1.002)
+    decision = rules.decide_position_action("holding", entry, None, entry * 1.002)
     assert decision["action"] == "none"
 
 
 def test_holding_trail_activate_sets_peak_to_current_price():
     entry = 10000.0
     current = entry * 1.02
-    decision = rules.decide_position_action("holding", entry, None, "none", current)
+    decision = rules.decide_position_action("holding", entry, None, current)
     assert decision["action"] == "trail_activate"
     assert decision["new_peak_price"] == current
 
@@ -112,46 +113,48 @@ def test_holding_stop_loss_takes_priority_even_past_trail_threshold_then_crashin
     """holding 상태에서 손절가까지 급락한 경우 — trail_activate가 아니라
     stop_loss가 나와야 한다(먼저 확인)."""
     entry = 10000.0
-    decision = rules.decide_position_action("holding", entry, None, "none", entry * 0.98)
+    decision = rules.decide_position_action("holding", entry, None, entry * 0.98)
     assert decision["action"] == "stop_loss"
 
 
 def test_trailing_stop_loss_has_priority_over_exit_trail():
     entry = 10000.0
-    decision = rules.decide_position_action("trailing", entry, entry * 1.03, "dead", entry * 0.98)
+    decision = rules.decide_position_action("trailing", entry, entry * 1.03, entry * 0.98)
     assert decision["action"] == "stop_loss"
 
 
 def test_trailing_peak_update_when_new_high_and_no_exit():
     entry = 10000.0
     peak = entry * 1.02
-    current = entry * 1.05  # 신고가지만 dead cross 아니라 청산 아님
-    decision = rules.decide_position_action("trailing", entry, peak, "none", current)
+    current = entry * 1.05  # 신고가 -> 반납이 아니라 청산 아님
+    decision = rules.decide_position_action("trailing", entry, peak, current)
     assert decision["action"] == "peak_update"
     assert decision["new_peak_price"] == current
 
 
-def test_trailing_none_when_price_unchanged_and_no_dead_cross():
+def test_trailing_none_when_price_unchanged():
     entry = 10000.0
     peak = entry * 1.02
-    decision = rules.decide_position_action("trailing", entry, peak, "none", peak)
+    decision = rules.decide_position_action("trailing", entry, peak, peak)
     assert decision["action"] == "none"
 
 
-def test_trailing_exit_when_dead_cross_and_floor_reached():
+def test_trailing_exit_when_giveback_threshold_reached():
+    """PLAN.md §5.83(2026-09-09, ratchet 전환) — 고점 대비 -0.5% 이상
+    반납하면 dead cross 없이도 청산돼야 한다."""
     entry = 10000.0
     peak = entry * 1.03
-    current = entry * 1.003  # 진입가 대비 +0.3% <= +0.5% 플로어
-    decision = rules.decide_position_action("trailing", entry, peak, "dead", current)
+    current = peak * 0.99  # 고점 대비 -1% 반납 (>= 0.5% 임계값)
+    decision = rules.decide_position_action("trailing", entry, peak, current)
     assert decision["action"] == "exit_trail"
     assert decision["new_peak_price"] == peak  # 신고가 갱신 없음(현재가가 peak보다 낮음)
 
 
-def test_trailing_no_exit_when_dead_cross_but_floor_not_reached():
+def test_trailing_no_exit_when_giveback_threshold_not_reached():
     entry = 10000.0
     peak = entry * 1.03
-    current = entry * 1.02  # dead cross 있지만 아직 +0.5% 플로어 위
-    decision = rules.decide_position_action("trailing", entry, peak, "dead", current)
+    current = peak * 0.997  # 고점 대비 -0.3% 반납 (< 0.5% 임계값)
+    decision = rules.decide_position_action("trailing", entry, peak, current)
     assert decision["action"] == "none"
 
 
@@ -159,7 +162,7 @@ def test_trailing_peak_none_falls_back_to_entry_price():
     """방어적 처리 — peak_price가 아직 None인(비정상) trailing 상태에서도
     크래시하지 않고 entry_price를 기준으로 계산한다."""
     entry = 10000.0
-    decision = rules.decide_position_action("trailing", entry, None, "none", entry * 1.01)
+    decision = rules.decide_position_action("trailing", entry, None, entry * 1.01)
     assert decision["action"] == "peak_update"
     assert decision["new_peak_price"] == entry * 1.01
 
@@ -245,7 +248,7 @@ def test_evaluate_stop_loss_tighter_threshold_when_risk_alert():
 def test_decide_position_action_uses_normal_threshold_by_default():
     entry = 10000.0
     current = entry * 0.99  # -1% -> 평상시 손절선(-1.5%) 안 닿음
-    decision = rules.decide_position_action("holding", entry, None, "none", current)
+    decision = rules.decide_position_action("holding", entry, None, current)
     assert decision["action"] == "none"
 
 
@@ -254,9 +257,7 @@ def test_decide_position_action_risk_alert_tightens_stop_loss():
     손절선(-0.8%)에 걸려 손절된다 — §5.55-3 핵심 케이스."""
     entry = 10000.0
     current = entry * 0.99  # -1%
-    decision = rules.decide_position_action(
-        "holding", entry, None, "none", current, risk_alert_active=True
-    )
+    decision = rules.decide_position_action("holding", entry, None, current, risk_alert_active=True)
     assert decision["action"] == "stop_loss"
     assert "리스크 경보" in decision["reason"]
 
@@ -266,9 +267,7 @@ def test_decide_position_action_risk_alert_does_not_affect_trail_activate():
     없어야 한다."""
     entry = 10000.0
     current = entry * 1.02  # +2% -> 트레일 전환 조건(+1%↑), 손절과 무관
-    decision = rules.decide_position_action(
-        "holding", entry, None, "none", current, risk_alert_active=True
-    )
+    decision = rules.decide_position_action("holding", entry, None, current, risk_alert_active=True)
     assert decision["action"] == "trail_activate"
 
 
