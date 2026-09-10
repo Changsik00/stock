@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 // 시장 위험 경보 상단 배너(PLAN.md §5.36, 2026-07-28 사용자 요청: "하락폭 혹은
 // 볼륨이 크면 뭔가 이슈를 알려줘야 하지 않을까? ... 상단 배너로 말야..").
@@ -40,6 +40,49 @@ const KOSPI_SIDECAR_THRESHOLD_PCT = 5
 
 const MARKET_LABEL = { kospi: '코스피', kosdaq: '코스닥' }
 
+// PLAN.md §5.84(2026-09-10, 사용자 지적 — "x로 닫지 않으면 언제부터 표시
+// 했는지 알 수 없어") — 백엔드는 이 배너 값을 매 폴링(60초, `DashboardPage.
+// jsx`의 `BREADTH_LIVE_POLL_MS`) 그때그때 새로 계산할 뿐 저장하지 않는다
+// (`app/quant/risk_alert.py`도 순수 함수, 어떤 스냅샷도 알림별 발생 시각을
+// 남기지 않음). 그래서 "이 알림이 정확히 언제부터 활성이었는지"는 서버에
+// 물어도 알 수 없다 — 이 컴포넌트가 폴링을 받는 동안 직접 관찰해서 기억해
+// 두는 수밖에 없다. `localStorage`에 알림 종류별 최초 관측 시각을 남겨서
+// 새로고침해도 유지되게 한다(§5.36-3의 "닫기" 기억은 세션이면 충분하다고
+// 지시받았지만, 이건 다른 목적 — 닫아도/새로고침해도 "언제부터"는 안
+// 잃어버려야 의미가 있다).
+const FIRST_SEEN_STORAGE_KEY = 'riskAlertFirstSeenV1'
+// 탭이 이 시간 이상 닫혀 있다 다시 열려서 우연히 같은 알림이 활성이면
+// "계속 이어진 것"이 아니라 "새로 다시 뜬 것"으로 본다(60초 폴링 간격보다
+// 훨씬 여유 있게 잡음 — 정상적인 연속 관측에서는 절대 안 걸림).
+const FIRST_SEEN_STALE_GAP_MS = 5 * 60 * 1000
+
+function alertIdentity(alert) {
+  if (alert.kind === 'flow_slope') return `flow_slope:${alert.market}:${alert.investor}`
+  return `${alert.kind}:${alert.market ?? ''}`
+}
+
+function loadFirstSeenStore() {
+  try {
+    const raw = localStorage.getItem(FIRST_SEEN_STORAGE_KEY)
+    return raw ? JSON.parse(raw) : {}
+  } catch {
+    return {} // 프라이빗 모드 등으로 접근 불가해도 배너 자체는 정상 동작해야 함
+  }
+}
+
+function saveFirstSeenStore(store) {
+  try {
+    localStorage.setItem(FIRST_SEEN_STORAGE_KEY, JSON.stringify(store))
+  } catch {
+    // 저장 실패는 무시 — "언제부터"를 못 남길 뿐 배너 표시 자체는 계속됨
+  }
+}
+
+function fmtFirstSeen(ms) {
+  if (!ms) return null
+  return new Date(ms).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })
+}
+
 function fmtPct(value) {
   if (value === null || value === undefined) return '-'
   const sign = value > 0 ? '+' : ''
@@ -64,38 +107,41 @@ function tierOf(alert) {
 
 // 각 alert 항목(circuit_breaker/sidecar/volume_surge/flow_slope)을 관찰형
 // 한국어 문장으로 옮긴다 — "발동되었습니다" 단정 대신 "발동 기준에 해당하는
-// 변동폭이 관찰됨".
-function describeAlert(alert) {
+// 변동폭이 관찰됨". `firstSeenMs`(선택, PLAN.md §5.84)가 있으면 이 브라우저가
+// 언제부터 이 알림을 계속 관측해 왔는지 뒤에 덧붙인다.
+function describeAlert(alert, firstSeenMs) {
+  let text
   if (alert.kind === 'circuit_breaker') {
     const threshold = CIRCUIT_BREAKER_THRESHOLD_PCT[alert.level]
     const marketLabel = MARKET_LABEL[alert.market] ?? alert.market
-    return (
+    text =
       `${marketLabel} ${fmtPct(alert.change_rate)} — 서킷브레이커 ${alert.level}단계 발동 기준` +
       `(-${threshold}%)에 해당하는 변동폭이 관찰됨`
-    )
-  }
-  if (alert.kind === 'sidecar') {
-    return (
+  } else if (alert.kind === 'sidecar') {
+    text =
       `코스피200 선물 ${fmtPct(alert.change_rate)} — 사이드카(프로그램매매 호가효력 정지) 발동 기준` +
       `(±${KOSPI_SIDECAR_THRESHOLD_PCT}%)에 해당하는 변동폭이 관찰됨`
-    )
-  }
-  if (alert.kind === 'volume_surge') {
+  } else if (alert.kind === 'volume_surge') {
     const marketLabel = MARKET_LABEL[alert.market] ?? alert.market
-    return (
+    text =
       `${marketLabel} 거래량이 평소(직전 30분) 대비 ${fmtMultiple(alert.multiple)} 수준으로 튀었음 — ` +
       `공식 서킷브레이커/사이드카와 무관한 자체 관찰 지표(참고용)`
-    )
+  } else {
+    // flow_slope — §5.17 flow_acceleration.py가 계산해 둔 30분 구간 순매수
+    // 변화량("기울기")을 재분류한 값. "매도가 계속될 것"이라는 예측이 아니라
+    // 방금까지 관찰된 매도 속도 변화만 서술한다(risk_alert.py 모듈 docstring
+    // "정직성 원칙"과 동일한 house rule).
+    const marketLabel = MARKET_LABEL[alert.market] ?? alert.market
+    text =
+      `${marketLabel} ${alert.investor} 매도 속도가 직전 30분 대비 ${fmtMultiple(alert.multiple)} 빨라짐(관찰됨) — ` +
+      `공식 지표가 아닌 미검증 자체 관찰치이며, 매도가 계속될 것이라는 예측이 아님(참고용)`
   }
-  // flow_slope — §5.17 flow_acceleration.py가 계산해 둔 30분 구간 순매수
-  // 변화량("기울기")을 재분류한 값. "매도가 계속될 것"이라는 예측이 아니라
-  // 방금까지 관찰된 매도 속도 변화만 서술한다(risk_alert.py 모듈 docstring
-  // "정직성 원칙"과 동일한 house rule).
-  const marketLabel = MARKET_LABEL[alert.market] ?? alert.market
-  return (
-    `${marketLabel} ${alert.investor} 매도 속도가 직전 30분 대비 ${fmtMultiple(alert.multiple)} 빨라짐(관찰됨) — ` +
-    `공식 지표가 아닌 미검증 자체 관찰치이며, 매도가 계속될 것이라는 예측이 아님(참고용)`
-  )
+
+  const firstSeenLabel = fmtFirstSeen(firstSeenMs)
+  // "이 브라우저에서" — 서버가 발생 시각을 기록해 둔 게 아니라 이 탭이 폴링
+  // 중 직접 관측해 기억해 둔 값이라는 걸 분명히 한다(다른 기기/새 탭에서는
+  // 다시 처음부터 관측 시작).
+  return firstSeenLabel ? `${text} — 이 브라우저에서 ${firstSeenLabel}부터 관측` : text
 }
 
 export default function RiskAlertBanner({ risk }) {
@@ -106,14 +152,38 @@ export default function RiskAlertBanner({ risk }) {
   // (localStorage 등)를 붙이면 되지만, 지시대로 세션(컴포넌트 로컬 상태)이면
   // 충분하다.
   const [dismissedSeverity, setDismissedSeverity] = useState(null)
+  // PLAN.md §5.84 — 알림별(kind/market/investor) 최초 관측 시각. 서버는 이
+  // 값을 어디에도 기록하지 않으므로(위 "FIRST_SEEN_STORAGE_KEY" 주석 참고)
+  // 이 브라우저가 폴링으로 직접 지켜본 것만 기억한다.
+  const [firstSeenStore, setFirstSeenStore] = useState(loadFirstSeenStore)
 
   const alerts = risk?.alerts ?? []
+
+  useEffect(() => {
+    const now = Date.now()
+    setFirstSeenStore((prev) => {
+      const next = {}
+      let changed = alerts.length !== Object.keys(prev).length
+      for (const alert of alerts) {
+        const key = alertIdentity(alert)
+        const prevEntry = prev[key]
+        const isFresh = !prevEntry || now - prevEntry.lastSeen > FIRST_SEEN_STALE_GAP_MS
+        next[key] = { firstSeen: isFresh ? now : prevEntry.firstSeen, lastSeen: now }
+        if (isFresh) changed = true
+      }
+      if (!changed) return prev
+      saveFirstSeenStore(next)
+      return next
+    })
+  }, [alerts])
+
   if (alerts.length === 0) return null
 
   const [topAlert, ...restAlerts] = alerts
   if (dismissedSeverity !== null && topAlert.severity <= dismissedSeverity) return null
 
   const tier = tierOf(topAlert)
+  const firstSeenOf = (alert) => firstSeenStore[alertIdentity(alert)]?.firstSeen
 
   return (
     <div className={`risk-banner risk-banner--${tier}`} role="alert">
@@ -121,7 +191,7 @@ export default function RiskAlertBanner({ risk }) {
         <span className="risk-banner-icon" aria-hidden="true">
           ⚠
         </span>
-        <span className="risk-banner-headline">{describeAlert(topAlert)}</span>
+        <span className="risk-banner-headline">{describeAlert(topAlert, firstSeenOf(topAlert))}</span>
         <button
           type="button"
           className="risk-banner-dismiss"
@@ -134,7 +204,7 @@ export default function RiskAlertBanner({ risk }) {
       </div>
       {restAlerts.length > 0 && (
         <div className="risk-banner-secondary">
-          그 외 동시 관찰된 조건: {restAlerts.map(describeAlert).join(' · ')}
+          그 외 동시 관찰된 조건: {restAlerts.map((a) => describeAlert(a, firstSeenOf(a))).join(' · ')}
         </div>
       )}
       <div className="risk-banner-disclaimer">
