@@ -49,19 +49,24 @@ function sizeValueOf(item, sizeBy) {
   return base ** SIZE_EXPONENT
 }
 
-// **최소 면적 하한**: 멱 스케일을 거쳐도 소외 그룹은 여전히 상위 박스 대비
-// 1~2%대로 눌릴 수 있다 — 렌더 대상 박스 전체 sizeValue 합의 MIN_AREA_RATIO
-// 미만이면 그 값(=합 x 비율)으로 올려서 라벨이 최소한 자리를 잡을 여지를 준다.
-// 단일 패스 계산이다 — 올린 뒤 재정규화하지 않는다(합이 소폭 늘어나 다른 박스가
-// 상대적으로 살짝 작아 보일 수 있지만, 그 정도 오차보다 "픽셀로 사라지는 박스가
-// 없어야 한다"는 요구가 우선한다).
-const MIN_AREA_RATIO = 0.012
+// **크기 범위 제한(median 기준 clamp)**: 멱 스케일을 거쳐도 반도체(전체 거래대금의
+// 35%)·"기타" 같은 초대형 그룹 한두 개가 맵 대부분을 차지해 나머지 박스가 작아져
+// 클릭/식별이 어렵다(사용자 피드백). 렌더 대상 박스 sizeValue의 중앙값 대비
+// [MIN_SIZE_RATIO, MAX_SIZE_RATIO] 범위로 잘라, 큰 박스는 여전히 크게(최대 중앙값의
+// 2.5배 = 면적 비율 약 6배 격차) 보이되 작은 박스도 이름·등락률이 읽히고 눌릴 크기를
+// 보장한다. 실제 거래대금 순서는 유지되고(clamp는 단조) 격차만 압축된다.
+const MIN_SIZE_RATIO = 0.45
+const MAX_SIZE_RATIO = 2.5
 
-function applyMinAreaFloor(boxes) {
-  const total = boxes.reduce((sum, b) => sum + b.sizeValue, 0)
-  if (total <= 0) return boxes
-  const floor = total * MIN_AREA_RATIO
-  return boxes.map((b) => (b.sizeValue < floor ? { ...b, sizeValue: floor } : b))
+function clampSizeRange(boxes) {
+  if (boxes.length === 0) return boxes
+  const sorted = boxes.map((b) => b.sizeValue).sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  const median = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+  if (median <= 0) return boxes
+  const lo = median * MIN_SIZE_RATIO
+  const hi = median * MAX_SIZE_RATIO
+  return boxes.map((b) => ({ ...b, sizeValue: Math.min(hi, Math.max(lo, b.sizeValue)) }))
 }
 
 // 색 스케일: 등락률(%)을 -3%~+3%로 클램프한 뒤, 0%=중립(--surface, 라이트/다크 각각
@@ -321,7 +326,7 @@ function foldItems(data) {
   const up = nonNeutral.filter((d) => d.change_rate > 0).sort((a, b) => b.change_rate - a.change_rate)
   const down = nonNeutral.filter((d) => d.change_rate < 0).sort((a, b) => a.change_rate - b.change_rate)
 
-  const boxes = applyMinAreaFloor([...up.slice(0, TOP_N), ...down.slice(0, TOP_N)])
+  const boxes = clampSizeRange([...up.slice(0, TOP_N), ...down.slice(0, TOP_N)])
 
   const captionGroups = []
   if (neutral.length > 0) {
