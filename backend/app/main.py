@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .routers import admin, auto_trade, basis, etf, flow_rank, groups, macro, markets, scalp, stocks
+from .routers import admin, auto_trade, basis, etf, etf_pair, flow_rank, groups, macro, markets, scalp, stocks
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -56,6 +56,7 @@ app.include_router(markets.router)
 app.include_router(basis.router)
 app.include_router(stocks.router)
 app.include_router(etf.router)
+app.include_router(etf_pair.router)
 app.include_router(macro.router)
 app.include_router(flow_rank.router)
 app.include_router(groups.router)

@@ -516,6 +516,34 @@ class IntradaySample(Base):
     resolution_seconds: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
 
 
+class EtfPairSample(Base):
+    """하이닉스 단일종목 레버리지/인버스 2X ETF 쌍의 분 단위 괴리 표본
+    (PLAN.md §5.88-1) — `collectors/etf_pair_sampler.py`가 정규장 중 60초마다
+    종목별 1행씩 upsert한다.
+
+    **관찰 전용, 매매 신호 아님** — 나중에 괴리율/본주 이론가 대비 시차 분포를 보고
+    진입 필터로 쓸 만한지 사용자가 판단하기 위한 표본 축적이다.
+
+    PK는 ``(time, code)``(time은 분 단위로 내린 KST 시각). 원본값(price/
+    base_price/nav/underlying_*)과 파생값(theory_price/premium_pct/lag_pct)을
+    둘 다 저장해 공식을 바꿔도 재계산할 수 있다. ``multiple``은 +2(레버리지)/
+    -2(인버스2X). ``nav``는 네이버 조회 실패 시 NULL이고 premium_pct도 따라 NULL."""
+
+    __tablename__ = "etf_pair_sample"
+
+    time: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    multiple: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    price: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
+    base_price: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
+    nav: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
+    underlying_price: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
+    underlying_change_rate: Mapped[float] = mapped_column(Numeric(8, 4), nullable=False)
+    theory_price: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
+    premium_pct: Mapped[float | None] = mapped_column(Numeric(8, 4), nullable=True)
+    lag_pct: Mapped[float | None] = mapped_column(Numeric(8, 4), nullable=True)
+
+
 class VolumeProfileDaily(Base):
     """거래량 프로파일 일별 스냅샷 (PLAN.md §5.35) — §5.34
     (``quant/volume_profile.py``)의 온디맨드 계산 결과를 매일 배치로 적재해

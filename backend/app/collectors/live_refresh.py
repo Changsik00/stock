@@ -23,6 +23,11 @@
    중심)의 하루 1회 사후 검증 스냅샷을 DB(positioning_snapshot 테이블)에
    남긴다 — 마찬가지로 새 외부 호출 없이 이미 워밍된 §5.50/§5.15 warm 함수만
    재사용한다(collectors/positioning_snapshot.py 모듈 docstring 참고).
+   **2026-10-28 추가(PLAN.md §5.88-1)**: 같은 자리에서 `collectors/
+   etf_pair_sampler.record_pair_sample`도 호출해 하이닉스 단일종목 레버리지/
+   인버스 2X ETF 쌍의 괴리율·본주 이론가 대비 시차를 1분 단위로 DB(etf_pair_sample
+   테이블)에 쌓는다 — 관찰 전용. 함수 내부에서 KRX 정규장(`is_market_closed`)으로
+   스스로 게이트하며, 장중에만 키움 ka10001 3콜 + 네이버 ETF 목록 1콜을 쓴다.
    **2026-08-04 추가(PLAN.md §5.54)**: 바로 이어서 `collectors/auto_trader.
    run_auto_trade`도 호출한다 — 이 프로젝트 최초의 완전자동매매 실행 엔진
    (0167A0 트레일링 스탑). 킬스위치(`AutoTradeState.enabled`) 기본값이 False라
@@ -162,7 +167,13 @@ async def _run_live_refresh() -> None:
     from ..routers import basis as basis_router
     from ..routers import groups as groups_router
     from ..routers import markets
-    from . import auto_trader, intraday_snapshot, positioning_snapshot, scalp_tracker
+    from . import (
+        auto_trader,
+        etf_pair_sampler,
+        intraday_snapshot,
+        positioning_snapshot,
+        scalp_tracker,
+    )
 
     if nxt_closed:
         logger.debug(
@@ -272,6 +283,16 @@ async def _run_live_refresh() -> None:
             logger.debug("live-refresh: positioning-snapshot %s", positioning_result)
         except Exception as e:  # noqa: BLE001
             logger.warning("live-refresh: positioning-snapshot 실패: %s", e)
+
+        # PLAN.md §5.88-1 — 하이닉스 레버리지/인버스 2X ETF 쌍 괴리 1분 기록(관찰
+        # 전용). 새 외부 호출이 있지만(키움 3콜+네이버 1콜) 함수 내부에서 정규장
+        # 게이트(is_market_closed)로 스스로 건너뛰고, 독립 try/except라 실패해도
+        # 아래 자동매매를 막지 않는다(collectors/etf_pair_sampler.py 모듈 docstring 참고).
+        try:
+            pair_rows = await etf_pair_sampler.record_pair_sample(session, now_kst)
+            logger.debug("live-refresh: etf-pair-sampler %s행", pair_rows)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("live-refresh: etf-pair-sampler 실패: %s", e)
 
         # PLAN.md §5.54 — 완전자동매매 엔진(0167A0 트레일링 스탑) 1회 평가·실행.
         # 이 프로젝트 최초로 실제 돈이 자동으로 움직이는 호출이다. `enabled`
