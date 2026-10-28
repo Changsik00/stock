@@ -24,10 +24,10 @@ DAY_START = dt.datetime(2099, 1, 5, 0, 0, tzinfo=KST)
 DAY_END = dt.datetime(2099, 1, 6, 0, 0, tzinfo=KST)
 
 QUOTES = {
-    "000660": {"cur_prc": "+1484000", "base_pric": "1341000", "flu_rt": "+10.66"},
-    "0193T0": {"cur_prc": "+7055", "base_pric": "5805", "flu_rt": "+21.53"},
-    "0197X0": {"cur_prc": "-7290", "base_pric": "9275", "flu_rt": "-21.40"},
+    "233740": {"cur_prc": "+5460", "base_pric": "5095", "flu_rt": "+7.16"},
+    "251340": {"cur_prc": "-2595", "base_pric": "2690", "flu_rt": "-3.53"},
 }
+SECTOR = {"return_code": 0, "cur_prc": "+1283.02", "flu_rt": "+3.63", "inds_cur_prc_tm": [{"x": 1}]}
 
 
 async def _clear() -> None:
@@ -48,13 +48,20 @@ async def _clean():
     await engine.dispose()
 
 
-def _install_fakes(monkeypatch, fail_codes=(), nav_error=False, calls=None):
+def _install_fakes(monkeypatch, fail_codes=(), nav_error=False, calls=None, sector_error=False):
     class FakeClient:
         async def __aenter__(self):
             return self
 
         async def __aexit__(self, *exc):
             return False
+
+        async def sector_current_price(self, inds_cd, *args, **kwargs):
+            if calls is not None:
+                calls.append(inds_cd)
+            if sector_error:
+                raise RuntimeError("boom")
+            return SECTOR, {}
 
         async def stock_info(self, code):
             if calls is not None:
@@ -67,8 +74,8 @@ def _install_fakes(monkeypatch, fail_codes=(), nav_error=False, calls=None):
         if nav_error:
             raise RuntimeError("naver down")
         return [
-            {"code": "0193T0", "nav": 7040.0, "now_value": 7055},
-            {"code": "0197X0", "nav": 7300.0, "now_value": 7290},
+            {"code": "233740", "nav": 5450.0, "now_value": 5460},
+            {"code": "251340", "nav": 2600.0, "now_value": 2595},
             {"code": "069500", "nav": 100.0, "now_value": 100},
         ]
 
@@ -90,19 +97,21 @@ async def test_records_both_etfs(monkeypatch):
         n = await etf_pair_sampler.record_pair_sample(session, OPEN_TIME)
     assert n == 2
     rows = await _rows()
-    assert set(rows) == {"0193T0", "0197X0"}
-    lev = rows["0193T0"]
+    assert set(rows) == {"233740", "251340"}
+    lev = rows["233740"]
     assert lev.time == OPEN_TIME.replace(second=0)
     assert lev.multiple == 2
-    assert float(lev.price) == 7055 and float(lev.base_price) == 5805
-    assert float(lev.nav) == 7040
-    assert float(lev.underlying_price) == 1484000
-    assert float(lev.underlying_change_rate) == pytest.approx(10.66)
-    assert float(lev.lag_pct) == pytest.approx(0.17, abs=0.01)
-    assert float(lev.premium_pct) == pytest.approx((7055 - 7040) / 7040 * 100, abs=0.001)
-    inv = rows["0197X0"]
-    assert inv.multiple == -2 and float(inv.price) == 7290
-    assert float(inv.lag_pct) == pytest.approx(-0.10, abs=0.01)
+    assert float(lev.price) == 5460 and float(lev.base_price) == 5095
+    assert float(lev.nav) == 5450
+    assert float(lev.underlying_price) == pytest.approx(1283.02)
+    assert float(lev.underlying_change_rate) == pytest.approx(3.63)
+    assert float(lev.theory_price) == pytest.approx(5464.9, abs=0.1)
+    assert float(lev.lag_pct) == pytest.approx(-0.09, abs=0.01)
+    assert float(lev.premium_pct) == pytest.approx((5460 - 5450) / 5450 * 100, abs=0.001)
+    inv = rows["251340"]
+    assert inv.multiple == -1 and float(inv.price) == 2595
+    assert float(inv.theory_price) == pytest.approx(2592.4, abs=0.1)
+    assert float(inv.lag_pct) == pytest.approx(0.10, abs=0.01)
 
 
 async def test_nav_failure_leaves_nav_null(monkeypatch):
@@ -110,22 +119,22 @@ async def test_nav_failure_leaves_nav_null(monkeypatch):
     async with async_session_factory() as session:
         assert await etf_pair_sampler.record_pair_sample(session, OPEN_TIME) == 2
     rows = await _rows()
-    assert rows["0193T0"].nav is None and rows["0193T0"].premium_pct is None
-    assert rows["0193T0"].lag_pct is not None
+    assert rows["233740"].nav is None and rows["233740"].premium_pct is None
+    assert rows["233740"].lag_pct is not None
 
 
 async def test_underlying_failure_writes_nothing(monkeypatch):
-    _install_fakes(monkeypatch, fail_codes=("000660",))
+    _install_fakes(monkeypatch, sector_error=True)
     async with async_session_factory() as session:
         assert await etf_pair_sampler.record_pair_sample(session, OPEN_TIME) == 0
     assert await _rows() == {}
 
 
 async def test_single_etf_failure_keeps_other(monkeypatch):
-    _install_fakes(monkeypatch, fail_codes=("0197X0",))
+    _install_fakes(monkeypatch, fail_codes=("251340",))
     async with async_session_factory() as session:
         assert await etf_pair_sampler.record_pair_sample(session, OPEN_TIME) == 1
-    assert set(await _rows()) == {"0193T0"}
+    assert set(await _rows()) == {"233740"}
 
 
 async def test_market_closed_skips_kiwoom(monkeypatch):

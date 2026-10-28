@@ -1,8 +1,9 @@
-"""하이닉스 단일종목 레버리지/인버스 2X ETF 쌍 괴리 기록기 (PLAN.md §5.88-1)
+"""코스닥150 레버리지/인버스 ETF 쌍 괴리 기록기 (PLAN.md §5.88-1)
 — 관찰 로그, 매매 신호 아님.
 
-`quant/etf_pair_metrics.PAIR_ETFS`의 ETF 2종(0193T0 레버리지 +2X / 0197X0 인버스
--2X)과 본주(000660)의 현재가·전일 기준가·등락률을 키움 ka10001(종목기본정보)로,
+`quant/etf_pair_metrics.PAIR_ETFS`의 ETF 2종(233740 레버리지 +2X / 251340 인버스
+-1X)의 현재가·전일 기준가를 키움 ka10001(종목기본정보)로, 기초지수(코스닥150,
+업종코드 150)의 레벨·등락률을 ka20001(업종현재가)로,
 NAV를 네이버 ETF 목록(`clients/naver_etf.fetch_etf_list`, 1회 호출에 전체 반환)으로
 읽어, 분 단위로 `etf_pair_sample` 테이블에 쌓는다. 목적은 "괴리율/본주 이론가
 대비 시차가 장중에 어떤 분포로 나오는지"를 나중에 보기 위한 표본 축적이며,
@@ -87,6 +88,18 @@ async def _fetch_quote(client: KiwoomClient, code: str) -> dict[str, float | Non
     return {"price": price, "base_price": base, "change_rate": _signed_rate(data.get("flu_rt"))}
 
 
+async def _fetch_underlying(client: KiwoomClient) -> dict[str, float | None] | None:
+    """ka20001 업종현재가로 기초지수 레벨·등락률을 읽는다. 큰 시계열 배열
+    (inds_cur_prc_tm)은 쓰지 않는다. 응답 오류/레벨 없음이면 None."""
+    data, _ = await client.sector_current_price(UNDERLYING_CODE)
+    if str(data.get("return_code", 0)) not in ("0", ""):
+        return None
+    price = _abs_number(data.get("cur_prc"))
+    if price is None:
+        return None
+    return {"price": price, "change_rate": _signed_rate(data.get("flu_rt"))}
+
+
 async def _fetch_navs() -> dict[str, float]:
     """네이버 ETF 목록에서 대상 ETF의 NAV를 읽는다. 실패하면 빈 dict(호출부가
     NAV를 NULL로 둔다)."""
@@ -103,7 +116,7 @@ async def _fetch_navs() -> dict[str, float]:
 
 
 async def record_pair_sample(session: AsyncSession, now: dt.datetime | None = None) -> int:
-    """본주+ETF 쌍 1분 표본을 기록하고 upsert한 행 수를 돌려준다. 정규장 밖이거나
+    """기초지수+ETF 쌍 1분 표본을 기록하고 upsert한 행 수를 돌려준다. 정규장 밖이거나
     본주 값을 못 얻으면 0(아무것도 쓰지 않음)."""
     now_kst = (now or dt.datetime.now(KST)).astimezone(KST)
     if is_market_closed(now_kst):
@@ -113,7 +126,7 @@ async def record_pair_sample(session: AsyncSession, now: dt.datetime | None = No
     quotes: dict[str, dict[str, float | None]] = {}
     async with KiwoomClient() as client:
         try:
-            underlying = await _fetch_quote(client, UNDERLYING_CODE)
+            underlying = await _fetch_underlying(client)
         except Exception as e:  # noqa: BLE001
             logger.warning("etf-pair: 본주 조회 실패: %s", e)
             return 0

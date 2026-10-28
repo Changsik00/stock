@@ -18,20 +18,20 @@ from app.quant.etf_pair_metrics import (
 
 
 def test_constants():
-    assert UNDERLYING_CODE == "000660"
-    assert PAIR_ETFS == {"0193T0": 2, "0197X0": -2}
+    assert UNDERLYING_CODE == "150"
+    assert PAIR_ETFS == {"233740": 2, "251340": -1}
 
 
 def test_theory_and_lag_leverage_real_example():
-    theory = compute_theory_price(5805, 2, 10.66)
-    assert theory == pytest.approx(7042.6, abs=0.1)
-    assert compute_lag_pct(7055, theory) == pytest.approx(0.17, abs=0.01)
+    theory = compute_theory_price(5095, 2, 3.63)
+    assert theory == pytest.approx(5464.9, abs=0.1)
+    assert compute_lag_pct(5460, theory) == pytest.approx(-0.09, abs=0.01)
 
 
 def test_theory_and_lag_inverse_real_example():
-    theory = compute_theory_price(9275, -2, 10.66)
-    assert theory == pytest.approx(7297.6, abs=0.1)
-    assert compute_lag_pct(7290, theory) == pytest.approx(-0.10, abs=0.01)
+    theory = compute_theory_price(2690, -1, 3.63)
+    assert theory == pytest.approx(2592.4, abs=0.1)
+    assert compute_lag_pct(2595, theory) == pytest.approx(0.10, abs=0.01)
 
 
 def test_premium_pct():

@@ -517,7 +517,7 @@ class IntradaySample(Base):
 
 
 class EtfPairSample(Base):
-    """하이닉스 단일종목 레버리지/인버스 2X ETF 쌍의 분 단위 괴리 표본
+    """코스닥150 레버리지/인버스 ETF 쌍의 분 단위 괴리 표본
     (PLAN.md §5.88-1) — `collectors/etf_pair_sampler.py`가 정규장 중 60초마다
     종목별 1행씩 upsert한다.
 
@@ -527,7 +527,7 @@ class EtfPairSample(Base):
     PK는 ``(time, code)``(time은 분 단위로 내린 KST 시각). 원본값(price/
     base_price/nav/underlying_*)과 파생값(theory_price/premium_pct/lag_pct)을
     둘 다 저장해 공식을 바꿔도 재계산할 수 있다. ``multiple``은 +2(레버리지)/
-    -2(인버스2X). ``nav``는 네이버 조회 실패 시 NULL이고 premium_pct도 따라 NULL."""
+    -1(인버스). ``underlying_price``는 기초자산 현재가 — 종목 또는 지수 레벨. ``nav``는 네이버 조회 실패 시 NULL이고 premium_pct도 따라 NULL."""
 
     __tablename__ = "etf_pair_sample"
 

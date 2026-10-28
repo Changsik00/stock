@@ -1,4 +1,4 @@
-"""GET /api/etf-pair/samples — 하이닉스 레버리지/인버스 2X ETF 쌍 괴리 표본 조회
+"""GET /api/etf-pair/samples — 코스닥150 레버리지/인버스 ETF 쌍 괴리 표본 조회
 (PLAN.md §5.88-1). **관찰 전용** — 괴리율(premium_pct)/본주 이론가 대비 시차
 (lag_pct)의 일자별 행 목록과 종목별 분포 요약만 돌려주며, 어떤 판단·추천 문구도
 넣지 않는다.
@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_session
 from ..market_hours import KST
 from ..models import EtfPairSample
-from ..quant.etf_pair_metrics import summarize_distribution
+from ..quant.etf_pair_metrics import PAIR_ETFS, summarize_distribution
 
 router = APIRouter(prefix="/api/etf-pair", tags=["etf-pair"])
 
@@ -36,7 +36,10 @@ async def etf_pair_samples(
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     if date is None:
-        latest = (await session.execute(select(func.max(EtfPairSample.time)))).scalar()
+        latest_stmt = select(func.max(EtfPairSample.time)).where(
+            EtfPairSample.code == code if code else EtfPairSample.code.in_(list(PAIR_ETFS))
+        )
+        latest = (await session.execute(latest_stmt)).scalar()
         if latest is None:
             return {"date": None, "code": code, "rows": [], "summary": {}}
         date = latest.astimezone(KST).date()
@@ -47,8 +50,11 @@ async def etf_pair_samples(
         .where(EtfPairSample.time >= start, EtfPairSample.time < start + dt.timedelta(days=1))
         .order_by(EtfPairSample.time, EtfPairSample.code)
     )
+    # 기본은 현재 쌍(PAIR_ETFS)만. 옛 코드(0193T0 등)는 code 명시 시에만 조회된다.
     if code:
         stmt = stmt.where(EtfPairSample.code == code)
+    else:
+        stmt = stmt.where(EtfPairSample.code.in_(list(PAIR_ETFS)))
     samples = (await session.execute(stmt)).scalars().all()
 
     rows = [

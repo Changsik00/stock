@@ -1,12 +1,12 @@
-"""단일종목 레버리지/인버스 ETF 쌍의 괴리 지표 순수 계산 (PLAN.md §5.88-1).
+"""코스닥150 레버리지/인버스 ETF 쌍의 괴리 지표 순수 계산 (PLAN.md §5.88-1).
 
-**관찰 전용** — 여기서 나오는 값은 "ETF 가격이 NAV·본주 이론가 대비 어디에
+**관찰 전용** — 여기서 나오는 값은 "ETF 가격이 NAV·기초지수 이론가 대비 어디에
 있는지"를 숫자로 적어 둔 것일 뿐 매매 신호가 아니다(§5 house rule: 관찰
 데이터만 제공, 판단은 사용자 몫). 추후 진입 필터로 쓸 만한지는 분포가 쌓인 뒤
 사용자가 판단한다.
 
 - **괴리율(premium_pct)** = (현재가 - NAV) / NAV * 100.
-- **이론가(theory_price)** = 전일 기준가 * (1 + 배수 * 본주 등락률/100). 일일
+- **이론가(theory_price)** = 전일 기준가 * (1 + 배수 * 기초지수 등락률/100). 일일
   리밸런싱형 2X 상품의 "오늘 하루" 근사치다(복리·수수료·괴리 무시).
 - **시차(lag_pct)** = (현재가 - 이론가) / 이론가 * 100. 양수면 이론가보다 비싸게,
   음수면 싸게 거래 중이라는 산술적 사실만 의미한다.
@@ -22,8 +22,9 @@ import math
 
 # 한 곳에서만 정의하는 대상 상수 — collectors/etf_pair_sampler.py와
 # routers/etf_pair.py가 공유한다.
-UNDERLYING_CODE = "000660"  # SK하이닉스(multiple=1 기준 본주)
-PAIR_ETFS: dict[str, int] = {"0193T0": 2, "0197X0": -2}  # 레버리지 +2X / 인버스 -2X
+UNDERLYING_CODE = "150"  # 키움 업종코드: 코스닥150 지수(기초지수)
+# KODEX 코스닥150레버리지(+2X) / KODEX 코스닥150선물인버스(-1X)
+PAIR_ETFS: dict[str, int] = {"233740": 2, "251340": -1}
 
 
 def _finite(x: float | int | None) -> float | None:
@@ -48,7 +49,7 @@ def compute_premium_pct(price: float | None, nav: float | None) -> float | None:
 def compute_theory_price(
     base_price: float | None, multiple: float | None, underlying_change_rate: float | None
 ) -> float | None:
-    """본주 등락률(%) 기준 ETF 이론가 = base * (1 + multiple * rate/100)."""
+    """기초지수 등락률(%) 기준 ETF 이론가 = base * (1 + multiple * rate/100)."""
     b, m, r = _finite(base_price), _finite(multiple), _finite(underlying_change_rate)
     if b is None or m is None or r is None or b <= 0:
         return None
