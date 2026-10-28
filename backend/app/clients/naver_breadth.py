@@ -1,49 +1,37 @@
-"""코스피/코스닥 등락 종목수(breadth) — finance.naver.com/sise/sise_index.naver 파싱
+"""코스피/코스닥 등락 종목수(breadth) — m.stock.naver.com 지수 통합 API 파싱
 (PLAN.md §3.5/§4.6 3.6-2).
 
-## 소스 실확정 경과 (2026-07-18)
+## 소스 변경 이력 (2026-09-14) — 기존 소스 404/302로 전면 교체
 
-후보 3개를 실호출로 비교했다:
+기존 채택 소스였던 ``finance.naver.com/sise/sise_index.naver?code=KOSPI``가 이제
+302로 ``https://stock.naver.com/domestic/index/KOSPI/price``(Next.js 클라이언트
+렌더 SPA)로 리다이렉트된다 — 서버 HTML에 더 이상 등락 종목수 `<li>` 블록이 없고
+JS 번들만 온다(``requests``는 기본으로 redirect를 따라가므로 조용히 SPA 셸 HTML을
+반환받아 파싱이 전부 실패, ``missing fields`` 에러로 관측됨. 2026-09-14 실측).
 
-1. **``finance.naver.com/sise/sise_index.naver?code=KOSPI``(PC 시장 페이지) — 채택.**
-   서버렌더 HTML(EUC-KR, ``requests``가 Content-Type 헤더로 자동 디코딩 — naver_rank.py와
-   동일 패턴, 수동 인코딩 불필요) 안에 접근성용 ``<span class="blind">`` 라벨이 그대로
-   박혀 있어 정규식 하나로 5개 값을 전부 뽑는다::
+대체 소스 실확정: 그 SPA가 그리는 화면 자체가 쓰는 API인
+``https://m.stock.naver.com/api/index/{KOSPI|KOSDAQ}/integration``(모바일 지수
+상세, 인증/키 불필요, naver_rank.py의 stock/{code}/integration과 동일 계열)의
+응답에 ``upDownStockInfo`` 객체로 다섯 값이 그대로 있다::
 
-       <li class="lst"><span class="blind">상한종목수</span><a href="/sise/sise_upper.naver"><span>6</span></a></li>
-       <li class="lst2"><span class="blind">상승종목수</span><a href="/sise/sise_rise.naver"><span>384</span></a></li>
-       <li class="lst3"><span class="blind">보합종목수</span><a href="/sise/sise_steady.naver"><span>40</span></a></li>
-       <li class="lst4"><span class="blind">하락종목수</span><a href="/sise/sise_fall.naver"><span>488</span></a></li>
-       <li class="lst5"><span class="blind">하한종목수</span><a href="/sise/sise_lower.naver"><span>0</span></a></li>
+    {"upperCount": "0", "riseCount": "179", "steadyCount": "47",
+     "fallCount": "686", "lowerCount": "0"}
 
-   실측값(2026-07-18 장중, code=KOSPI): 상한 6 / 상승 384 / 보합 40 / 하락 488 / 하한 0
-   → 합계 918 (코스피 상장종목수 범위와 합치). code=KOSDAQ: 상한 11 / 상승 501 /
-   보합 56 / 하락 1182 / 하한 1 → 합계 1751. 이 페이지는 장중에는 실시간 갱신되는
-   현재가 페이지이고, 장마감 후에는 그 날의 확정 등락 수를 그대로 보여주므로
-   **일별 확정치 수집과 장중 온디맨드 조회 양쪽에 동일 소스로 쓸 수 있다.**
-   - **과거 날짜 조회 불가 확정**: ``date=YYYYMMDD`` 쿼리를 붙여봐도 무시되고
-     항상 "지금" 값만 온다(sise_deal_rank_iframe.naver와 같은 제약, naver_rank.py
-     참고) — 이 소스로는 backfill이 불가능하다(오늘 것만 매일 쌓아야 함).
+실측값(2026-09-14 장중, KOSPI): 상한 0 / 상승 179 / 보합 47 / 하락 686 / 하한 0.
+KOSDAQ도 동일 키로 확인됨. 이 API 역시 "지금" 값만 주고 날짜 쿼리를 지원하지
+않는다(구 소스와 동일한 제약 — scripts/backfill_breadth.py 참고, 과거 소급 불가).
 
-2. ``m.stock.naver.com/api/index/KOSPI/...`` 계열 — 지수 상세 화면의 모바일 API는
-   현재가/등락률/거래대금 위주고 등락 종목수 필드를 주는 엔드포인트를 찾지 못했다
-   (etfAnalysis류처럼 종목별 API는 있어도 "시장 전체 등락수"에 대응하는 모바일 API가
-   확인되지 않음). 미채택.
+## 이전 소스 정보 (2026-07-18, 폐기됨)
 
-3. ``polling.finance.naver.com`` 실시간 폴링 API — 종목/지수 시세 스트리밍용으로,
-   낱개 지수의 현재가·등락률만 주고 시장 전체 종목수 집계는 제공하지 않는다. 미채택.
-
-결론: 후보 1(PC sise_index.naver)만으로 목적을 완전히 달성해 최후 폴백(전 종목 리스트
-페이징 카운트)은 구현하지 않았다.
+과거에는 sise_index.naver의 서버렌더 HTML 안 접근성용 ``<span class="blind">``
+라벨을 정규식으로 파싱했다. 위 리다이렉트로 더 이상 유효하지 않다.
 """
 
 from __future__ import annotations
 
-import re
-
 import requests
 
-INDEX_URL = "https://finance.naver.com/sise/sise_index.naver"
+INDEX_URL = "https://m.stock.naver.com/api/index/{code}/integration"
 
 MARKET_CODE = {"kospi": "KOSPI", "kosdaq": "KOSDAQ"}
 
@@ -52,24 +40,18 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 
-# 라벨 -> breadth dict 키. 소스 HTML의 다섯 <li> 순서(상한/상승/보합/하락/하한)와
-# 무관하게 라벨 텍스트로 매칭한다(순서가 바뀌어도 안전).
-_FIELD_LABELS = {
-    "상한종목수": "limit_up",
-    "상승종목수": "adv",
-    "보합종목수": "flat",
-    "하락종목수": "dec",
-    "하한종목수": "limit_down",
-}
-
-_ROW_RE = {
-    label: re.compile(re.escape(label) + r"</span><a[^>]*><span>([\d,]+)</span>")
-    for label in _FIELD_LABELS
+# upDownStockInfo의 키 -> breadth dict 키.
+_COUNT_FIELDS = {
+    "upperCount": "limit_up",
+    "riseCount": "adv",
+    "steadyCount": "flat",
+    "fallCount": "dec",
+    "lowerCount": "limit_down",
 }
 
 
 class NaverBreadthError(Exception):
-    """Raised when the sise_index.naver response is missing one or more count fields."""
+    """Raised when the integration API response is missing one or more count fields."""
 
 
 def fetch_breadth(market: str, timeout: int = 15) -> dict:
@@ -86,26 +68,33 @@ def fetch_breadth(market: str, timeout: int = 15) -> dict:
         raise ValueError(f"unknown market {market!r}, expected one of {sorted(MARKET_CODE)}")
 
     resp = requests.get(
-        INDEX_URL,
-        params={"code": code},
+        INDEX_URL.format(code=code),
         headers={"User-Agent": USER_AGENT},
         timeout=timeout,
     )
     resp.raise_for_status()
-    text = resp.text
+
+    try:
+        data = resp.json()
+    except ValueError as e:
+        raise NaverBreadthError(
+            f"non-JSON response for market={market}: {e}; response head: {resp.text[:200]!r}"
+        ) from e
+
+    up_down = data.get("upDownStockInfo") or {}
 
     result: dict[str, int] = {}
     missing: list[str] = []
-    for label, key in _FIELD_LABELS.items():
-        m = _ROW_RE[label].search(text)
-        if m is None:
-            missing.append(label)
+    for src_key, out_key in _COUNT_FIELDS.items():
+        raw = up_down.get(src_key)
+        if raw is None:
+            missing.append(src_key)
             continue
-        result[key] = int(m.group(1).replace(",", ""))
+        result[out_key] = int(str(raw).replace(",", ""))
 
     if missing:
         raise NaverBreadthError(
-            f"missing fields {missing} for market={market}; response head: {text[:200]!r}"
+            f"missing fields {missing} for market={market}; response head: {resp.text[:200]!r}"
         )
 
     return result

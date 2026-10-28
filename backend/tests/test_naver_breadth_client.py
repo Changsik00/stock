@@ -1,9 +1,12 @@
-"""Unit tests for app.clients.naver_breadth (sise_index.naver 등락 종목수 파싱).
+"""Unit tests for app.clients.naver_breadth (m.stock.naver.com integration API
+등락 종목수 파싱).
 
-No real network involved. The fixture HTML fragment below reproduces the relevant
-<li> block from the actual finance.naver.com/sise/sise_index.naver?code=KOSPI
-response captured on 2026-07-18 (PLAN.md §3.5/§4.6 3.6-2) — trimmed to just the
-등락 종목수 list, since that's all this client parses.
+No real network involved. The fixtures below reproduce the relevant
+``upDownStockInfo`` shape from the actual
+m.stock.naver.com/api/index/{KOSPI,KOSDAQ}/integration response captured on
+2026-09-14 (PLAN.md §3.5/§4.6 3.6-2, 소스 교체 — 구 sise_index.naver는 302로
+stock.naver.com SPA로 리다이렉트되어 폐기됨) — trimmed to just the count fields,
+since that's all this client parses.
 """
 
 from __future__ import annotations
@@ -13,33 +16,30 @@ import requests
 
 from app.clients import naver_breadth
 
-KOSPI_FRAGMENT = """
-<div class="subtop_sise_graph2">
-    <ul>
-    <li class="lst"><span class="blind">상한종목수</span><a href="/sise/sise_upper.naver"><span>6</span></a></li>
-    <li class="lst2"><span class="blind">상승종목수</span><a href="/sise/sise_rise.naver"><span>384</span></a></li>
-    <li class="lst3"><span class="blind">보합종목수</span><a href="/sise/sise_steady.naver"><span>40</span></a></li>
-    <li class="lst4"><span class="blind">하락종목수</span><a href="/sise/sise_fall.naver"><span>488</span></a></li>
-    <li class="lst5"><span class="blind">하한종목수</span><a href="/sise/sise_lower.naver"><span>0</span></a></li>
-    </ul>
-</div>
-"""
+KOSPI_INTEGRATION = {
+    "upDownStockInfo": {
+        "upperCount": "6",
+        "riseCount": "384",
+        "steadyCount": "40",
+        "fallCount": "488",
+        "lowerCount": "0",
+    }
+}
 
-KOSDAQ_FRAGMENT = """
-<div class="subtop_sise_graph2">
-    <ul>
-    <li class="lst"><span class="blind">상한종목수</span><a href="/sise/sise_upper.naver"><span>11</span></a></li>
-    <li class="lst2"><span class="blind">상승종목수</span><a href="/sise/sise_rise.naver"><span>501</span></a></li>
-    <li class="lst3"><span class="blind">보합종목수</span><a href="/sise/sise_steady.naver"><span>56</span></a></li>
-    <li class="lst4"><span class="blind">하락종목수</span><a href="/sise/sise_fall.naver"><span>1,182</span></a></li>
-    <li class="lst5"><span class="blind">하한종목수</span><a href="/sise/sise_lower.naver"><span>1</span></a></li>
-    </ul>
-</div>
-"""
+KOSDAQ_INTEGRATION = {
+    "upDownStockInfo": {
+        "upperCount": "11",
+        "riseCount": "501",
+        "steadyCount": "56",
+        "fallCount": "1,182",
+        "lowerCount": "1",
+    }
+}
 
 
 class _FakeResponse:
-    def __init__(self, text: str, status_code: int = 200):
+    def __init__(self, data=None, text: str = "", status_code: int = 200):
+        self._data = data
         self.text = text
         self.status_code = status_code
 
@@ -47,30 +47,33 @@ class _FakeResponse:
         if self.status_code >= 400:
             raise requests.HTTPError(f"status {self.status_code}")
 
+    def json(self):
+        if self._data is None:
+            raise ValueError("no JSON object could be decoded")
+        return self._data
+
 
 def test_fetch_breadth_parses_kospi_fields(monkeypatch):
     captured = {}
 
-    def fake_get(url, params=None, headers=None, timeout=None):
+    def fake_get(url, headers=None, timeout=None):
         captured["url"] = url
-        captured["params"] = params
         captured["headers"] = headers
-        return _FakeResponse(KOSPI_FRAGMENT)
+        return _FakeResponse(KOSPI_INTEGRATION)
 
     monkeypatch.setattr(naver_breadth.requests, "get", fake_get)
 
     result = naver_breadth.fetch_breadth("kospi")
 
-    assert captured["url"] == naver_breadth.INDEX_URL
-    assert captured["params"] == {"code": "KOSPI"}
+    assert captured["url"] == naver_breadth.INDEX_URL.format(code="KOSPI")
     assert captured["headers"]["User-Agent"]
     assert result == {"adv": 384, "dec": 488, "flat": 40, "limit_up": 6, "limit_down": 0}
 
 
 def test_fetch_breadth_parses_kosdaq_and_strips_commas(monkeypatch):
-    def fake_get(url, params=None, headers=None, timeout=None):
-        assert params == {"code": "KOSDAQ"}
-        return _FakeResponse(KOSDAQ_FRAGMENT)
+    def fake_get(url, headers=None, timeout=None):
+        assert url == naver_breadth.INDEX_URL.format(code="KOSDAQ")
+        return _FakeResponse(KOSDAQ_INTEGRATION)
 
     monkeypatch.setattr(naver_breadth.requests, "get", fake_get)
 
@@ -96,8 +99,22 @@ def test_fetch_breadth_rejects_unknown_market():
 
 
 def test_fetch_breadth_raises_on_missing_fields(monkeypatch):
-    def fake_get(url, params=None, headers=None, timeout=None):
-        return _FakeResponse("<div>상승종목수</div>")  # no <a><span>N</span></a> match
+    def fake_get(url, headers=None, timeout=None):
+        return _FakeResponse({"upDownStockInfo": {"riseCount": "179"}})
+
+    monkeypatch.setattr(naver_breadth.requests, "get", fake_get)
+
+    with pytest.raises(naver_breadth.NaverBreadthError):
+        naver_breadth.fetch_breadth("kospi")
+
+
+def test_fetch_breadth_raises_on_non_json_response(monkeypatch):
+    """구 소스가 302로 리다이렉트되던 SPA HTML 셸을 그대로 받는 경우처럼, JSON이
+    아닌 응답을 받으면 NaverBreadthError로 명확히 실패해야 한다(2026-09-14 실사고
+    재발 방지)."""
+
+    def fake_get(url, headers=None, timeout=None):
+        return _FakeResponse(data=None, text="<!DOCTYPE html><html>...")
 
     monkeypatch.setattr(naver_breadth.requests, "get", fake_get)
 
