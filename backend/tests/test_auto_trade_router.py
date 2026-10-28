@@ -211,6 +211,22 @@ async def test_get_state_default_is_disabled_idle():
     assert body["status"] == "idle"
     assert body["code"] == "0167A0"
     assert body["current_price"] is None
+    assert body["target"] == {
+        "code": "0167A0",
+        "name": "SOL AI반도체TOP2플러스",
+        "qty": 1,
+        "db_code": body["code"],
+    }
+    assert body["observing"] == [
+        {"code": "233740", "name": "KODEX 코스닥150레버리지", "multiple": 2},
+        {"code": "251340", "name": "KODEX 코스닥150선물인버스", "multiple": -1},
+    ]
+
+
+def test_pair_etf_names_keys_match_pair_etfs():
+    from app.quant.etf_pair_metrics import PAIR_ETF_NAMES, PAIR_ETFS
+
+    assert set(PAIR_ETF_NAMES) == set(PAIR_ETFS)
 
 
 async def test_get_state_holding_includes_unrealized_pnl(monkeypatch):

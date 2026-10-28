@@ -76,6 +76,7 @@ from typing import Any, Literal
 
 TARGET_CODE = "0167A0"  # SOL AI반도체TOP2플러스 — 자동매매 대상 종목 고정
 TARGET_QTY = 1  # 1주 고정
+TARGET_NAME = "SOL AI반도체TOP2플러스"  # TARGET_CODE의 표시용 이름
 
 STOP_LOSS_PCT = -1.5  # 진입가 대비 -1.5% 이하 -> 즉시 손절 (상태 무관)
 TRAIL_ACTIVATE_PCT = 1.0  # 진입가 대비 +1% 이상 -> holding에서 trailing으로 전환

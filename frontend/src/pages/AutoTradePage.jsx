@@ -9,12 +9,6 @@ import {
   toggleAutoTrade,
 } from '../api'
 
-// 대상 종목(PLAN.md §5.54, 사용자 확정 — quant/auto_trade_rules.py의
-// TARGET_CODE와 동일한 값). 이 페이지의 "전략 규칙 요약" 절에서만 쓰는 표시용
-// 상수라 앱 전체 공유 constants.js에는 넣지 않는다.
-const TARGET_CODE = '0167A0'
-const TARGET_NAME = 'SOL AI반도체TOP2플러스'
-
 const numFmt = new Intl.NumberFormat('ko-KR')
 
 function rateClass(rate) {
@@ -70,8 +64,11 @@ const EVENT_TYPE_LABEL = {
 // 이 페이지가 보여주는 값들은 전부 PLAN.md §5.54/§5.55에서 사용자가 직접 확정한
 // 규칙 그대로다 — "이 조합이 좋다"는 판단 문구가 아니라 지금 설정된 규칙 자체를
 // 고정 텍스트로 서술한다(house rule §5).
-const STRATEGY_RULES = [
-  { label: '대상 종목', value: `${TARGET_NAME} (${TARGET_CODE}) 고정 · 1주` },
+const buildStrategyRules = (target) => [
+  {
+    label: '대상 종목',
+    value: target ? `${target.name} (${target.code}) 고정 · ${target.qty}주` : '-',
+  },
   { label: '진입 조건', value: 'ma_cross.state == "golden" AND volume_spike.is_spike == true' },
   {
     label: '청산(트레일링 스탑)',
@@ -96,6 +93,47 @@ const STRATEGY_RULES = [
     value: '진입 시점 외인 현물 누적 순매수 부호가 반전되면(매수→매도 등) 가격 조건과 무관하게 조기 청산',
   },
 ]
+
+// 현재 자동매매 대상 + 관찰만 하는 쌍(주문 없음) 배너. 값은 전부 /state 응답에서 읽는다.
+function TargetBanner({ state }) {
+  const target = state?.target
+  const status = state?.status || 'idle'
+  const holding = status === 'holding' || status === 'trailing'
+  const observing = state?.observing || []
+  const multLabel = (m) => (m > 0 ? `롱 +${m}X` : `숏 ${m}X`)
+  return (
+    <section
+      style={{
+        border: '2px solid var(--accent, var(--border, #333))',
+        borderRadius: 12,
+        padding: 16,
+        marginBottom: 16,
+      }}
+    >
+      <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4 }}>자동매매 대상</div>
+      <div style={{ fontSize: 22, fontWeight: 700 }}>
+        {target ? `현재 대상: ${target.name} (${target.code}) · ${target.qty}주` : '현재 대상: -'}
+      </div>
+      {state && (
+        <div style={{ fontSize: 14, marginTop: 4, color: 'var(--text-muted)' }}>
+          {holding ? `보유 중 (${status})` : '대기 중 (idle)'}
+        </div>
+      )}
+      {target && target.db_code && target.db_code !== target.code && (
+        <div style={{ fontSize: 13, marginTop: 4, color: 'var(--down, #256abf)' }}>
+          주의: DB 상태 행의 종목코드({target.db_code})가 엔진 대상({target.code})과 다릅니다.
+        </div>
+      )}
+      {observing.length > 0 && (
+        <div style={{ fontSize: 12, marginTop: 8, color: 'var(--text-muted)' }}>
+          관찰 중(주문 없음):{' '}
+          {observing.map((o) => `${o.name} (${o.code}) ${multLabel(o.multiple)}`).join(' · ')}
+          {' — '}관찰만 하며 자동으로 주문하지 않습니다.
+        </div>
+      )}
+    </section>
+  )
+}
 
 function KillSwitch({ state, onToggle, busy }) {
   const enabled = !!state?.enabled
@@ -352,7 +390,8 @@ function SyncButton({ onSync, busy, result, error }) {
   )
 }
 
-function StrategyPanel() {
+function StrategyPanel({ target }) {
+  const rules = buildStrategyRules(target)
   return (
     <section style={{ border: '1px solid var(--border, #333)', borderRadius: 12, padding: 16, marginBottom: 16 }}>
       <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 8 }}>
@@ -361,7 +400,7 @@ function StrategyPanel() {
       </div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
         <tbody>
-          {STRATEGY_RULES.map((r) => (
+          {rules.map((r) => (
             <tr key={r.label}>
               <td
                 style={{
@@ -741,6 +780,7 @@ export default function AutoTradePage() {
       {manualBuyError && <div className="state">수동 매수 실패: {manualBuyError}</div>}
       {manualSellError && <div className="state">수동 매도 실패: {manualSellError}</div>}
 
+      <TargetBanner state={state} />
       <KillSwitch state={state} onToggle={handleToggle} busy={toggleBusy} />
       <StatusPanel state={state} />
       <ManualTradeButtons
@@ -751,7 +791,7 @@ export default function AutoTradePage() {
         sellBusy={manualSellBusy}
       />
       <SyncButton onSync={handleSync} busy={syncBusy} result={syncResult} error={syncError} />
-      <StrategyPanel />
+      <StrategyPanel target={state?.target} />
       <PerformancePanel data={perfData} loading={perfLoading} error={perfError} />
       <LogPanel
         rows={logRows}

@@ -53,7 +53,8 @@ from ..quant.auto_trade_performance import (
     EXIT_EVENT_TYPES,
     summarize_by_entry_source,
 )
-from ..quant.auto_trade_rules import check_entry_budget, foreign_flow_sign
+from ..quant.auto_trade_rules import TARGET_NAME, check_entry_budget, foreign_flow_sign
+from ..quant.etf_pair_metrics import PAIR_ETF_NAMES, PAIR_ETFS
 from .stocks import _warm_stock_intraday
 
 router = APIRouter(prefix="/api/auto-trade", tags=["auto-trade"])
@@ -88,6 +89,19 @@ def _serialize_state(row: AutoTradeState, current_price: float | None) -> dict:
         "unrealized_pnl": unrealized_pnl,
         "unrealized_pnl_pct": unrealized_pnl_pct,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        # 엔진이 실제로 매매하는 대상(엔진 상수). DB 행 code와 다르면 db_code로
+        # 그대로 노출해 불일치를 숨기지 않는다.
+        "target": {
+            "code": TARGET_CODE,
+            "name": TARGET_NAME,
+            "qty": TARGET_QTY,
+            "db_code": row.code,
+        },
+        # 관찰만 하는(주문 안 나감) 쌍 ETF.
+        "observing": [
+            {"code": c, "name": PAIR_ETF_NAMES.get(c, c), "multiple": m}
+            for c, m in PAIR_ETFS.items()
+        ],
     }
 
 

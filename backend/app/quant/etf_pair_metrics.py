@@ -26,6 +26,12 @@ UNDERLYING_CODE = "150"  # 키움 업종코드: 코스닥150 지수(기초지수
 # KODEX 코스닥150레버리지(+2X) / KODEX 코스닥150선물인버스(-1X)
 PAIR_ETFS: dict[str, int] = {"233740": 2, "251340": -1}
 
+# 표시용 이름 (키 집합은 PAIR_ETFS와 동일해야 함 — 테스트로 검증)
+PAIR_ETF_NAMES: dict[str, str] = {
+    "233740": "KODEX 코스닥150레버리지",
+    "251340": "KODEX 코스닥150선물인버스",
+}
+
 
 def _finite(x: float | int | None) -> float | None:
     """None/NaN/inf를 걸러 float로 정규화한다."""
