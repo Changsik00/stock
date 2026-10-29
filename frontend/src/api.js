@@ -622,6 +622,28 @@ export async function manualBuyAutoTrade() {
   return postJson('/api/auto-trade/manual-buy', {})
 }
 
+// 수동 매수 종목 후보 (PLAN.md §5.89-1). GET -> { recommended: [...], manual: [...] }.
+export async function getTradeCandidates() {
+  return getJson('/api/trade-candidates/')
+}
+
+// POST -> 추가된 후보. 중복(409)/코드 형식·종목명 조회 실패(400) 시 서버 detail이 Error.message로 throw된다.
+export async function addTradeCandidate(code, multiple = 1, name) {
+  return postJson('/api/trade-candidates/', { code, multiple, ...(name ? { name } : {}) })
+}
+
+// DELETE /api/trade-candidates/{id} (manual만 삭제 가능)
+export async function deleteTradeCandidate(id) {
+  const res = await fetch(`/api/trade-candidates/${id}`, { method: 'DELETE' })
+  const text = await res.text()
+  const parsed = text ? JSON.parse(text) : null
+  if (!res.ok) {
+    const detail = typeof parsed?.detail === 'string' ? parsed.detail : JSON.stringify(parsed?.detail)
+    throw new Error(detail || `요청 실패 (${res.status})`)
+  }
+  return parsed
+}
+
 // POST /api/auto-trade/manual-sell -> 갱신된 state(GET /state와 동일 모양).
 // 매도는 킬스위치 상태와 무관하게 항상 허용된다(서버가 보장) — 이 함수도
 // 그냥 호출만 한다.

@@ -1,8 +1,11 @@
 import { useEffect, useState } from 'react'
 import {
+  addTradeCandidate,
+  deleteTradeCandidate,
   fetchAutoTradeLog,
   fetchAutoTradePerformance,
   fetchAutoTradeState,
+  getTradeCandidates,
   manualBuyAutoTrade,
   manualSellAutoTrade,
   syncAutoTradeState,
@@ -260,6 +263,129 @@ function StatusPanel({ state }) {
             </div>
           </div>
         </div>
+      )}
+    </section>
+  )
+}
+
+function multipleBadge(multiple) {
+  // 한국 관행: 레버리지(상승 베팅)=빨강, 인버스(하락 베팅)=파랑
+  if (multiple > 1) return { label: `레버리지${multiple}X`, color: 'var(--up, #d03b3b)' }
+  if (multiple < 0) return { label: '인버스', color: 'var(--down, #3b6fd0)' }
+  return { label: '1배', color: 'var(--text-muted)' }
+}
+
+function MultipleBadge({ multiple }) {
+  const b = multipleBadge(multiple)
+  return (
+    <span
+      style={{
+        fontSize: 12,
+        fontWeight: 700,
+        color: b.color,
+        border: `1px solid ${b.color}`,
+        borderRadius: 6,
+        padding: '1px 6px',
+      }}
+    >
+      {b.label}
+    </span>
+  )
+}
+
+// 수동 매수 종목 후보 관리 (PLAN.md §5.89-1) — 추천(읽기전용) / 후보(사용자 고정, 추가·삭제).
+function CandidatePanel() {
+  const [data, setData] = useState({ recommended: [], manual: [] })
+  const [error, setError] = useState(null)
+  const [code, setCode] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const load = async () => {
+    try {
+      setData(await getTradeCandidates())
+      setError(null)
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  useEffect(() => {
+    load()
+  }, [])
+
+  const handleAdd = async (e) => {
+    e.preventDefault()
+    const c = code.trim().toUpperCase()
+    if (!c) return
+    setBusy(true)
+    try {
+      await addTradeCandidate(c)
+      setCode('')
+      await load()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleDelete = async (id) => {
+    try {
+      await deleteTradeCandidate(id)
+      await load()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  const rowStyle = { display: 'flex', gap: 8, alignItems: 'center', padding: '4px 0', flexWrap: 'wrap' }
+
+  return (
+    <section style={{ border: '1px solid var(--border, #333)', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      {error && <div className="state">후보 처리 실패: {error}</div>}
+      <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4 }}>추천 종목 (시스템 시나리오, 읽기 전용)</div>
+      {data.recommended.length === 0 ? (
+        <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 12 }}>오늘 추천 없음</div>
+      ) : (
+        <div style={{ marginBottom: 12 }}>
+          {data.recommended.map((r) => (
+            <div key={r.id} style={rowStyle}>
+              <strong>{r.name}</strong>
+              <span style={{ color: 'var(--text-muted)' }}>{r.code}</span>
+              <MultipleBadge multiple={r.multiple} />
+              {r.scenario && <span style={{ fontSize: 13 }}>{r.scenario}</span>}
+              {r.reason && <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{r.reason}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4 }}>후보 종목 (직접 관리)</div>
+      <form onSubmit={handleAdd} style={{ ...rowStyle, marginBottom: 4 }}>
+        <input
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+          placeholder="종목코드 (예: 233740)"
+          maxLength={6}
+          style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border, #333)' }}
+        />
+        <button type="submit" disabled={busy || !code.trim()}>
+          {busy ? '추가 중…' : '추가'}
+        </button>
+      </form>
+      {data.manual.length === 0 ? (
+        <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>등록된 후보 없음</div>
+      ) : (
+        data.manual.map((r) => (
+          <div key={r.id} style={rowStyle}>
+            <strong>{r.name}</strong>
+            <span style={{ color: 'var(--text-muted)' }}>{r.code}</span>
+            <MultipleBadge multiple={r.multiple} />
+            <button type="button" onClick={() => handleDelete(r.id)}>
+              삭제
+            </button>
+          </div>
+        ))
       )}
     </section>
   )
@@ -790,6 +916,7 @@ export default function AutoTradePage() {
         buyBusy={manualBuyBusy}
         sellBusy={manualSellBusy}
       />
+      <CandidatePanel />
       <SyncButton onSync={handleSync} busy={syncBusy} result={syncResult} error={syncError} />
       <StrategyPanel target={state?.target} />
       <PerformancePanel data={perfData} loading={perfLoading} error={perfError} />

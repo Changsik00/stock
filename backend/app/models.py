@@ -13,12 +13,14 @@ import datetime as dt
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     Date,
     DateTime,
     ForeignKey,
     Numeric,
     SmallInteger,
     String,
+    Text,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -750,3 +752,27 @@ class AutoTradeLog(Base):
     reason: Mapped[str] = mapped_column(String(1000), nullable=False)  # 사람이 읽는 판단 근거(신호값 포함)
     signal_snapshot: Mapped[str | None] = mapped_column(String(2000))  # ma_cross/volume_spike 등 원본 JSON 문자열
     order_response: Mapped[str | None] = mapped_column(String(2000))  # place_buy_order/place_sell_order 원본 응답 JSON 문자열(실행이 있었을 때만)
+
+
+class TradeCandidate(Base):
+    """수동 매수 종목 후보 (PLAN.md §5.89-1).
+
+    ``source='recommended'``는 시스템 추천(일자별 ``valid_date``), ``'manual'``은
+    사용자가 UI에서 고정한 목록(``valid_date`` NULL). manual의 code 중복은 NULL
+    때문에 DB 유니크로 못 막아 라우터에서 막는다. ``multiple``: 1=1배, 2=레버리지,
+    -1=인버스."""
+
+    __tablename__ = "trade_candidate"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(20), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    multiple: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=1)
+    source: Mapped[str] = mapped_column(String(20), nullable=False)
+    scenario: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    valid_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
