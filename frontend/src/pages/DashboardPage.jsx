@@ -43,6 +43,7 @@ import {
   US_INDEX_SERIES,
 } from '../constants'
 import { formatDate } from '../format'
+import { isNewerDate, shouldUseClosedLiveIndexRow } from '../liveFallback'
 import {
   BREADTH_LIVE_POLL_MS,
   DEFAULT_CANDLE_DAYS,
@@ -751,15 +752,23 @@ export default function DashboardPage() {
   //   3) 완전 마감(야간·주말): 둘 다 닫힘.
   const nxtAlive = Boolean(attentionTop && attentionTop.market_closed !== true)
   const marketStatus = indexTilesLiveOpen ? 'regular' : nxtAlive ? 'nxt-only' : 'closed'
+  // 마감 후~배치 전: 라이브 row date가 EOD 마지막 봉보다 최신이면 마감 후에도 라이브 값을
+  // 쓴다(isLive는 false — 장중 배지 없음). 실제로 쓰인 row만 baseDate/수급 판정에 반영.
+  const closedLiveIndexRowOf = (key) => {
+    if (indexTilesLiveOpen || STATIC_DATA) return null
+    const row = indexTilesLive?.[key]
+    return row && shouldUseClosedLiveIndexRow(row, latestPriceOf(key)) ? row : null
+  }
   const indexTileOf = (key) => {
-    const row = indexTilesLiveOpen ? indexTilesLive?.[key] : null
+    const openRow = indexTilesLiveOpen ? indexTilesLive?.[key] : null
+    const row = openRow || closedLiveIndexRowOf(key)
     if (row) {
       return {
         close: row.close,
         changeRate: row.change_rate,
         date: row.date,
         time: row.time,
-        isLive: true,
+        isLive: Boolean(openRow),
         // §5.24: kospi/kosdaq만 갖는 필드(futures는 이 라우터가 아예 채우지
         // 않음, _index_tile_futures_live는 별도 경로) — 없으면 undefined로
         // 남아 volumeSurgeLabel이 null을 반환하고 아래 렌더가 줄을 생략한다.
@@ -769,6 +778,8 @@ export default function DashboardPage() {
     const fallback = latestPriceOf(key)
     return fallback ? { ...fallback, isLive: false } : null
   }
+  // 마감 후 라이브 지수가 실제로 쓰였는가(=오늘이 거래일이고 EOD가 뒤처진 상태의 증거)
+  const closedLiveIndexUsed = ['kospi', 'kosdaq'].some((k) => closedLiveIndexRowOf(k))
 
   // 등락 종목수 압축 칩 — 코스피+코스닥 합계 (BreadthBadge.splitTotals와 동일 규칙:
   // 상승 = adv+limitUp, 하락 = dec+limitDown).
@@ -887,6 +898,25 @@ export default function DashboardPage() {
     return out
   })()
 
+  // 마감 후~배치 전 수급: flowLive가 market_closed:true로 오늘 합산치를 주지만 휴장일에도
+  // "오늘 날짜"가 오는 퀴크가 있어 flowLive.date만으로는 판정 불가 — 마감 후 라이브 지수가
+  // 실제로 쓰인 날(closedLiveIndexUsed, 거래일 증거)에만, 그리고 flow 라이브 date가 EOD
+  // 수급 date보다 최신일 때만 쓴다. 장중 배지는 없고 "확정" 라벨 + 값만 라이브.
+  const flowClosedLiveSummary = (() => {
+    if (STATIC_DATA || flowLiveActive || !closedLiveIndexUsed || flowLive?.market_closed !== true) return null
+    const liveDate = flowLive.kospi?.date
+    if (!liveDate || flowLive.kosdaq?.date !== liveDate) return null
+    if (!isNewerDate(liveDate, latestOf(...DEFAULT_INVESTORS.map((n) => flowInvestorSummary?.[n]?.date)))) return null
+    const out = {}
+    for (const name of DEFAULT_INVESTORS) {
+      const k = flowLive.kospi?.investors?.[name]?.net_value
+      const q = flowLive.kosdaq?.investors?.[name]?.net_value
+      if (k === undefined && q === undefined) continue
+      out[name] = (k ?? 0) + (q ?? 0)
+    }
+    return { values: out, date: liveDate }
+  })()
+
   // 외인 양손 · 현선물 섹션(PLAN.md §4.5-5) — 현물은 위에서 이미 계산한
   // flowInvestorSummary/flowLiveSummary의 '외국인' 값을 그대로 재사용하고(중복 fetch
   // 없음), 선물은 marketData.futures(지수 3종 fetch가 이미 flows까지 받아온다)의
@@ -991,7 +1021,7 @@ export default function DashboardPage() {
     // indexTilesLive.date도 flowLive와 동일한 이유로 장중(market_closed===false)일
     // 때만 섞는다 — 장 마감 후 market_closed:true로 오늘 날짜가 오면 baseDate가
     // 실제 마지막 거래일보다 앞으로 부풀어 다른 타일에 잘못된 StaleDate가 붙는다.
-    ...MARKETS.map((m) => (indexTilesLiveOpen ? indexTilesLive?.[m.key]?.date : null)),
+    ...MARKETS.map((m) => (indexTilesLiveOpen ? indexTilesLive?.[m.key]?.date : closedLiveIndexRowOf(m.key)?.date)),
     etfComponent?.date,
     ...investorDates,
     flowLiveOpen ? flowLive?.kospi?.date : null,
@@ -1234,7 +1264,11 @@ export default function DashboardPage() {
         {DEFAULT_INVESTORS.map((name) => {
           const liveValue = flowLiveSummary?.[name]
           const isLive = liveValue !== undefined
-          const row = flowInvestorSummary?.[name]
+          const closedLiveValue = flowClosedLiveSummary?.values?.[name]
+          const row =
+            !isLive && closedLiveValue !== undefined
+              ? { net_value: closedLiveValue, date: flowClosedLiveSummary.date }
+              : flowInvestorSummary?.[name]
           const value = isLive ? liveValue : row?.net_value
           const hasValue = value !== undefined && value !== null
           return (
