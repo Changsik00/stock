@@ -75,6 +75,25 @@ average_cross`/`volume_spike`의 기본 5/20 윈도우가 일봉 버전에선 "5
   `daily_giveback_pct`가 더 타이트한 만큼 이 조건이 먼저 충족돼 `ratchet`
   보다 빠르거나 같게 청산된다** — 완전히 동일하게 동작하지는 않는다(이
   모듈 위쪽 "처음 설계는 틀렸었다" 절 참고, 첫 시도와의 핵심 차이).
+
+## trail_mode 확장 3종 — 이익 규모/시간을 반영한 반납 허용폭 (비교 실험용)
+
+고점 대비 고정 0.5%(`ratchet`)는 이익 규모(+1%에서 0.5%p=50% 반납, +3%에서는
+17%)와 시간(급락 vs 완만한 눌림, 단기 휩쏘 후 회복)을 무시한다는 지적에 따라
+추가한 비교용 모드다. 라이브 규칙은 여전히 `ratchet`이며 이 값들은 잠정값.
+
+- ``profit_ratio``: 허용 반납폭 ``allow = max(min_giveback_pct, 최대이익% *
+  giveback_ratio)``(고점 대비 %). 고점 대비 하락률 >= allow면 즉시 청산.
+- ``profit_grace``: 같은 ``allow``를 소프트 라인으로 보고, 연속 ``grace_bars``개
+  봉 종가가 소프트 라인 이하일 때만 청산(회복하면 카운터 리셋). 하락률이
+  ``allow * hard_multiplier`` 이상이면 유예 무시하고 즉시 청산.
+- ``profit_grace_vol``: ``profit_grace`` + 유예 중 해당 봉 거래량이 직전 20봉
+  평균의 ``vol_confirm_mult``배 이상이면 "진짜 매도"로 보고 즉시 청산.
+
+유예 카운터는 진입/청산/손절 시 리셋된다. 손절(-1.5%)은 항상 최우선(유예 없음).
+
+참고: 이 백테스트의 봉에는 high/low가 없고 close뿐이라 "1분봉 종가 기준 판정"이
+이미 기본 동작이다.
 """
 
 from __future__ import annotations
@@ -98,7 +117,12 @@ from ..quant.auto_trade_rules import (
 )
 from ..quant.signals import Bar, moving_average_cross, volume_spike
 
-TrailMode = Literal["fixed_floor", "ratchet", "daily_reset"]
+TrailMode = Literal[
+    "fixed_floor", "ratchet", "daily_reset", "profit_ratio", "profit_grace", "profit_grace_vol"
+]
+_VALID_TRAIL_MODES = (
+    "fixed_floor", "ratchet", "daily_reset", "profit_ratio", "profit_grace", "profit_grace_vol"
+)
 
 # daily_reset 전용 — 오늘 자체 고점 기준 반납 조건의 임계값. ratchet_giveback_pct
 # (0.5%)보다 타이트해야 한다 — 안 그러면 이 조건은 절대 ratchet 조건보다 먼저
@@ -106,12 +130,25 @@ TrailMode = Literal["fixed_floor", "ratchet", "daily_reset"]
 # 데이터로 보정된 값이 아닌 잠정 기본값.
 DAILY_GIVEBACK_PCT_DEFAULT = 0.3
 
+# profit_ratio/profit_grace/profit_grace_vol 전용 잠정 기본값(실데이터 보정 전).
+MIN_GIVEBACK_PCT_DEFAULT = 0.3
+GIVEBACK_RATIO_DEFAULT = 0.35
+GRACE_BARS_DEFAULT = 3
+HARD_MULTIPLIER_DEFAULT = 1.75
+VOL_CONFIRM_MULT_DEFAULT = 2.0
+VOL_AVG_WINDOW = 20
+
 
 def run_intraday_backtest(
     bars: list[Bar],
     trail_mode: TrailMode = "fixed_floor",
     ratchet_giveback_pct: float = RATCHET_GIVEBACK_PCT_DEFAULT,
     daily_giveback_pct: float = DAILY_GIVEBACK_PCT_DEFAULT,
+    min_giveback_pct: float = MIN_GIVEBACK_PCT_DEFAULT,
+    giveback_ratio: float = GIVEBACK_RATIO_DEFAULT,
+    grace_bars: int = GRACE_BARS_DEFAULT,
+    hard_multiplier: float = HARD_MULTIPLIER_DEFAULT,
+    vol_confirm_mult: float = VOL_CONFIRM_MULT_DEFAULT,
 ) -> dict[str, Any]:
     """1분봉 리스트(오름차순, ``{"date","time","close","volume"}``)에 §5.54
     핵심 규칙을 그대로 시뮬레이션한다. 한 번에 포지션 하나만 허용(라이브와
@@ -121,8 +158,8 @@ def run_intraday_backtest(
     "exit_time","exit_price","exit_reason","pct_return"}, ...], "summary": {...}}``
     (summary 모양은 `auto_trade_backtest._summarize` 참고).
     """
-    if trail_mode not in ("fixed_floor", "ratchet", "daily_reset"):
-        raise ValueError(f"trail_mode must be 'fixed_floor', 'ratchet' or 'daily_reset', got {trail_mode!r}")
+    if trail_mode not in _VALID_TRAIL_MODES:
+        raise ValueError(f"trail_mode must be one of {_VALID_TRAIL_MODES}, got {trail_mode!r}")
 
     trades: list[dict[str, Any]] = []
     status: Literal["idle", "holding", "trailing"] = "idle"
@@ -132,6 +169,7 @@ def run_intraday_backtest(
     peak_price: float | None = None
     daily_peak_price: float | None = None
     prev_date: Any = None
+    grace_count = 0  # 소프트 라인 이하 연속 봉 수(profit_grace*)
 
     for i in range(1, len(bars) + 1):
         window = bars[:i]
@@ -159,6 +197,7 @@ def run_intraday_backtest(
                 entry_time = current_time
                 peak_price = None
                 daily_peak_price = None
+                grace_count = 0
             continue
 
         # 손절은 상태 무관 항상 최우선(라이브·일봉 버전과 동일).
@@ -177,6 +216,7 @@ def run_intraday_backtest(
             )
             status, entry_price, entry_date, entry_time = "idle", None, None, None
             peak_price, daily_peak_price = None, None
+            grace_count = 0
             continue
 
         if status == "holding":
@@ -202,6 +242,23 @@ def run_intraday_backtest(
             ) <= LEGACY_FIXED_FLOOR_PCT
         elif trail_mode == "ratchet":
             should_exit = current_price <= new_peak * (1 - ratchet_giveback_pct / 100)
+        elif trail_mode in ("profit_ratio", "profit_grace", "profit_grace_vol"):
+            max_gain_pct = (new_peak - entry_price) / entry_price * 100
+            drawdown_pct = (new_peak - current_price) / new_peak * 100
+            allow = max(min_giveback_pct, max_gain_pct * giveback_ratio)
+            if trail_mode == "profit_ratio":
+                should_exit = drawdown_pct >= allow
+            elif drawdown_pct < allow:
+                grace_count = 0  # 소프트 라인 위로 회복 -> 리셋
+                should_exit = False
+            else:
+                grace_count += 1
+                should_exit = grace_count >= grace_bars or drawdown_pct >= allow * hard_multiplier
+                if not should_exit and trail_mode == "profit_grace_vol":
+                    prev_vols = [float(b["volume"]) for b in window[-1 - VOL_AVG_WINDOW : -1]]
+                    if prev_vols:
+                        avg_vol = sum(prev_vols) / len(prev_vols)
+                        should_exit = avg_vol > 0 and float(current["volume"]) >= avg_vol * vol_confirm_mult
         else:  # daily_reset — ratchet 조건 OR 오늘 자체 고점 기준 타이트한 조건
             should_exit = current_price <= new_peak * (1 - ratchet_giveback_pct / 100) or (
                 current_price <= daily_peak_price * (1 - daily_giveback_pct / 100)
@@ -222,5 +279,6 @@ def run_intraday_backtest(
             )
             status, entry_price, entry_date, entry_time = "idle", None, None, None
             peak_price, daily_peak_price = None, None
+            grace_count = 0
 
     return {"trades": trades, "summary": _summarize(trades)}

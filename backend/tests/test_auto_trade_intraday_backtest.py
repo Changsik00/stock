@@ -210,3 +210,92 @@ def test_daily_reset_never_worse_than_ratchet_in_overnight_scenario():
     daily_reset_result = run_intraday_backtest(bars, trail_mode="daily_reset")
 
     assert daily_reset_result["trades"][0]["exit_price"] >= ratchet_result["trades"][0]["exit_price"]
+
+
+# ---------------------------------------------------------------------------
+# profit_ratio / profit_grace / profit_grace_vol — 이익 규모·시간 반영 트레일
+# ---------------------------------------------------------------------------
+
+
+def _profit_trail_scenario(peak: float, tail: list[tuple[float, float]]) -> list[dict]:
+    """진입(105) -> +1/분 상승으로 트레일 전환, peak까지 -> tail((종가, 거래량))."""
+    bars = _warmup_bars(24, price=100.0)
+    bars.append(_bar("2026-01-01", "0924", 105.0, 5000.0))  # 진입(entry_price=105)
+    price, idx = 106.0, 25
+    while price <= peak:
+        bars.append(_bar("2026-01-01", _hhmm(9, idx), price, 1000.0))
+        price += 1.0
+        idx += 1
+    for close, vol in tail:
+        bars.append(_bar("2026-01-01", _hhmm(9, idx), close, vol))
+        idx += 1
+    return bars
+
+
+def test_profit_grace_survives_brief_dip_that_ratchet_exits_on():
+    # peak=110: ratchet 선=109.45, profit_grace 소프트 라인=110*(1-1.67%)=108.16
+    # (하드 라인 2.92% -> 106.8). 108.0은 소프트만 닿고 하드엔 안 닿는 1봉 눌림.
+    bars = _profit_trail_scenario(110.0, [(108.0, 1000.0), (110.0, 1000.0), (110.0, 1000.0)])
+
+    ratchet = run_intraday_backtest(bars, trail_mode="ratchet")
+    grace = run_intraday_backtest(bars, trail_mode="profit_grace", grace_bars=3)
+
+    assert len(ratchet["trades"]) == 1
+    assert ratchet["trades"][0]["exit_reason"] == "exit_trail"
+    assert grace["trades"] == []
+
+
+def test_profit_grace_exits_after_consecutive_bars_and_resets_on_recovery():
+    dip = (108.0, 1000.0)
+    up = (110.0, 1000.0)
+    # 2봉 눌림 -> 회복(리셋) -> 2봉 눌림: grace_bars=3이면 한 번도 청산 안 됨
+    bars = _profit_trail_scenario(110.0, [dip, dip, up, dip, dip, up])
+    assert run_intraday_backtest(bars, trail_mode="profit_grace", grace_bars=3)["trades"] == []
+    # 연속 3봉이면 3번째 봉에서 청산
+    bars = _profit_trail_scenario(110.0, [dip, dip, dip])
+    trades = run_intraday_backtest(bars, trail_mode="profit_grace", grace_bars=3)["trades"]
+    assert len(trades) == 1
+    assert trades[0]["exit_price"] == pytest.approx(108.0)
+
+
+def test_profit_grace_hard_line_exits_immediately_without_grace():
+    # 106.5: 하락률 3.18% >= 하드 2.92% -> grace_bars=5여도 첫 봉에서 즉시 청산
+    bars = _profit_trail_scenario(110.0, [(106.5, 1000.0), (106.5, 1000.0)])
+    result = run_intraday_backtest(bars, trail_mode="profit_grace", grace_bars=5)
+    assert len(result["trades"]) == 1
+    assert result["trades"][0]["exit_price"] == pytest.approx(106.5)
+    assert result["trades"][0]["exit_reason"] == "exit_trail"
+
+
+def test_profit_ratio_allowance_grows_with_profit():
+    # 작은 이익(peak=107, +1.9%): allow=max(0.3, 0.667)=0.667% -> 106.2(-0.75%)에서 청산
+    small = _profit_trail_scenario(107.0, [(106.2, 1000.0)])
+    assert len(run_intraday_backtest(small, trail_mode="profit_ratio")["trades"]) == 1
+    # 큰 이익(peak=115, +9.5%): allow=3.33% -> 111.5(-3.04%)는 ratchet만 청산
+    big = _profit_trail_scenario(115.0, [(111.5, 1000.0)])
+    assert run_intraday_backtest(big, trail_mode="profit_ratio")["trades"] == []
+    assert len(run_intraday_backtest(big, trail_mode="ratchet")["trades"]) == 1
+
+
+def test_profit_grace_vol_cancels_grace_on_volume_surge():
+    # 소프트 라인 도달 봉에 거래량 급증(5000 >= 직전 20봉 평균*2) -> 유예 취소, 즉시 청산
+    surge = _profit_trail_scenario(110.0, [(108.0, 5000.0), (110.0, 1000.0)])
+    vol = run_intraday_backtest(surge, trail_mode="profit_grace_vol", grace_bars=3)
+    plain = run_intraday_backtest(surge, trail_mode="profit_grace", grace_bars=3)
+    assert vol["trades"][0]["exit_price"] == pytest.approx(108.0)
+    assert vol["trades"][0]["exit_reason"] == "exit_trail"
+    assert plain["trades"] == []
+    # 거래량 평범하면 profit_grace와 동일하게 유예
+    calm = _profit_trail_scenario(110.0, [(108.0, 1000.0), (110.0, 1000.0)])
+    assert run_intraday_backtest(calm, trail_mode="profit_grace_vol", grace_bars=3)["trades"] == []
+
+
+def test_profit_modes_keep_stop_loss_priority_and_reject_bad_mode():
+    bars = _warmup_bars(24, price=100.0)
+    bars.append(_bar("2026-01-01", "0924", 110.0, 5000.0))
+    bars.append(_bar("2026-01-01", "0925", 108.0, 1000.0))
+    for mode in ("profit_ratio", "profit_grace", "profit_grace_vol"):
+        trades = run_intraday_backtest(bars, trail_mode=mode, grace_bars=5)["trades"]
+        assert trades[0]["exit_reason"] == "stop_loss"
+    with pytest.raises(ValueError):
+        run_intraday_backtest(bars, trail_mode="profit_grace_typo")
