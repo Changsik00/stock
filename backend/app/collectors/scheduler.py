@@ -120,7 +120,9 @@ _scheduler: AsyncIOScheduler | None = None
 # 이 한 잡 때문에 그날 나머지 잡 전부가 밀리기 때문이다(모듈 docstring
 # "2026-08-07 네 번째 cron 추가" 절 참고). 대신 아래 _run_accumulation_
 # screener_job이 전용 20:00 KST 크론에서 이 잡 하나만 run_job으로 실행한다.
-_EXCLUDED_FROM_DAILY_BATCH = {"accumulation_screener"}
+# 2026-11-05 — narrative_proposals(뉴스 수집+LLM 제안, PLAN.md §5.90-2)도 18:00 본배치에서
+# 제외하고 전용 크론(08:30/12:00/16:30 평일)에서만 돌린다.
+_EXCLUDED_FROM_DAILY_BATCH = {"accumulation_screener", "narrative_proposals"}
 
 
 async def _run_all_jobs() -> None:
@@ -213,6 +215,16 @@ async def _run_accumulation_screener_job() -> None:
     await run_job("accumulation_screener", target_date, collect_fn)
 
 
+async def _run_narrative_proposals_job() -> None:
+    """평일 08:30/12:00/16:30 KST — 뉴스 수집 + LLM 내러티브 후보 제안(PLAN.md §5.90-2).
+    "narrative_proposals" 잡 하나만 run_job으로 실행한다(키가 없으면 수집만 하고 끝난다)."""
+    collect_fn = REGISTRY.get("narrative_proposals")
+    if collect_fn is None:
+        logger.warning("narrative_proposals job not found in REGISTRY — skipping")
+        return
+    await run_job("narrative_proposals", dt.date.today(), collect_fn)
+
+
 def start_scheduler() -> AsyncIOScheduler:
     """Create, start, and return the module-level scheduler (idempotent)."""
     global _scheduler
@@ -258,6 +270,15 @@ def start_scheduler() -> AsyncIOScheduler:
         # 중요하다.
         misfire_grace_time=3600,
     )
+    # PLAN.md §5.90-2 — 뉴스 수집 + LLM 내러티브 후보 제안, 평일 하루 3회(KST).
+    for hh, mm in ((8, 30), (12, 0), (16, 30)):
+        scheduler.add_job(
+            _run_narrative_proposals_job,
+            CronTrigger(day_of_week="mon-fri", hour=hh, minute=mm, timezone="Asia/Seoul"),
+            id=f"narrative_proposals_{hh:02d}{mm:02d}",
+            replace_existing=True,
+            misfire_grace_time=3600,
+        )
     scheduler.start()
     _scheduler = scheduler
     logger.info(
@@ -265,7 +286,8 @@ def start_scheduler() -> AsyncIOScheduler:
         "accumulation_screener excluded from this batch) "
         "+ weekday 07:30 Asia/Seoul macro-only catch-up (PLAN.md §5.22) "
         "+ weekday 19:30 Asia/Seoul flow_rank-only catch-up (PLAN.md §5.46) "
-        "+ weekday 20:00 Asia/Seoul accumulation_screener-only run",
+        "+ weekday 20:00 Asia/Seoul accumulation_screener-only run "
+        "+ weekday 08:30/12:00/16:30 Asia/Seoul narrative_proposals-only run (PLAN.md §5.90-2)",
         len(REGISTRY),
         sorted(REGISTRY),
     )

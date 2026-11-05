@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     krx_id: str | None = None
     krx_pw: str | None = None
 
+    # Anthropic API (PLAN.md §5.90-2 내러티브 후보 제안). 키가 없으면 뉴스 수집만 하고
+    # LLM 제안 생성은 건너뛴다(앱은 정상 동작).
+    anthropic_api_key: str | None = None
+    anthropic_model: str = "claude-sonnet-5-5"
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -1745,3 +1745,41 @@ header h1 {
   padding: 16px 18px 20px;
   overflow-y: auto;
 }
+
+/* 시장 내러티브 메모 (PLAN.md §5.90-1) — 상승/순매수=빨강(--up), 하락/순매도=파랑(--down) */
+.narr-toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 10px; }
+.narr-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.narr-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: var(--surface); display: flex; flex-direction: column; gap: 6px; }
+.narr-inactive { opacity: 0.6; }
+.narr-head { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+.narr-title { font-size: 14px; }
+.narr-meta { font-size: 11px; color: var(--text-muted); font-weight: 400; }
+.narr-summary { font-size: 13px; color: var(--text-secondary); white-space: pre-wrap; }
+.narr-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.narr-dir { font-size: 11px; font-weight: 600; }
+.narr-dir-bullish { color: var(--up); }
+.narr-dir-bearish { color: var(--down); }
+.narr-dir-neutral { color: var(--text-secondary); }
+.narr-ev-verdict { font-size: 11px; padding: 1px 6px; border-radius: 8px; border: 1px solid var(--border); margin-left: auto; }
+.narr-aligned { color: var(--text-primary, inherit); border-color: currentColor; }
+.narr-divergent { color: var(--risk-warn-fg, #b45309); border-color: currentColor; }
+.narr-mixed { color: var(--text-secondary); }
+.narr-none { color: var(--text-muted); }
+.narr-evidence-row { display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: 12px; align-items: center; padding: 2px 0; border-top: 1px dashed var(--border); font-variant-numeric: tabular-nums; }
+.narr-ev-name { flex: 1 1 140px; }
+.narr-actions { display: flex; gap: 10px; margin-top: 4px; }
+.narr-link { background: none; border: none; padding: 0; font-size: 12px; color: var(--text-secondary); cursor: pointer; text-decoration: underline; align-self: flex-start; }
+.narr-form { display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
+.narr-form label { display: flex; flex-direction: column; gap: 3px; }
+.narr-form input, .narr-form textarea, .narr-form select { padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: inherit; font: inherit; }
+.narr-form-row { display: flex; gap: 10px; flex-wrap: wrap; }
+.narr-form-row label { flex: 1 1 120px; }
+.narr-check { flex-direction: row !important; align-items: center; gap: 6px !important; font-size: 12px; }
+.narr-check input { width: auto; }
+.narr-proposal { border-style: dashed; }
+.narr-sources { margin: 0; padding-left: 18px; font-size: 12px; display: flex; flex-direction: column; gap: 2px; }
+.narr-sources a, .narr-news-list a { color: var(--text-secondary); }
+.narr-nokey { margin-bottom: 8px; }
+.narr-refresh-msg { margin-bottom: 8px; }
+.narr-news { margin-bottom: 14px; }
+.narr-news-list { margin: 6px 0 0; padding-left: 18px; font-size: 12px; display: flex; flex-direction: column; gap: 3px; max-height: 320px; overflow-y: auto; }

@@ -776,3 +776,74 @@ class TradeCandidate(Base):
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class MarketNarrative(Base):
+    """시장 내러티브 메모 (PLAN.md §5.90-1) — 가격/수급 숫자만으로는 안 보이는 정책·
+    업황 서사를 사용자가 직접 기록한다(수동 입력 전용, 자동 생성·확정 없음).
+
+    ``direction``: bullish|bearish|neutral(시장/섹터 전반 방향), ``confidence``:
+    low|mid|high. ``beneficiaries``/``victims``는 섹터/종목명 문자열 배열(JSONB) —
+    조회 시 sector_flow/group_snapshot 이름과 부분일치로 수급 evidence를 붙인다
+    (참고용, 매매 신호 아님). ``expires_on``이 NULL이면 만료 없음."""
+
+    __tablename__ = "market_narrative"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    direction: Mapped[str] = mapped_column(String(10), nullable=False, default="neutral")
+    beneficiaries: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    victims: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    confidence: Mapped[str] = mapped_column(String(10), nullable=False, default="mid")
+    expires_on: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class NewsItem(Base):
+    """수집한 뉴스 헤드라인 (PLAN.md §5.90-2) — 네이버 증권 주요뉴스 + 공개 RSS.
+    ``url``이 유니크 키(같은 기사 재수집 시 무시). 본문은 저장하지 않고 제목/스니펫만 둔다.
+    LLM 입력으로만 쓰이며 신뢰할 수 없는 외부 텍스트다."""
+
+    __tablename__ = "news_item"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(40), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    url: Mapped[str] = mapped_column(String(1000), nullable=False, unique=True)
+    published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fetched_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class NarrativeProposal(Base):
+    """LLM이 제안한 내러티브 후보 (PLAN.md §5.90-2). 사용자가 승인해야만
+    ``market_narrative``로 옮겨진다(자동 승인 없음). status: pending|approved|dismissed.
+    ``sources``는 [{title,url}] 근거 기사 목록."""
+
+    __tablename__ = "narrative_proposal"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    direction: Mapped[str] = mapped_column(String(10), nullable=False, default="neutral")
+    beneficiaries: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    victims: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    confidence: Mapped[str] = mapped_column(String(10), nullable=False, default="low")
+    sources: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="pending", server_default="pending")
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_narrative_id: Mapped[int | None] = mapped_column(
+        ForeignKey("market_narrative.id", ondelete="SET NULL"), nullable=True
+    )

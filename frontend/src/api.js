@@ -669,3 +669,36 @@ export async function syncAutoTradeState() {
 export async function fetchAutoTradePerformance() {
   return getJson('/api/auto-trade/performance')
 }
+
+// 시장 내러티브 메모 (PLAN.md §5.90-1). GET -> { disclaimer, items: [{..., evidence, alignment}] }.
+export async function getNarratives(includeInactive = false) {
+  return getJson(`/api/narratives/${includeInactive ? '?include_inactive=true' : ''}`)
+}
+
+async function sendJson(method, url, body) {
+  const res = await fetch(url, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  const text = await res.text()
+  const parsed = text ? JSON.parse(text) : null
+  if (!res.ok) {
+    const detail = typeof parsed?.detail === 'string' ? parsed.detail : JSON.stringify(parsed?.detail)
+    throw new Error(detail || `요청 실패 (${res.status})`)
+  }
+  return parsed
+}
+
+export const createNarrative = (body) => postJson('/api/narratives/', body)
+export const updateNarrative = (id, body) => sendJson('PUT', `/api/narratives/${id}`, body)
+export const deleteNarrative = (id) => sendJson('DELETE', `/api/narratives/${id}`)
+
+// 5.90-2 뉴스 기반 내러티브 제안 큐. GET -> { llm_configured, running, last_refresh, items: [...] }.
+export const getNarrativeProposals = (status = 'pending') => getJson(`/api/narratives/proposals?status=${status}`)
+export const approveNarrativeProposal = (id, overrides) =>
+  sendJson('POST', `/api/narratives/proposals/${id}/approve`, overrides || {})
+export const dismissNarrativeProposal = (id) => sendJson('POST', `/api/narratives/proposals/${id}/dismiss`)
+export const refreshNarratives = () => sendJson('POST', '/api/narratives/refresh')
+export const getNarrativeRefreshStatus = () => getJson('/api/narratives/refresh-status')
+export const getNarrativeNews = (limit = 50) => getJson(`/api/narratives/news?limit=${limit}`)

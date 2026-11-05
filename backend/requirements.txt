@@ -10,6 +10,7 @@ yfinance==1.5.1
 apscheduler==3.11.3
 pykrx==1.2.8
 httpx==0.28.1
+anthropic>=0.40,<1
 
 # 테스트 (Phase 2-1 kiwoom.py 단위 테스트: httpx.MockTransport 기반)
 pytest==9.1.1
