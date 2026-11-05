@@ -113,6 +113,19 @@ SECTOR_FIELD_TO_COLUMN = {
 }
 
 
+# ka10051 금액 필드의 실제 단위는 억원이다(2026-11-04 실측: 코스피 외국인 종합 행
+# -26444 vs stock_flow(백만원) 종목 합 -2,416,197 -> 약 1/100). 이전에는 백만원으로
+# 가정해 그대로 저장해 100배 작게 적재됐다. market_flow/sector_flow/intraday는
+# 백만원 단위이므로 파싱 시점에 1억원 = 100백만원을 곱한다(이 모듈 한 곳에서만 보정).
+_EOKWON_TO_MILLION_WON = 100
+
+
+def _parse_amount_million(raw: object) -> int | None:
+    """ka10051 금액(억원)을 백만원 정수로 변환한다. 파싱 불가/None은 None."""
+    value = _parse_int(raw)
+    return None if value is None else value * _EOKWON_TO_MILLION_WON
+
+
 def _parse_int(raw: object) -> int | None:
     """ka10051 숫자 필드는 int로도, (쉼표/부호 포함) 문자열로도 올 수 있어 방어적으로
     파싱한다. None/빈 문자열은 None으로 취급한다."""
@@ -173,7 +186,7 @@ def _summary_flows_from_rows(rows: list[dict], market: str, target_date: dt.date
         out.append(
             {
                 "investor": investor,
-                "net_value": _parse_int(summary_row.get(field)),
+                "net_value": _parse_amount_million(summary_row.get(field)),
                 "net_volume": None,
             }
         )
@@ -214,7 +227,7 @@ def _parse_sector_rows(rows: list[dict], market: str) -> list[dict]:
             "sector_name": row.get("inds_nm"),
         }
         for field, column in SECTOR_FIELD_TO_COLUMN.items():
-            parsed[column] = _parse_int(row.get(field))
+            parsed[column] = _parse_amount_million(row.get(field))
         out.append(parsed)
     return out
 

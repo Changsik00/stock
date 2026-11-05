@@ -110,10 +110,10 @@ async def test_collect_upserts_13_rows_per_market_with_kiwoom_source(monkeypatch
 
     # spot-check the numeric parsing (comma-formatted string, plain int, negative).
     by_investor = {p["investor"]: p["net_value"] for p in kospi_params}
-    assert by_investor["금융투자"] == 1234  # "1,234"
-    assert by_investor["투신"] == 100  # plain int
-    assert by_investor["개인"] == -9999  # "-9,999"
-    assert by_investor["보험"] == -500  # "-500"
+    assert by_investor["금융투자"] == 1234 * 100  # "1,234" 억원 -> 백만원
+    assert by_investor["투신"] == 100 * 100  # plain int(억원)
+    assert by_investor["개인"] == -9999 * 100  # "-9,999"
+    assert by_investor["보험"] == -500 * 100  # "-500"
 
 
 def _sector_row(inds_cd: str, inds_nm: str, frgnr: str, orgn: str, ind: str) -> dict:
@@ -164,18 +164,18 @@ async def test_collect_upserts_sector_rows_alongside_summary(monkeypatch):
     by_code = {(p["market"], p["sector_code"]): p for p in sector_params}
     kospi_elec = by_code[("kospi", "013_AL")]
     assert kospi_elec["sector_name"] == "전기/전자"
-    assert kospi_elec["frgnr_net_value"] == -2000
-    assert kospi_elec["orgn_net_value"] == 1500
-    assert kospi_elec["ind_net_value"] == 500
+    assert kospi_elec["frgnr_net_value"] == -2000 * 100
+    assert kospi_elec["orgn_net_value"] == 1500 * 100
+    assert kospi_elec["ind_net_value"] == 500 * 100
     assert kospi_elec["date"] == DATE
     assert kospi_elec["source"] == "kiwoom"
 
     kospi_chem = by_code[("kospi", "008_AL")]
-    assert kospi_chem["frgnr_net_value"] == 300
+    assert kospi_chem["frgnr_net_value"] == 300 * 100
 
     kosdaq_elec = by_code[("kosdaq", "124_AL")]
     assert kosdaq_elec["sector_name"] == "전기/전자"
-    assert kosdaq_elec["frgnr_net_value"] == -50
+    assert kosdaq_elec["frgnr_net_value"] == -50 * 100
 
     # 종합 행(inds_cd가 시장별 summary code) 자신은 sector_flow에 들어가지 않는다.
     assert ("kospi", "001_AL") not in by_code
@@ -232,7 +232,7 @@ async def test_fetch_kiwoom_flow_picks_summary_row_not_first_row(monkeypatch):
 
     assert len(flows) == 13
     by_investor = {f["investor"]: f["net_value"] for f in flows}
-    assert by_investor["개인"] == -9999
+    assert by_investor["개인"] == -9999 * 100
 
 
 def test_parse_int_handles_none_empty_and_signed_comma_strings():
@@ -243,3 +243,12 @@ def test_parse_int_handles_none_empty_and_signed_comma_strings():
     assert market_flow._parse_int("-1,234") == -1234
     assert market_flow._parse_int("+56") == 56
     assert market_flow._parse_int(789) == 789
+
+
+def test_parse_amount_million_converts_eokwon_to_million_won():
+    assert market_flow._EOKWON_TO_MILLION_WON == 100
+    assert market_flow._parse_amount_million(None) is None
+    assert market_flow._parse_amount_million("") is None
+    assert market_flow._parse_amount_million("abc") is None
+    assert market_flow._parse_amount_million("-26,444") == -2_644_400
+    assert market_flow._parse_amount_million(0) == 0
