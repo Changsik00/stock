@@ -29,6 +29,7 @@ def register_all() -> None:
     from . import investor_warning as _investor_warning_collector  # noqa: F401
     from . import macro as _macro_collector  # noqa: F401
     from . import market_flow as _market_flow_collector  # noqa: F401
+    from . import market_minute_bars as _market_minute_bars_collector  # noqa: F401
     from . import narrative_news as _narrative_news_collector  # noqa: F401
     from . import nq_futures_sampler as _nq_futures_sampler_collector  # noqa: F401
     from . import ohlcv as _ohlcv_collector  # noqa: F401

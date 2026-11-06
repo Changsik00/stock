@@ -123,7 +123,7 @@ _scheduler: AsyncIOScheduler | None = None
 # 2026-11-05 — narrative_proposals(뉴스 수집+LLM 제안, PLAN.md §5.90-2)도 18:00 본배치에서
 # 제외하고 전용 크론(08:30/12:00/16:30 평일)에서만 돌린다.
 # 2026-11-06 — nq_futures(NQ=F 5분봉 섀도 적재, PLAN.md §5.91)도 제외: 전용 5분 크론에서만 돈다.
-_EXCLUDED_FROM_DAILY_BATCH = {"accumulation_screener", "narrative_proposals", "nq_futures"}
+_EXCLUDED_FROM_DAILY_BATCH = {"accumulation_screener", "narrative_proposals", "nq_futures", "market_minute_bars"}
 
 
 async def _run_all_jobs() -> None:
@@ -241,6 +241,21 @@ async def _run_nq_futures_job() -> None:
         logger.warning("nq_futures job 실패(무시): %s", e)
 
 
+async def _run_market_minute_bars_job() -> None:
+    """평일 09:00~15:40 KST 5분마다 지수/대표 ETF 1분봉 upsert(PLAN.md §5.93, 연구용 적재).
+    15:40 실행이 마감 후 보정. collect_log(run_job) 없이 직접 호출, 실패는 전부 삼킨다."""
+    collect_fn = REGISTRY.get("market_minute_bars")
+    if collect_fn is None:
+        return
+    try:
+        from ..db import async_session_factory
+
+        async with async_session_factory() as session:
+            await collect_fn(session, dt.date.today())
+    except Exception as e:  # noqa: BLE001
+        logger.warning("market_minute_bars job 실패(무시): %s", e)
+
+
 def start_scheduler() -> AsyncIOScheduler:
     """Create, start, and return the module-level scheduler (idempotent)."""
     global _scheduler
@@ -305,6 +320,17 @@ def start_scheduler() -> AsyncIOScheduler:
         coalesce=True,
         max_instances=1,
     )
+    # PLAN.md §5.93 — 지수/ETF 1분봉 적재: 09:00~14:55 매 5분 + 15:00~15:40 매 5분(15:40=마감 후 보정).
+    for hour_expr, minute_expr, suffix in (("9-14", "*/5", "am"), ("15", "0-40/5", "close")):
+        scheduler.add_job(
+            _run_market_minute_bars_job,
+            CronTrigger(day_of_week="mon-fri", hour=hour_expr, minute=minute_expr, timezone="Asia/Seoul"),
+            id=f"market_minute_bars_{suffix}",
+            replace_existing=True,
+            misfire_grace_time=120,
+            coalesce=True,
+            max_instances=1,
+        )
     scheduler.start()
     _scheduler = scheduler
     logger.info(

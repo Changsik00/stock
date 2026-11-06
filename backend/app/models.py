@@ -110,6 +110,26 @@ class StockIntradayBar(Base):
     volume: Mapped[int | None] = mapped_column(BigInteger)
 
 
+class IndexIntradayBar(Base):
+    """지수(코스피 001 / 코스닥 101) 1분봉 이력 — PLAN.md §5.93, 관찰/연구용(매매 입력 아님).
+
+    ``stock_intraday_bar``는 ``stocks`` FK와 정수 가격이라 지수(소수 2자리, stocks 미등재)를
+    못 담아 별도 테이블로 둔다. ``code``는 키움 업종코드("001"/"101") 그대로,
+    ``time``은 "HHMM" 문자열(stock_intraday_bar와 동일 관례). 가격은 ka20005의 ÷100 보정이
+    끝난 실제 지수값."""
+
+    __tablename__ = "index_intraday_bar"
+
+    code: Mapped[str] = mapped_column(String(10), primary_key=True)
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    time: Mapped[str] = mapped_column(String(4), primary_key=True)
+    open: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    high: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    low: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    close: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    volume: Mapped[int | None] = mapped_column(BigInteger)
+
+
 class MarketFlow(Base):
     """시장별 투자자 순매수 (KIS 3분류 + pykrx/kiwoom 13분류 겸용, source 컬럼으로 구분)."""
 
