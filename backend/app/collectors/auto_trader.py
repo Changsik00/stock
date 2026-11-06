@@ -178,6 +178,7 @@ from ..quant.auto_trade_rules import (
     foreign_flow_sign,
     is_entry_blocked_by_time,
 )
+from ..quant.nq_shadow import merge_nq_shadow
 from ..quant.signals import moving_average_cross, volume_spike
 from ..routers.markets import _warm_index_tiles_live, _warm_regime
 from ..routers.stocks import _warm_stock_intraday
@@ -296,6 +297,20 @@ async def _log(
         # 전혀 영향받지 않는다.
         return
     _last_log_by_code[code] = (event_type, truncated_reason, now)
+
+    # PLAN.md §5.91 — 청산/전환 이벤트에 NQ 섀도 값을 **추가 필드로만** 기록한다
+    # (관찰 전용, 판정 입력 아님; 실패/값 없음은 null, 길이 초과 시 생략).
+    if signal_snapshot is not None and (event_type.startswith("exit_") or event_type == "trail_activate"):
+        try:
+            from .nq_futures_sampler import get_nq_shadow
+
+            signal_snapshot = merge_nq_shadow(
+                signal_snapshot,
+                await get_nq_shadow(session),
+                lambda d: json.dumps(d, ensure_ascii=False, default=str),
+            )
+        except Exception as e:  # noqa: BLE001 - 관찰 필드 실패가 로그/판정을 막으면 안 된다
+            logger.warning("nq_shadow 기록 생략: %s", e)
 
     session.add(
         AutoTradeLog(

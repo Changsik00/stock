@@ -109,3 +109,25 @@ def fetch_nasdaq_futures_intraday(bars: int = 50) -> list[dict]:
         out.append({"time": ts.isoformat(), "close": float(close)})
 
     return out[-bars:]
+
+
+def fetch_nasdaq_futures_5m_history(period: str = "5d") -> list[dict]:
+    """나스닥선물(``NQ=F``) 5분봉 이력 — 섀도 적재용(PLAN.md §5.91).
+
+    ``fetch_nasdaq_futures_intraday``와 달리 ``period``를 받고 tz-aware
+    ``datetime``(봉 시작 시각)을 그대로 돌려준다. yfinance 5분봉은 최근 60일까지만
+    제공하므로 백필은 ``period="60d"``, 정기 갱신은 ``"5d"``(주말/작업 중단 갭 보정).
+    Returns 오름차순 ``[{"time": datetime(aware), "close": float}, ...]``.
+    """
+    import yfinance as yf
+
+    hist = yf.Ticker(NASDAQ_FUTURES_SYMBOL).history(period=period, interval="5m")
+    if hist.empty:
+        return []
+    out: list[dict] = []
+    for ts, row in hist.iterrows():
+        close = row.get("Close")
+        if close is None or close != close:  # None/NaN
+            continue
+        out.append({"time": ts.to_pydatetime(), "close": float(close)})
+    return out

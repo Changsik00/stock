@@ -122,7 +122,8 @@ _scheduler: AsyncIOScheduler | None = None
 # screener_job이 전용 20:00 KST 크론에서 이 잡 하나만 run_job으로 실행한다.
 # 2026-11-05 — narrative_proposals(뉴스 수집+LLM 제안, PLAN.md §5.90-2)도 18:00 본배치에서
 # 제외하고 전용 크론(08:30/12:00/16:30 평일)에서만 돌린다.
-_EXCLUDED_FROM_DAILY_BATCH = {"accumulation_screener", "narrative_proposals"}
+# 2026-11-06 — nq_futures(NQ=F 5분봉 섀도 적재, PLAN.md §5.91)도 제외: 전용 5분 크론에서만 돈다.
+_EXCLUDED_FROM_DAILY_BATCH = {"accumulation_screener", "narrative_proposals", "nq_futures"}
 
 
 async def _run_all_jobs() -> None:
@@ -225,6 +226,21 @@ async def _run_narrative_proposals_job() -> None:
     await run_job("narrative_proposals", dt.date.today(), collect_fn)
 
 
+async def _run_nq_futures_job() -> None:
+    """평일 KST 08~16시 5분마다 NQ=F 5분봉 upsert(PLAN.md §5.91, 관찰 전용).
+    5분 주기라 collect_log(run_job)는 쓰지 않고 직접 호출한다. 실패는 전부 삼킨다."""
+    collect_fn = REGISTRY.get("nq_futures")
+    if collect_fn is None:
+        return
+    try:
+        from ..db import async_session_factory
+
+        async with async_session_factory() as session:
+            await collect_fn(session, dt.date.today())
+    except Exception as e:  # noqa: BLE001
+        logger.warning("nq_futures job 실패(무시): %s", e)
+
+
 def start_scheduler() -> AsyncIOScheduler:
     """Create, start, and return the module-level scheduler (idempotent)."""
     global _scheduler
@@ -279,6 +295,16 @@ def start_scheduler() -> AsyncIOScheduler:
             replace_existing=True,
             misfire_grace_time=3600,
         )
+    # PLAN.md §5.91 — NQ=F 5분봉 섀도 적재(완성봉 반영 위해 매 5분 +1분).
+    scheduler.add_job(
+        _run_nq_futures_job,
+        CronTrigger(day_of_week="mon-fri", hour="8-16", minute="1-59/5", timezone="Asia/Seoul"),
+        id="nq_futures_5m",
+        replace_existing=True,
+        misfire_grace_time=120,
+        coalesce=True,
+        max_instances=1,
+    )
     scheduler.start()
     _scheduler = scheduler
     logger.info(
