@@ -1953,6 +1953,21 @@ header h1 {
 .btn-link { min-height: 32px; padding: 0 4px; color: var(--text-secondary); text-decoration: underline; text-underline-offset: 3px; border-color: transparent; }
 .btn-link:hover:not(:disabled) { color: var(--text-primary); background: transparent; border-color: transparent; }
 
+/* 모바일 터치 영역 44px (DESIGN.md 하드 게이트 4): 기본 .btn 은 높이를 올리고,
+   작은 버튼(.btn-sm/.btn-link)은 시각 크기 유지 + 투명 확장 영역으로 44px 확보 */
+@media (max-width: 640px) {
+  .btn { min-height: 44px; position: relative; }
+  .btn-sm, .btn-link { min-height: 32px; }
+  .btn-sm::after, .btn-link::after {
+    content: "";
+    position: absolute;
+    left: 0; right: 0;
+    top: 50%;
+    height: 44px;
+    transform: translateY(-50%);
+  }
+}
+
 /* ===== 모바일형 시범(대시보드 최상단 + 내러티브 탭) — frontend/DESIGN.md '모바일형 방향(시범)' =====
    전역 클래스(.kpi-tile/.section-title/.regime-card)는 건드리지 않고 .mt-*, .vr-*, .narr-page 범위로만 덮는다. */
 .m-font { font-family: var(--font-sans); }

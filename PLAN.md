@@ -5222,6 +5222,10 @@ active, valid_date). 추천은 매일 08:50 시나리오 규칙으로 재생성(
 
 토스/네이버 증권형 방향 시범: Pretendard(npm `pretendard`, 가변 dynamic-subset self-host), 간격/타입 토큰, `MetricTile`(핵심 숫자+▲▼ 등락), 변동성 레짐 카드 요약/접기, 내러티브 탭 리스트화·스켈레톤·빈/에러 상태. 대상은 대시보드 최상단 + 내러티브 탭뿐이며 스타일/표현만 변경(기능·API 불변). 기록과 체크리스트는 `frontend/DESIGN.md` '모바일형 방향(시범)'.
 
+### Phase 5.98 — 에이전트 규칙(CLAUDE.md) + 디자인 가이드 보강 (문서, 2026-11-08)
+
+저장소 루트 `CLAUDE.md` 신설(UI 가이드 준수·실거래 안전·컨테이너·단위 규칙). `frontend/DESIGN.md`에 사용 맥락·엘리베이션·모션·문구 톤·하드 게이트·목적 테스트 절 추가(anti-slop 아이디어 흡수, MIT). 문서 변경 + 모바일(≤640px) 터치 영역 44px 반영: `.btn` 높이 44px, `.btn-sm`/`.btn-link`는 시각 32px 유지 + `::after` 투명 확장(index.css). 데스크톱 불변. 390px에서 확장 영역 44px 측정 확인.
+
 ---
 
 ## 7. 리스크 / 미확정 사항
