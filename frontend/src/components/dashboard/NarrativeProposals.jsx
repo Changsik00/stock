@@ -8,6 +8,7 @@ import {
 } from '../../api'
 import Badge from '../Badge'
 import Modal from '../Modal'
+import NarrativeRow from './NarrativeRow'
 
 // 뉴스 기반 내러티브 제안 피드 (PLAN.md §5.90-2) — 시스템(LLM)이 제안하고 사용자가 읽고
 // 승인/수정 후 승인/무시한다. 자동 확정 없음. 참고용, 매매 신호 아님.
@@ -74,22 +75,23 @@ function EditApproveForm({ p, onDone, onCancel }) {
       <label>피해 섹터/종목 (쉼표 구분)<input value={f.victims} onChange={set('victims')} /></label>
       <div className="narr-meta">승인하면 활성 내러티브로 저장되며 만료일은 30일 뒤로 설정됩니다. 근거 기사 링크는 요지 끝에 보존됩니다.</div>
       <div className="narr-actions">
-        <button type="submit" disabled={busy}>{busy ? '저장 중…' : '수정 후 승인'}</button>
-        <button type="button" onClick={onCancel}>취소</button>
+        <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? '저장 중…' : '수정 후 승인'}</button>
+        <button type="button" className="btn btn-ghost" onClick={onCancel}>취소</button>
       </div>
     </form>
   )
 }
 
+// 승인/수정 후 승인/무시는 펼친 본문 안에만 둔다 — 접힌 헤더에 빠른 버튼을 두면 스크롤·클릭 중
+// 오조작으로 내러티브가 바로 저장/폐기될 수 있어(되돌리기 번거로움), 내용을 읽은 뒤에만 노출한다.
 function ProposalCard({ p, onApprove, onEdit, onDismiss, busy }) {
   return (
-    <div className="narr-card narr-proposal">
-      <div className="narr-head">
-        <strong className="narr-title">{p.title}</strong>
-        <span className={`narr-dir narr-dir-${p.direction}`}>{DIRECTION[p.direction]}</span>
-        <span className="narr-meta">신뢰도 {CONFIDENCE[p.confidence]}</span>
-        <span className="narr-meta">{fmtTime(p.created_at)} 제안</span>
-      </div>
+    <NarrativeRow
+      className="narr-proposal"
+      title={p.title}
+      titleBadge={<span className={`narr-dir narr-dir-${p.direction}`}>{DIRECTION[p.direction]}</span>}
+      meta={<span className="narr-meta narr-row-meta">신뢰도 {CONFIDENCE[p.confidence]} · {fmtTime(p.created_at)} 제안</span>}
+    >
       {p.summary && <div className="narr-summary">{p.summary}</div>}
       <div className="narr-chips">
         {p.beneficiaries.map((t) => (
@@ -109,11 +111,11 @@ function ProposalCard({ p, onApprove, onEdit, onDismiss, busy }) {
         </ul>
       )}
       <div className="narr-actions">
-        <button type="button" disabled={busy} onClick={() => onApprove(p)}>승인</button>
-        <button type="button" disabled={busy} onClick={() => onEdit(p)}>수정 후 승인</button>
-        <button type="button" disabled={busy} onClick={() => onDismiss(p)}>무시</button>
+        <button type="button" className="btn btn-primary" disabled={busy} onClick={() => onApprove(p)}>승인</button>
+        <button type="button" className="btn btn-secondary" disabled={busy} onClick={() => onEdit(p)}>수정 후 승인</button>
+        <button type="button" className="btn btn-danger" disabled={busy} onClick={() => onDismiss(p)}>무시</button>
       </div>
-    </div>
+    </NarrativeRow>
   )
 }
 
@@ -127,7 +129,7 @@ function RecentNews() {
   }, [open])
   return (
     <div className="narr-news">
-      <button type="button" className="narr-link" onClick={() => setOpen(!open)}>
+      <button type="button" className="btn btn-link btn-sm narr-link" onClick={() => setOpen(!open)}>
         {open ? '최근 수집 뉴스 접기' : '최근 수집 뉴스 보기'}
       </button>
       {open && err && <div className="state">뉴스 조회 실패: {err}</div>}
@@ -211,7 +213,7 @@ export default function NarrativeProposals({ onChanged }) {
         새 제안 <span className="narr-meta">뉴스 기반 · 승인해야만 내러티브로 저장됩니다 · {data?.disclaimer || '참고용, 매매 신호 아님'}</span>
       </div>
       <div className="narr-toolbar">
-        <button type="button" onClick={handleRefresh} disabled={refreshing || data?.running}>
+        <button type="button" className="btn btn-secondary btn-sm" onClick={handleRefresh} disabled={refreshing || data?.running}>
           {refreshing || data?.running ? '수집 중…' : '뉴스 수집'}
         </button>
         <span className="narr-meta">
@@ -228,6 +230,7 @@ export default function NarrativeProposals({ onChanged }) {
       )}
       {refreshMsg && <div className="narr-meta narr-refresh-msg">{refreshMsg}</div>}
       {error && <div className="state">제안 처리 실패: {error}</div>}
+      {data && data.items.length > 0 && <div className="narr-meta narr-summary-line">제안 대기 {data.items.length}건</div>}
       {data && data.items.length === 0 && <div className="narr-meta">대기 중인 새 제안이 없습니다.</div>}
       <div className="narr-list">
         {data?.items.map((p) => (

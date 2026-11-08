@@ -5214,6 +5214,10 @@ active, valid_date). 추천은 매일 08:50 시나리오 규칙으로 재생성(
 - **테스트** `tests/test_opening_vol.py`(순수 함수), `tests/test_markets_vol_regime_router.py`(DB 미사용).
 - **한계**: 약 95거래일·단일 국면, 슬리피지 미반영, 11-05 코스피처럼 장중 누적 급락은 시초로 못 잡음, 백분위는 표본 군집(인접일) 때문에 정밀한 확률이 아님, 공백 원인(서킷브레이커 vs 수집 공백) 미확정, 분봉은 5분 주기 수집이라 장중 최대 5분 지연.
 
+### Phase 5.96 — 공통 버튼 시스템 + 디자인 가이드 (프론트, 2026-11-08)
+
+`index.css`에 `.btn`(+primary/secondary/ghost/danger/link, `-sm`) 정의, 내러티브 탭·TOP5 더보기·변동성 레짐 안내 버튼에 적용. 가이드는 `frontend/DESIGN.md`. 스타일만 변경, 기능·API 불변.
+
 ---
 
 ## 7. 리스크 / 미확정 사항

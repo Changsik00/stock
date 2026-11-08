@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { createNarrative, deleteNarrative, getNarratives, updateNarrative } from '../../api'
 import Badge from '../Badge'
 import Modal from '../Modal'
+import NarrativeRow from './NarrativeRow'
 
 // 시장 내러티브 메모 (PLAN.md §5.90-1) — 사용자가 직접 기록한 서사를 실제 섹터
 // 수급/등락과 나란히 보여준다. 참고용이며 매매 신호가 아니다(자동 생성·확정 없음).
@@ -44,19 +45,32 @@ function EvidenceRow({ e }) {
   )
 }
 
-function NarrativeCard({ n, onEdit, onDelete }) {
+// 수급 일치 요약 배지: 일치/불일치 건수를 한 덩어리로 (판정 가능한 evidence만 집계).
+function alignSummary(n) {
+  const cnt = (v) => n.evidence.filter((e) => e.verdict === v).length
+  const ok = cnt('aligned')
+  const bad = cnt('divergent')
   const a = ALIGN[n.alignment] || ALIGN.none
-  const [open, setOpen] = useState(false)
+  if (ok + bad === 0) return { label: a.label, cls: a.cls }
+  return { label: `일치 ${ok}${bad ? ` · 불일치 ${bad}` : ''}`, cls: a.cls }
+}
+
+function NarrativeCard({ n, onEdit, onDelete }) {
+  const a = alignSummary(n)
   return (
-    <div className={`narr-card${n.active ? '' : ' narr-inactive'}`}>
-      <div className="narr-head">
-        <strong className="narr-title">{n.title}</strong>
-        <span className={`narr-dir narr-dir-${n.direction}`}>{DIRECTION[n.direction]}</span>
-        <span className="narr-meta">신뢰도 {CONFIDENCE[n.confidence]}</span>
-        {n.expires_on && <span className="narr-meta">~{n.expires_on.slice(5)}</span>}
-        {!n.active && <span className="narr-meta">비활성</span>}
-        <span className={`narr-ev-verdict ${a.cls}`}>{a.label}</span>
-      </div>
+    <NarrativeRow
+      className={n.active ? '' : 'narr-inactive'}
+      title={n.title}
+      titleBadge={<span className={`narr-dir narr-dir-${n.direction}`}>{DIRECTION[n.direction]}</span>}
+      meta={
+        <span className="narr-meta narr-row-meta">
+          신뢰도 {CONFIDENCE[n.confidence]}
+          {n.expires_on && ` · ~${n.expires_on.slice(5)}`}
+          {!n.active && ' · 비활성'}
+        </span>
+      }
+      badge={<span className={`narr-ev-verdict ${a.cls}`}>{a.label}</span>}
+    >
       {n.summary && <div className="narr-summary">{n.summary}</div>}
       <div className="narr-chips">
         {n.beneficiaries.map((t) => (
@@ -71,20 +85,15 @@ function NarrativeCard({ n, onEdit, onDelete }) {
         ))}
       </div>
       {n.evidence.length > 0 && (
-        <button type="button" className="narr-link" onClick={() => setOpen(!open)}>
-          {open ? '수급 근거 접기' : `수급 근거 ${n.evidence.length}건 보기`}
-        </button>
+        <div className="narr-evidence">
+          {n.evidence.map((e, i) => <EvidenceRow key={i} e={e} />)}
+        </div>
       )}
-      {open && n.evidence.map((e, i) => <EvidenceRow key={i} e={e} />)}
       <div className="narr-actions">
-        <button type="button" className="narr-link" onClick={() => onEdit(n)}>
-          수정
-        </button>
-        <button type="button" className="narr-link" onClick={() => onDelete(n)}>
-          삭제
-        </button>
+        <button type="button" className="btn btn-secondary btn-sm" onClick={() => onEdit(n)}>수정</button>
+        <button type="button" className="btn btn-danger btn-sm" onClick={() => onDelete(n)}>삭제</button>
       </div>
-    </div>
+    </NarrativeRow>
   )
 }
 
@@ -160,8 +169,8 @@ function NarrativeForm({ initial, onSaved, onCancel }) {
       <label>피해 섹터/종목 (쉼표 구분)<input value={f.victims} onChange={set('victims')} placeholder="예: 반도체" /></label>
       <label className="narr-check"><input type="checkbox" checked={f.active} onChange={set('active')} /> 활성</label>
       <div className="narr-actions">
-        <button type="submit" disabled={busy}>{busy ? '저장 중…' : '저장'}</button>
-        <button type="button" onClick={onCancel}>취소</button>
+        <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? '저장 중…' : '저장'}</button>
+        <button type="button" className="btn btn-ghost" onClick={onCancel}>취소</button>
       </div>
     </form>
   )
@@ -203,8 +212,9 @@ export default function NarrativeSection({ reloadKey = 0 }) {
         시장 내러티브{' '}
         <span className="narr-meta">{data?.disclaimer || '참고용, 매매 신호 아님'}</span>
       </div>
+      {data && <div className="narr-meta narr-summary-line">활성 {data.items.filter((n) => n.active).length}건{showInactive ? ` · 전체 ${data.items.length}건` : ''}</div>}
       <div className="narr-toolbar">
-        <button type="button" onClick={() => setEditing('new')}>+ 내러티브 추가</button>
+        <button type="button" className="btn btn-primary btn-sm" onClick={() => setEditing('new')}>+ 내러티브 추가</button>
         <label className="narr-check">
           <input type="checkbox" checked={showInactive} onChange={(e) => setShowInactive(e.target.checked)} /> 비활성/만료 포함
         </label>

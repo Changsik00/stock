@@ -13,6 +13,10 @@
   --up: #d03b3b;
   --down: #256abf;
   --chip-bg: #f0efec;
+  /* 공통 버튼 주 동작색(대비: 라이트 흰 글자 5.66, 다크 검정 글자 5.34 이상) */
+  --btn-primary-bg: #1f66bf;
+  --btn-primary-hover: #1a56a5;
+  --btn-primary-fg: #ffffff;
 
   /* 투자자 카테고리 식별색 — 카테고리 순서 고정(개인·외국인·기관계·금융투자·보험·투신·사모·연기금),
      dataviz 스킬 categorical 8-hue 팔레트(고정 순서) 그대로 사용. FlowChart/MarketPage/향후
@@ -56,6 +60,8 @@
      지시 문구("파랑 계열 강조")대로 --down과 겹치지 않는 옅은 파랑을 쓴다. */
   --badge-warn-bg: #ffedd5;
   --badge-warn-fg: #9a3412;
+  /* 배경 위 '글자' 용 주황(변동성 레짐 경고 등) — badge-warn-fg는 주황 배지 위 글자색이라 일반 배경에선 안 보임 */
+  --warn-text: #b45309;
   --badge-info-bg: #dbeafe;
   --badge-info-fg: #1e3a8a;
 
@@ -108,6 +114,10 @@
     --up: #e66767;
     --down: #3987e5;
     --chip-bg: #262623;
+    /* 공통 버튼 주 동작색(대비: 라이트 흰 글자 5.66, 다크 검정 글자 5.34 이상) */
+    --btn-primary-bg: #3987e5;
+    --btn-primary-hover: #5a9bea;
+    --btn-primary-fg: #0d0d0d;
 
     --investor-1: #3987e5;
     --investor-2: #199e70;
@@ -136,6 +146,7 @@
     --badge-live-fg: #431407;
     --badge-warn-bg: #fb923c;
     --badge-warn-fg: #431407;
+    --warn-text: #fdba74;
     --badge-info-bg: #60a5fa;
     --badge-info-fg: #0c1c3d;
 
@@ -174,6 +185,10 @@
   --up: #e66767;
   --down: #3987e5;
   --chip-bg: #262623;
+  /* 공통 버튼 주 동작색(대비: 라이트 흰 글자 5.66, 다크 검정 글자 5.34 이상) */
+  --btn-primary-bg: #3987e5;
+  --btn-primary-hover: #5a9bea;
+  --btn-primary-fg: #0d0d0d;
 
   --investor-1: #3987e5;
   --investor-2: #199e70;
@@ -199,6 +214,7 @@
   --badge-live-fg: #431407;
   --badge-warn-bg: #fb923c;
   --badge-warn-fg: #431407;
+  --warn-text: #fdba74;
   --badge-info-bg: #60a5fa;
   --badge-info-fg: #0c1c3d;
 
@@ -1183,14 +1199,9 @@ header h1 {
   color: var(--text-primary);
 }
 
-.top5-more {
-  font-family: inherit;
-  font-size: 11px;
-  color: var(--series-price);
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  padding: 2px 0;
+.btn.top5-more {
+  /* 공통 .btn .btn-ghost .btn-sm 병기 — 위치 보정만 유지 */
+  padding-left: 0;
 }
 
 .top5-row {
@@ -1747,28 +1758,40 @@ header h1 {
 }
 
 /* 시장 내러티브 메모 (PLAN.md §5.90-1) — 상승/순매수=빨강(--up), 하락/순매도=파랑(--down) */
-.narr-toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 10px; }
-.narr-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; margin-bottom: 12px; }
-.narr-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: var(--surface); display: flex; flex-direction: column; gap: 6px; }
-.narr-inactive { opacity: 0.6; }
+.narr-toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 12px; }
+.narr-list { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
+/* 컴팩트 아코디언 행: 한 줄 헤더 + 펼침 본문. 글자색은 변수 그대로(투명도로 흐리게 하지 않음) */
+.narr-item { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.narr-row-head { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; padding: 8px 12px; background: none; border: none; color: var(--text-primary); font: inherit; text-align: left; cursor: pointer; border-radius: 10px; }
+.narr-row-head:hover { background: var(--bg-hover, rgba(128,128,128,0.08)); }
+.narr-row-head:focus-visible { outline: 2px solid var(--text-secondary); outline-offset: -2px; }
+.narr-row-title { flex: 1 1 0; min-width: 0; font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.narr-meta.narr-row-meta { flex: 0 0 auto; white-space: nowrap; color: var(--text-secondary); }
+.narr-row-head .narr-ev-verdict { margin-left: 0; flex: 0 0 auto; white-space: nowrap; }
+.narr-chevron { flex: 0 0 auto; font-size: 10px; color: var(--text-secondary); }
+.narr-body { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px 12px; border-top: 1px solid var(--border); }
+.narr-meta.narr-summary-line { margin-bottom: 8px; color: var(--text-secondary); }
+.narr-evidence { display: flex; flex-direction: column; gap: 2px; }
+.narr-dir { flex: 0 0 auto; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 8px; border: 1px solid currentColor; }
+@media (max-width: 640px) { .narr-row-head { flex-wrap: wrap; } .narr-row-title { flex-basis: 60%; } }
+.narr-inactive { border-style: dashed; }
 .narr-head { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
 .narr-title { font-size: 14px; }
 .narr-meta { font-size: 11px; color: var(--text-muted); font-weight: 400; }
 .narr-summary { font-size: 13px; color: var(--text-secondary); white-space: pre-wrap; }
 .narr-chips { display: flex; flex-wrap: wrap; gap: 4px; }
-.narr-dir { font-size: 11px; font-weight: 600; }
 .narr-dir-bullish { color: var(--up); }
 .narr-dir-bearish { color: var(--down); }
 .narr-dir-neutral { color: var(--text-secondary); }
 .narr-ev-verdict { font-size: 11px; padding: 1px 6px; border-radius: 8px; border: 1px solid var(--border); margin-left: auto; }
-.narr-aligned { color: var(--text-primary, inherit); border-color: currentColor; }
-.narr-divergent { color: var(--risk-warn-fg, #b45309); border-color: currentColor; }
+.narr-aligned { color: var(--text-primary); border-color: currentColor; }
+.narr-divergent { color: var(--warn-text); border-color: currentColor; }
 .narr-mixed { color: var(--text-secondary); }
 .narr-none { color: var(--text-muted); }
 .narr-evidence-row { display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: 12px; align-items: center; padding: 2px 0; border-top: 1px dashed var(--border); font-variant-numeric: tabular-nums; }
 .narr-ev-name { flex: 1 1 140px; }
-.narr-actions { display: flex; gap: 10px; margin-top: 4px; }
-.narr-link { background: none; border: none; padding: 0; font-size: 12px; color: var(--text-secondary); cursor: pointer; text-decoration: underline; align-self: flex-start; }
+.narr-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; align-items: center; }
+.narr-link { align-self: flex-start; }
 .narr-form { display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
 .narr-form label { display: flex; flex-direction: column; gap: 3px; }
 .narr-form input, .narr-form textarea, .narr-form select { padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: inherit; font: inherit; }
@@ -1781,13 +1804,13 @@ header h1 {
 .narr-sources a, .narr-news-list a { color: var(--text-secondary); }
 .narr-nokey { margin-bottom: 8px; }
 .narr-refresh-msg { margin-bottom: 8px; }
-.narr-news { margin-bottom: 14px; }
+.narr-news { margin-bottom: 24px; }
 .narr-news-list { margin: 6px 0 0; padding-left: 18px; font-size: 12px; display: flex; flex-direction: column; gap: 3px; max-height: 320px; overflow-y: auto; }
 
 /* 오늘 변동성 레짐 카드(PLAN.md §5.95) — 방향색(--up/--down)과 겹치지 않게 회색 계열 + 기존 badge-warn(주황) */
 .badge-neutral {
-  background: var(--border);
-  color: inherit;
+  background: rgba(127, 127, 127, 0.22);
+  color: var(--text-primary);
 }
 
 .badge-neutral-strong {
@@ -1822,7 +1845,7 @@ header h1 {
 }
 
 .vol-regime-grid dt {
-  opacity: 0.7;
+  color: var(--text-secondary);
 }
 
 .vol-regime-grid dd {
@@ -1834,34 +1857,31 @@ header h1 {
 }
 
 .vol-regime-dim {
-  opacity: 0.6;
+  color: var(--text-secondary);
   font-size: 12px;
 }
 
 .vol-regime-partial {
-  color: var(--badge-warn-fg);
+  color: var(--warn-text);
+  font-weight: 600;
 }
 
 .vol-regime-warning {
   margin-top: 4px;
   font-size: 12px;
-  color: var(--badge-warn-fg);
+  line-height: 1.5;
+  color: var(--warn-text);
 }
 
 .vol-regime-foot {
   margin-top: 10px;
   font-size: 11px;
-  opacity: 0.65;
+  color: var(--text-secondary);
 }
 
-.vol-regime-info {
-  font-size: 11px;
-  padding: 1px 8px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
+.btn.vol-regime-info {
+  /* 공통 .btn .btn-sm 으로 이관(JSX에서 클래스 병기) — 위치 보정만 유지 */
+  flex: none;
 }
 
 .vol-regime-explain p {
@@ -1869,3 +1889,49 @@ header h1 {
   line-height: 1.6;
   margin: 0 0 10px;
 }
+
+/* ===== 공통 버튼 시스템 (frontend/DESIGN.md 참조) =====
+   필터·탭 컨트롤(.toggle-chip/.tab/.range/.page-tab)과 같은 언어: 플랫, 얇은 테두리, 999px 필, 13px.
+   색은 primary(주 동작) 하나에만 쓰고, 나머지는 중립. danger 도 가격 방향색(--up/--down)은 쓰지 않는다. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 16px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--text-primary);
+  background: transparent;
+  border: 1px solid var(--axis);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background-color 0.12s, border-color 0.12s, color 0.12s;
+}
+.btn:hover:not(:disabled) { background: var(--chip-bg); border-color: var(--text-muted); }
+.btn:active:not(:disabled) { background: var(--grid); }
+.btn:focus-visible { outline: 2px solid var(--series-price); outline-offset: 2px; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.btn-sm { min-height: 32px; padding: 0 12px; font-size: 12px; }
+
+.btn-primary { color: var(--btn-primary-fg); background: var(--btn-primary-bg); border-color: var(--btn-primary-bg); font-weight: 600; }
+.btn-primary:hover:not(:disabled) { background: var(--btn-primary-hover); border-color: var(--btn-primary-hover); }
+.btn-primary:active:not(:disabled) { background: var(--btn-primary-bg); border-color: var(--btn-primary-bg); }
+
+.btn-secondary { /* 기본 외곽선 — .btn 기본과 동일(명시용 별칭) */ }
+
+.btn-ghost { color: var(--text-secondary); border-color: transparent; }
+.btn-ghost:hover:not(:disabled) { color: var(--text-primary); border-color: transparent; }
+
+.btn-danger { color: var(--text-secondary); }
+.btn-danger:hover:not(:disabled) { color: var(--warn-text); border-color: var(--warn-text); background: transparent; }
+.btn-danger:active:not(:disabled) { background: var(--chip-bg); }
+.btn-danger:focus-visible { outline-color: var(--warn-text); }
+
+.btn-link { min-height: 32px; padding: 0 4px; color: var(--text-secondary); text-decoration: underline; text-underline-offset: 3px; border-color: transparent; }
+.btn-link:hover:not(:disabled) { color: var(--text-primary); background: transparent; border-color: transparent; }

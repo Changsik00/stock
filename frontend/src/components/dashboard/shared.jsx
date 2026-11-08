@@ -522,7 +522,7 @@ export function Top5Card({
     <div className="top5-card" title={hoverDate}>
       <div className="top5-card-header">
         <span className="top5-card-title">{title}</span>
-        <button type="button" className="top5-more" onClick={onMore}>
+        <button type="button" className="btn btn-ghost btn-sm top5-more" onClick={onMore}>
           전체 보기 ›
         </button>
       </div>

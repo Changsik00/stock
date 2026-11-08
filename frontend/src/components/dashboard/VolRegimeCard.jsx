@@ -80,7 +80,7 @@ export default function VolRegimeCard({ data }) {
     <>
       <div className="section-title" style={{ marginTop: 16 }}>
         오늘 변동성 레짐{' '}
-        <button type="button" className="vol-regime-info" onClick={() => setOpen(true)}>
+        <button type="button" className="btn btn-sm vol-regime-info" onClick={() => setOpen(true)}>
           설명
         </button>
       </div>
