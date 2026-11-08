@@ -274,6 +274,12 @@ export async function fetchRegime() {
   return getJson('/api/markets/regime')
 }
 
+// GET /api/markets/vol-regime — 오늘 변동성 레짐(PLAN.md §5.95, 표시 전용, 60초 서버 캐시).
+// regime과 같은 이유로 로컬 전용(정적 배포 대상 아님).
+export async function fetchVolRegime() {
+  return getJson('/api/markets/vol-regime')
+}
+
 // GET /api/groups?type=upjong|theme -> [{name, change_rate, value, market_sum}] —
 // 해당 group_type의 최신 날짜 스냅샷 (PLAN.md §4.6 3.6-3 트리맵).
 export async function fetchGroups(type = 'upjong') {

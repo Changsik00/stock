@@ -19,6 +19,7 @@ import {
   fetchMacroSeries,
   fetchMarketSeries,
   fetchRegime,
+  fetchVolRegime,
   fetchScalpCandidates,
   fetchScalpHitrate,
   fetchSectorRotation,
@@ -31,6 +32,7 @@ import Badge from '../components/Badge'
 import GroupTreemap from '../components/GroupTreemap'
 import Modal from '../components/Modal'
 import RiskAlertBanner from '../components/RiskAlertBanner'
+import VolRegimeCard from '../components/dashboard/VolRegimeCard'
 import StockDetailModal from '../components/StockDetailModal'
 import StockHeatmap from '../components/StockHeatmap'
 import StockSearch from '../components/StockSearch'
@@ -265,6 +267,8 @@ export default function DashboardPage() {
   // kosdaq, cached_at }). scalpCandidates 등과 동일하게 로컬 전용 기능이라
   // 정적 배포에서는 항상 null.
   const [regime, setRegime] = useState(null)
+  // 오늘 변동성 레짐(PLAN.md §5.95, 표시 전용) — 장 마감 후엔 마지막 값 유지, 실패 시에도 이전 값 유지.
+  const [volRegime, setVolRegime] = useState(null)
 
   // 종목 랭킹 요약 3개 카드(거래대금 상위/실시간 관심 TOP5/스켈핑 후보)의 시장
   // 필터(PLAN.md §5.15-3) — 'all'|'kospi'|'kosdaq', 기본 전체. 수급 상위/ETF
@@ -430,6 +434,14 @@ export default function DashboardPage() {
         })
     }
 
+    function loadVolRegime() {
+      return fetchVolRegime()
+        .then((body) => {
+          if (!cancelled) setVolRegime(body)
+        })
+        .catch(() => {}) // 실패 시 마지막 값 유지
+    }
+
     // 지수 3종 타일 1D 실시간(PLAN.md 작업 지시, 2026-07-21) — 기존 1분 티어에
     // 편입(별도 setInterval 신설 금지). 실패 시 null로 두면 렌더 쪽이 자동으로
     // marketData(3M EOD)의 마지막 봉으로 폴백한다(아래 렌더부 indexTileOf 참고).
@@ -499,7 +511,8 @@ export default function DashboardPage() {
           loadBasisLive(),
           loadFuturesFlowLive(),
           loadFxLive(),
-          loadRegime()
+          loadRegime(),
+          loadVolRegime()
         )
       }
       return Promise.all(tasks)
@@ -1199,6 +1212,9 @@ export default function DashboardPage() {
           </div>
         </>
       )}
+
+      {/* 오늘 변동성 레짐(PLAN.md §5.95) — 표시 전용, 정적 배포에서는 숨김 */}
+      {!STATIC_DATA && <VolRegimeCard data={volRegime} />}
 
       {/* 1. 지수 3종 */}
       <div className="section-title" style={{ marginTop: 16 }}>

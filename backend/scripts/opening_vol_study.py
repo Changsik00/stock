@@ -46,24 +46,29 @@ from app.quant.nq_trail_backtest import (  # noqa: E402
     run_giveback_backtest,
     vol_giveback,
 )
+from app.quant.opening_vol import (  # noqa: E402
+    MIN_BARS,
+    NS,
+    OPEN_MIN,
+    auction_gap,
+    build_daily_context,
+    day_features,
+    hhmm_to_min,
+    log_returns,
+)
 from app.quant.signals import moving_average_cross, volume_spike  # noqa: E402
 
-NS = [5, 10, 15, 30]  # 초반 윈도우(분)
-RANGE_WIN = 20  # 직전 평균 레인지 일수
 BOOT_N = 5000
 BLOCK = 5
 TOP_Q = 0.8  # 상위 20%
 TRAIL_TOP_Q = 0.7  # 트레일 비교는 표본 확보를 위해 상위 30%
-OPEN_MIN = 9 * 60
-MIN_BARS = 300
 INDEX = {"kospi": "001", "kosdaq": "101"}
 ETFS = {"069500": "kospi", "229200": "kosdaq", "0167A0": "kospi"}  # 0167A0 기초는 반도체 -> 코스피 근사(참고용)
 rng = np.random.default_rng(20261106)
 warnings.filterwarnings("ignore", category=RuntimeWarning)  # 부트스트랩 퇴화 표본(빈 슬라이스) 경고 억제
 
 
-def _m(t: str) -> int:
-    return int(t[:2]) * 60 + int(t[2:4])
+_m = hhmm_to_min
 
 
 # ---------------------------------------------------------------- 로딩
@@ -94,67 +99,15 @@ async def load_daily(market: str) -> dict[dt.date, dict]:
     sql = text("select date,open,high,low,close from index_ohlcv where market=:m order by date")
     async with async_session_factory() as s:
         rows = (await s.execute(sql, {"m": market})).all()
-    days = {}
-    prev = None
-    ranges: list[float] = []
-    for d, o, h, l, c in rows:
-        if None in (o, h, l, c):
-            continue
-        o, h, l, c = map(float, (o, h, l, c))
-        days[d] = {"o": o, "h": h, "l": l, "c": c, "prev_c": prev,
-                   "avg20": float(np.mean(ranges[-RANGE_WIN:])) if len(ranges) >= RANGE_WIN else None}
-        if prev:
-            ranges.append((h - l) / prev * 100)
-        prev = c
-    # 일봉이 아직 없는 최신 거래일(장중/장마감 직후)용: 직전 종가와 최근 20일 평균 레인지
-    days["__next"] = {"o": None, "h": None, "l": None, "c": None, "prev_c": prev,
-                      "avg20": float(np.mean(ranges[-RANGE_WIN:])) if len(ranges) >= RANGE_WIN else None}
-    return days
+    return build_daily_context(rows)
 
 
 # ---------------------------------------------------------------- 피처
 
 
-def _rets(bars: list[dict], first_prev: float) -> list[float]:
-    """1분 로그수익률(%). 결측 구간(직전 봉과 2분 이상 간격)을 건너뛴 수익률은 버린다. 단 15:20->15:30 종가 단일가 점프는 유지."""
-    out = []
-    prev_c, prev_m = first_prev, None
-    for b in bars:
-        if prev_m is None or b["m"] - prev_m == 1 or _auction_gap(prev_m, b["m"]) or prev_m >= 15 * 60 + 30:
-            out.append(math.log(b["c"] / prev_c) * 100)
-        prev_c, prev_m = b["c"], b["m"]
-    return out
-
-
-def _auction_gap(a: int, b: int) -> bool:
-    """15:20~15:30 종가 단일가 구간(봉 없음, 정상 공백): 15:19/15:20 -> 15:30."""
-    return a >= 15 * 60 + 19 and b == 15 * 60 + 30
-
-
-def day_features(bars: list[dict], daily: dict | None, strict: bool = True) -> dict | None:
-    """한 거래일의 시초 피처 + 결과변수. 첫 봉이 09:00이 아니거나 봉이 너무 적으면 None.
-    strict=False는 초반 윈도우에 결측 분이 있어도 존재하는 봉만으로 부분 계산한다(사례 확인용, 통계 표본에는 쓰지 않음)."""
-    if not bars or bars[0]["m"] != OPEN_MIN or len(bars) < (MIN_BARS if strict else 200) or not daily or not daily["prev_c"]:
-        return None
-    pc = daily["prev_c"]
-    open0 = bars[0]["o"]
-    f = {"gap": (open0 / pc - 1) * 100, "avg20": daily["avg20"], "pc": pc, "open0": open0}
-    f["day_range"] = (max(b["h"] for b in bars) - min(b["l"] for b in bars)) / pc * 100
-    f["ratio"] = f["day_range"] / daily["avg20"] if daily["avg20"] else None
-    for n in NS:
-        early = [b for b in bars if b["m"] < OPEN_MIN + n]
-        rest = [b for b in bars if b["m"] >= OPEN_MIN + n]
-        if (strict and len(early) < n) or not early or not rest:  # 초반 윈도우에 결측 분이 있으면 해당 N은 사용하지 않는다
-            f[f"ok{n}"] = False
-            continue
-        f[f"ok{n}"] = True
-        f[f"rng{n}"] = (max(b["h"] for b in early) - min(b["l"] for b in early)) / pc * 100
-        f[f"rv{n}"] = math.sqrt(sum(r * r for r in _rets(early, open0)))
-        f[f"early_ret{n}"] = (early[-1]["c"] / open0 - 1) * 100
-        # 나머지 구간: 첫 수익률의 기준은 초반 윈도우 마지막 종가
-        f[f"rest_rng{n}"] = (max(b["h"] for b in rest) - min(b["l"] for b in rest)) / pc * 100
-        f[f"rest_rv{n}"] = math.sqrt(sum(r * r for r in _rets(rest, early[-1]["c"])))
-    return f
+# 공통 정의는 app/quant/opening_vol.py (대시보드 /api/markets/vol-regime과 공유, PLAN.md §5.95)
+_rets = log_returns
+_auction_gap = auction_gap
 
 
 # ---------------------------------------------------------------- 통계

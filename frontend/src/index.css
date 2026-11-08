@@ -1783,3 +1783,89 @@ header h1 {
 .narr-refresh-msg { margin-bottom: 8px; }
 .narr-news { margin-bottom: 14px; }
 .narr-news-list { margin: 6px 0 0; padding-left: 18px; font-size: 12px; display: flex; flex-direction: column; gap: 3px; max-height: 320px; overflow-y: auto; }
+
+/* 오늘 변동성 레짐 카드(PLAN.md §5.95) — 방향색(--up/--down)과 겹치지 않게 회색 계열 + 기존 badge-warn(주황) */
+.badge-neutral {
+  background: var(--border);
+  color: inherit;
+}
+
+.badge-neutral-strong {
+  background: rgba(127, 127, 127, 0.35);
+  font-weight: 600;
+}
+
+.badge-neutral-dashed {
+  background: transparent;
+  border: 1px dashed rgba(127, 127, 127, 0.7);
+}
+
+.vol-regime-panels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.vol-regime-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.vol-regime-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 12px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.vol-regime-grid dt {
+  opacity: 0.7;
+}
+
+.vol-regime-grid dd {
+  margin: 0;
+}
+
+.vol-regime-row {
+  display: contents;
+}
+
+.vol-regime-dim {
+  opacity: 0.6;
+  font-size: 12px;
+}
+
+.vol-regime-partial {
+  color: var(--badge-warn-fg);
+}
+
+.vol-regime-warning {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--badge-warn-fg);
+}
+
+.vol-regime-foot {
+  margin-top: 10px;
+  font-size: 11px;
+  opacity: 0.65;
+}
+
+.vol-regime-info {
+  font-size: 11px;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.vol-regime-explain p {
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 0 0 10px;
+}

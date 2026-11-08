@@ -103,6 +103,7 @@ from ..collectors.market_flow import fetch_live_flow
 from ..db import get_session
 from ..market_hours import KST, is_market_closed as _market_closed_kst, is_nxt_closed
 from ..models import (
+    IndexIntradayBar,
     IndexOhlcv,
     MacroSeries,
     MarketBreadth,
@@ -120,6 +121,7 @@ from ..quant import (
     sector_rotation,
     volume_surge,
 )
+from ..quant import opening_vol
 from ..quant.futures_flow_profile import compute_flow_profile, detect_flow_levels
 from ..quant.volume_profile import compute_volume_profile, detect_levels
 from ..services import DB_MARKET, get_market_series_from_db, get_stock_series_from_db
@@ -2132,3 +2134,129 @@ async def positioning_hitrate(session: AsyncSession = Depends(get_session)):
         **hitrate,
         "computed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
     }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/markets/vol-regime — 오늘 변동성 레짐 (PLAN.md §5.95, 표시 전용)
+# ---------------------------------------------------------------------------
+# 근거: §5.94 — 갭만으로는 그날 변동성을 못 맞히고 장 시작 후 5~30분 실현변동성이 설명한다.
+# 정의/계산은 app/quant/opening_vol.py(연구 스크립트와 공통). 매매 판정·킬스위치와 연결하지 않는다.
+
+_VOL_INDEX_CODE = {"kospi": "001", "kosdaq": "101"}
+_VOL_CACHE_TTL_SECONDS = 60
+_VOL_DIST_TTL_SECONDS = 3600  # 과거 분포는 새 거래일이 되기 전엔 바뀌지 않아 길게 캐시한다
+_vol_cache: dict[str, object] = {"ts": 0.0, "data": None}
+_vol_dist_cache: dict[tuple[str, dt.date], tuple[float, dict]] = {}
+_vol_cache_lock = asyncio.Lock()
+
+
+def _to_bar(r) -> dict | None:
+    t, o, h, l, c = r
+    if None in (o, h, l, c):
+        return None
+    return {"time": t, "m": opening_vol.hhmm_to_min(t), "o": float(o), "h": float(h), "l": float(l), "c": float(c)}
+
+
+async def _vol_load_daily_ctx(session: AsyncSession, market: str) -> dict:
+    rows = (
+        await session.execute(
+            select(IndexOhlcv.date, IndexOhlcv.open, IndexOhlcv.high, IndexOhlcv.low, IndexOhlcv.close)
+            .where(IndexOhlcv.market == market)
+            .order_by(IndexOhlcv.date)
+        )
+    ).all()
+    return opening_vol.build_daily_context([tuple(r) for r in rows])
+
+
+async def _vol_load_latest_bars(session: AsyncSession, code: str) -> tuple[dt.date | None, list[dict]]:
+    latest = (await session.execute(select(func.max(IndexIntradayBar.date)).where(IndexIntradayBar.code == code))).scalar()
+    if latest is None:
+        return None, []
+    rows = (
+        await session.execute(
+            select(IndexIntradayBar.time, IndexIntradayBar.open, IndexIntradayBar.high, IndexIntradayBar.low, IndexIntradayBar.close)
+            .where(IndexIntradayBar.code == code, IndexIntradayBar.date == latest)
+            .order_by(IndexIntradayBar.time)
+        )
+    ).all()
+    return latest, [b for b in map(_to_bar, rows) if b]
+
+
+async def _vol_distribution(session: AsyncSession, market: str, code: str, target: dt.date, daily_ctx: dict) -> dict:
+    """target 이전 거래일의 초반 rv 분포(캐시). 전체 이력 로딩이 무거워 (시장, 대상일) 단위로 1시간 캐시."""
+    key = (market, target)
+    hit = _vol_dist_cache.get(key)
+    now = time.monotonic()
+    if hit and now - hit[0] < _VOL_DIST_TTL_SECONDS:
+        return hit[1]
+    rows = (
+        await session.execute(
+            select(IndexIntradayBar.date, IndexIntradayBar.time, IndexIntradayBar.open, IndexIntradayBar.high,
+                   IndexIntradayBar.low, IndexIntradayBar.close)
+            .where(IndexIntradayBar.code == code, IndexIntradayBar.date < target)
+            .order_by(IndexIntradayBar.date, IndexIntradayBar.time)
+        )
+    ).all()
+    by_day: dict[dt.date, list[dict]] = {}
+    for r in rows:
+        b = _to_bar(r[1:])
+        if b:
+            by_day.setdefault(r[0], []).append(b)
+    dist = opening_vol.rv_distribution(by_day, daily_ctx, target)
+    for k in [k for k in _vol_dist_cache if k[0] == market]:
+        _vol_dist_cache.pop(k, None)  # 시장당 1개만 유지
+    _vol_dist_cache[key] = (now, dist)
+    return dist
+
+
+async def _warm_vol_regime(session: AsyncSession) -> dict:
+    now = time.monotonic()
+    async with _vol_cache_lock:
+        cached = _vol_cache["data"]
+        if cached is not None and (now - _vol_cache["ts"]) < _VOL_CACHE_TTL_SECONDS:
+            return cached
+        now_kst = dt.datetime.now(KST)
+        out: dict[str, dict] = {}
+        for market, code in _VOL_INDEX_CODE.items():
+            bar_date, bars = await _vol_load_latest_bars(session, code)
+            if not bars:
+                out[market] = opening_vol.build_market_snapshot([], None, {})
+                out[market].update({"bar_date": None, "is_today": False})
+                continue
+            ctx = await _vol_load_daily_ctx(session, market)
+            daily = ctx.get(bar_date) or ctx["__next"]
+            dist = await _vol_distribution(session, market, code, bar_date, ctx)
+            snap = opening_vol.build_market_snapshot(bars, daily, dist)
+            is_today = bar_date == now_kst.date()
+            snap.update({"bar_date": bar_date.isoformat(), "is_today": is_today})
+            if is_today and not _market_closed_kst(now_kst):
+                lag = now_kst.hour * 60 + now_kst.minute - opening_vol.hhmm_to_min(bars[-1]["time"])
+                snap["bar_lag_minutes"] = lag
+                if lag > 10:
+                    snap["warnings"].append(f"마지막 분봉이 {lag}분 전 — 수집 지연 가능")
+            elif not is_today:
+                snap["warnings"].append(f"오늘 분봉이 아직 없어 최근 거래일({bar_date.isoformat()}) 값을 표시")
+            out[market] = snap
+        payload = {
+            **out,
+            "as_of": now_kst.isoformat(),
+            "market_closed": _market_closed_kst(now_kst),
+            "disclaimer": opening_vol.DISCLAIMER,
+            "thresholds": {"calm_below": opening_vol.CALM_BELOW, "high_from": opening_vol.HIGH_FROM},
+        }
+        _vol_cache["data"] = payload
+        _vol_cache["ts"] = now
+        return payload
+
+
+@router.get("/api/markets/vol-regime")
+async def markets_vol_regime(session: AsyncSession = Depends(get_session)):
+    """오늘 변동성 레짐(PLAN.md §5.95) — 코스피/코스닥 지수 1분봉(index_intraday_bar) 기반, **표시 전용**.
+
+    시장별: 시초 갭(전일 종가 대비), 장 시작 후 5/15/30분 실현변동성 rv(%)와 과거 약 95거래일 같은 윈도우
+    rv 분포에서의 백분위, 직전 20일 평균 일레인지 대비 오늘 현재 레인지 배율, 라벨.
+    라벨 = 가장 긴 '완전' 윈도우 백분위 기준 calm(<40)/normal(40~80)/high(>=80), 윈도우가 안 지났으면 wait,
+    윈도우에 분봉 결측(서킷브레이커/수집 공백)이 있으면 partial(라벨을 만들지 않음). 오늘 분봉이 없으면
+    최근 거래일 값(is_today=false). 매매 판정에는 연결되지 않는다.
+    """
+    return await _warm_vol_regime(session)
