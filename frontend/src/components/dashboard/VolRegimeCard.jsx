@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { Skel } from './MetricTile'
 import Badge from '../Badge'
 import Modal from '../Modal'
 
@@ -37,63 +38,133 @@ function windowCell(w) {
   )
 }
 
+// 요약에 올릴 대표 윈도우 — 라벨 기준(가장 긴 완전 윈도우) > 완전 윈도우 중 가장 긴 것 > 부분계산 중 가장 긴 것.
+// 계산 로직이 아니라 "어느 값을 크게 보여줄지" 선택일 뿐이며 값 자체는 API 응답 그대로다.
+function pickWindow(m) {
+  const ws = m.windows ?? []
+  const basis = ws.find((w) => w.minutes === m.label_basis_minutes && w.status === 'ok')
+  if (basis) return basis
+  const rev = [...ws].reverse()
+  return rev.find((w) => w.status === 'ok') ?? rev.find((w) => w.status === 'partial') ?? null
+}
+
+// 요약(라벨 배지 + 핵심 숫자 하나 + 보조 한 줄) → 상세(갭/윈도우별 rv/경고)는 접기.
 function MarketPanel({ name, m }) {
+  const [more, setMore] = useState(false)
   if (!m) return null
+  const w = pickWindow(m)
   const basis = m.label_basis_minutes ? `${m.label_basis_minutes}분 기준` : null
+  const warnCount = (m.warnings ?? []).length
   return (
-    <div className="vol-regime-panel">
-      <div className="vol-regime-head">
-        <strong>{name}</strong>
+    <section className="vr-panel" aria-label={`${name} 변동성 레짐`}>
+      <div className="vr-head">
+        <h3 className="vr-name">{name}</h3>
         <LabelBadge label={m.label} />
-        {basis && <span className="vol-regime-dim">{basis}</span>}
-        {m.bar_date && !m.is_today && <span className="vol-regime-dim">{m.bar_date} 값</span>}
+        {basis && <span className="vr-aside">{basis}</span>}
+        {m.bar_date && !m.is_today && <span className="vr-aside">{m.bar_date} 값</span>}
       </div>
-      <dl className="vol-regime-grid">
-        <dt>시초 갭</dt>
-        <dd>{fmt(m.gap_pct, 2, true)}%</dd>
-        {(m.windows ?? []).map((w) => (
-          <div key={w.minutes} className="vol-regime-row">
-            <dt>초반 {w.minutes}분 rv</dt>
-            <dd>{windowCell(w)}</dd>
-          </div>
-        ))}
-        <dt>오늘 레인지</dt>
-        <dd>
-          {fmt(m.range_today_pct)}%
-          {m.range_ratio !== null && m.range_ratio !== undefined && ` (20일 평균 ${fmt(m.avg20_range_pct)}% 대비 ${fmt(m.range_ratio)}배)`}
-        </dd>
-      </dl>
-      {(m.warnings ?? []).map((w) => (
-        <div key={w} className="vol-regime-warning">
-          {w}
+      {w ? (
+        <div className="vr-main">
+          <span className="vr-hero">{fmt(w.rv_pct)}%</span>
+          <span className="vr-cap">
+            초반 {w.minutes}분 변동성
+            {w.percentile !== null && w.percentile !== undefined && ` · 과거 대비 P${Math.round(w.percentile)}`}
+            {w.status === 'partial' && ' · 부분계산'}
+          </span>
         </div>
-      ))}
-    </div>
+      ) : (
+        <div className="vr-main">
+          <span className="vr-hero vr-hero-empty">-</span>
+          <span className="vr-cap">장 시작 후 5분이 지나면 표시됩니다</span>
+        </div>
+      )}
+      <div className="vr-sub">
+        오늘 레인지 {fmt(m.range_today_pct)}%
+        {m.range_ratio !== null && m.range_ratio !== undefined && ` · 20일 평균의 ${fmt(m.range_ratio)}배`}
+      </div>
+      {warnCount > 0 && !more && <div className="vr-warn-line">주의 {warnCount}건 — 자세히에서 확인</div>}
+      <button type="button" className="btn btn-link btn-sm vr-toggle" aria-expanded={more} onClick={() => setMore(!more)}>
+        {more ? '접기' : '자세히'}
+      </button>
+      {more && (
+        <>
+          <dl className="vol-regime-grid">
+            <dt>시초 갭</dt>
+            <dd>{fmt(m.gap_pct, 2, true)}%</dd>
+            {(m.windows ?? []).map((x) => (
+              <div key={x.minutes} className="vol-regime-row">
+                <dt>초반 {x.minutes}분 rv</dt>
+                <dd>{windowCell(x)}</dd>
+              </div>
+            ))}
+            <dt>20일 평균 레인지</dt>
+            <dd>{fmt(m.avg20_range_pct)}%</dd>
+          </dl>
+          {(m.warnings ?? []).map((x) => (
+            <div key={x} className="vol-regime-warning">
+              {x}
+            </div>
+          ))}
+        </>
+      )}
+    </section>
   )
+}
+
+// 로딩/실패 표시용 — 응답이 오기 전엔 스켈레톤, 8초가 지나도 값이 없으면 실패 안내(값이 오면 자동 복구).
+function useStalled(active, ms = 8000) {
+  const [stalled, setStalled] = useState(false)
+  useEffect(() => {
+    if (!active) return undefined
+    const t = setTimeout(() => setStalled(true), ms)
+    return () => {
+      clearTimeout(t)
+      setStalled(false)
+    }
+  }, [active, ms])
+  return stalled
 }
 
 export default function VolRegimeCard({ data }) {
   const [open, setOpen] = useState(false)
-  if (!data) return null
-  const nDays = data.kospi?.windows?.find((w) => w.n_days)?.n_days ?? data.kosdaq?.windows?.find((w) => w.n_days)?.n_days
+  const stalled = useStalled(!data)
+  const nDays = data?.kospi?.windows?.find((w) => w.n_days)?.n_days ?? data?.kosdaq?.windows?.find((w) => w.n_days)?.n_days
   return (
     <>
-      <div className="section-title" style={{ marginTop: 16 }}>
-        오늘 변동성 레짐{' '}
+      <div className="section-title mt-title vr-title">
+        <span>오늘 변동성 레짐</span>
         <button type="button" className="btn btn-sm vol-regime-info" onClick={() => setOpen(true)}>
           설명
         </button>
       </div>
-      <div className="regime-card" style={{ borderColor: 'var(--border)' }}>
-        <div className="vol-regime-panels">
-          <MarketPanel name="코스피" m={data.kospi} />
-          <MarketPanel name="코스닥" m={data.kosdaq} />
+      {!data ? (
+        stalled ? (
+          <div className="vr-card vr-state" role="status">
+            변동성 데이터를 아직 불러오지 못했어요. 잠시 뒤 자동으로 다시 시도합니다.
+          </div>
+        ) : (
+          <div className="vr-card vr-panels" aria-busy="true">
+            {[0, 1].map((i) => (
+              <div key={i} className="vr-panel">
+                <Skel w={120} h={20} />
+                <Skel w={140} h={30} />
+                <Skel w={180} h={14} />
+              </div>
+            ))}
+          </div>
+        )
+      ) : (
+        <div className="vr-card">
+          <div className="vr-panels">
+            <MarketPanel name="코스피" m={data.kospi} />
+            <MarketPanel name="코스닥" m={data.kosdaq} />
+          </div>
+          <div className="vr-foot">
+            {data.disclaimer} 과거 {nDays ?? '약 95'}거래일 같은 윈도우와 비교 · 평온 &lt;P40 · 보통 P40~80 · 고변동 ≥P80 · 기준{' '}
+            {data.as_of?.slice(0, 16).replace('T', ' ')}
+          </div>
         </div>
-        <div className="vol-regime-foot">
-          {data.disclaimer} 장 시작 후 N분 실현변동성(rv)을 과거 {nDays ?? '약 95'}거래일 같은 윈도우 분포와 비교한 백분위(P) ·
-          평온 &lt;P40 · 보통 P40~80 · 고변동 ≥P80 · 기준 {data.as_of?.slice(0, 16).replace('T', ' ')}
-        </div>
-      </div>
+      )}
       <Modal open={open} onClose={() => setOpen(false)} title="오늘 변동성 레짐이란?" maxWidth={640}>
         <div className="vol-regime-explain">
           <p>

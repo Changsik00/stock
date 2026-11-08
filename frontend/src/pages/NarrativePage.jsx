@@ -7,7 +7,7 @@ import NarrativeSection from '../components/dashboard/NarrativeSection'
 export default function NarrativePage() {
   const [reloadKey, setReloadKey] = useState(0)
   return (
-    <div>
+    <div className="narr-page m-font">
       <NarrativeProposals onChanged={() => setReloadKey((k) => k + 1)} />
       <NarrativeSection reloadKey={reloadKey} />
     </div>

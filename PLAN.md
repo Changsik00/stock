@@ -5218,6 +5218,10 @@ active, valid_date). 추천은 매일 08:50 시나리오 규칙으로 재생성(
 
 `index.css`에 `.btn`(+primary/secondary/ghost/danger/link, `-sm`) 정의, 내러티브 탭·TOP5 더보기·변동성 레짐 안내 버튼에 적용. 가이드는 `frontend/DESIGN.md`. 스타일만 변경, 기능·API 불변.
 
+### Phase 5.97 — 모바일형 디자인 시범 (프론트, 2026-11-08)
+
+토스/네이버 증권형 방향 시범: Pretendard(npm `pretendard`, 가변 dynamic-subset self-host), 간격/타입 토큰, `MetricTile`(핵심 숫자+▲▼ 등락), 변동성 레짐 카드 요약/접기, 내러티브 탭 리스트화·스켈레톤·빈/에러 상태. 대상은 대시보드 최상단 + 내러티브 탭뿐이며 스타일/표현만 변경(기능·API 불변). 기록과 체크리스트는 `frontend/DESIGN.md` '모바일형 방향(시범)'.
+
 ---
 
 ## 7. 리스크 / 미확정 사항

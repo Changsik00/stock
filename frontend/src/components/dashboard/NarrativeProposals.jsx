@@ -8,7 +8,7 @@ import {
 } from '../../api'
 import Badge from '../Badge'
 import Modal from '../Modal'
-import NarrativeRow from './NarrativeRow'
+import NarrativeRow, { NarrSkeleton } from './NarrativeRow'
 
 // 뉴스 기반 내러티브 제안 피드 (PLAN.md §5.90-2) — 시스템(LLM)이 제안하고 사용자가 읽고
 // 승인/수정 후 승인/무시한다. 자동 확정 없음. 참고용, 매매 신호 아님.
@@ -209,14 +209,14 @@ export default function NarrativeProposals({ onChanged }) {
   const ext = data?.last_external
   return (
     <>
-      <div className="section-title">
-        새 제안 <span className="narr-meta">뉴스 기반 · 승인해야만 내러티브로 저장됩니다 · {data?.disclaimer || '참고용, 매매 신호 아님'}</span>
+      <div className="section-title mt-title">
+        새 제안 <span className="narr-meta">승인해야 저장됩니다 · {data?.disclaimer || '참고용, 매매 신호 아님'}</span>
       </div>
       <div className="narr-toolbar">
         <button type="button" className="btn btn-secondary btn-sm" onClick={handleRefresh} disabled={refreshing || data?.running}>
           {refreshing || data?.running ? '수집 중…' : '뉴스 수집'}
         </button>
-        <span className="narr-meta">
+        <span className="narr-meta narr-clamp" title={last?.message || undefined}>
           {last ? `마지막 갱신 ${fmtTime(last.ran_at)}${last.message ? ` — ${last.message}` : ''}` : '아직 갱신 기록이 없습니다 (평일 08:30·12:00·16:30 자동 수집)'}
         </span>
       </div>
@@ -229,14 +229,22 @@ export default function NarrativeProposals({ onChanged }) {
         </div>
       )}
       {refreshMsg && <div className="narr-meta narr-refresh-msg">{refreshMsg}</div>}
-      {error && <div className="state">제안 처리 실패: {error}</div>}
+      {error && (
+        <div className="narr-error" role="alert">
+          <span>제안 처리 실패: {error}</span>
+          <button type="button" className="btn btn-sm" onClick={load}>다시 시도</button>
+        </div>
+      )}
+      {!data && !error && <NarrSkeleton rows={3} />}
       {data && data.items.length > 0 && <div className="narr-meta narr-summary-line">제안 대기 {data.items.length}건</div>}
-      {data && data.items.length === 0 && <div className="narr-meta">대기 중인 새 제안이 없습니다.</div>}
-      <div className="narr-list">
-        {data?.items.map((p) => (
-          <ProposalCard key={p.id} p={p} busy={busyId === p.id} onApprove={handleApprove} onEdit={setEditing} onDismiss={handleDismiss} />
-        ))}
-      </div>
+      {data && data.items.length === 0 && <div className="narr-empty">대기 중인 새 제안이 없습니다.</div>}
+      {data && data.items.length > 0 && (
+        <div className="narr-list">
+          {data.items.map((p) => (
+            <ProposalCard key={p.id} p={p} busy={busyId === p.id} onApprove={handleApprove} onEdit={setEditing} onDismiss={handleDismiss} />
+          ))}
+        </div>
+      )}
       <RecentNews />
       <Modal open={Boolean(editing)} onClose={() => setEditing(null)} title="수정 후 승인" maxWidth={560}>
         {editing && (

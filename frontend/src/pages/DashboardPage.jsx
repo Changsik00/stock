@@ -33,6 +33,7 @@ import GroupTreemap from '../components/GroupTreemap'
 import Modal from '../components/Modal'
 import RiskAlertBanner from '../components/RiskAlertBanner'
 import VolRegimeCard from '../components/dashboard/VolRegimeCard'
+import MetricTile, { heroEok } from '../components/dashboard/MetricTile'
 import StockDetailModal from '../components/StockDetailModal'
 import StockHeatmap from '../components/StockHeatmap'
 import StockSearch from '../components/StockSearch'
@@ -1072,7 +1073,7 @@ export default function DashboardPage() {
   const effectiveValueRank = valueRankLiveActive ? valueRankLive : valueRankTop
 
   return (
-    <div className="dashboard-page">
+    <div className="dashboard-page m-font">
       <div className="dashboard-header-row">
         {/* 종목 검색 (PLAN.md §6 3.7-2) — 온디맨드 API(/api/stocks/search)라 정적
             스냅샷 대상이 아니다. 정적 배포(STATIC_DATA=1)에서는 검색을 서빙할 수 없으므로
@@ -1217,10 +1218,8 @@ export default function DashboardPage() {
       {!STATIC_DATA && <VolRegimeCard data={volRegime} />}
 
       {/* 1. 지수 3종 */}
-      <div className="section-title" style={{ marginTop: 16 }}>
-        지수
-      </div>
-      <div className="kpi-grid">
+      <div className="section-title mt-title">지수</div>
+      <div className="mt-row">
         {MARKETS.map((m) => {
           const latest = indexTileOf(m.key)
           const liveTime =
@@ -1229,32 +1228,26 @@ export default function DashboardPage() {
               : null
           const volumeSurgeText = volumeSurgeLabel(latest?.volumeSurge)
           return (
-            <KpiTile
+            <MetricTile
               key={m.key}
               label={m.label}
-              value={latest ? numFmt.format(latest.close) : marketLoading ? '…' : '-'}
-              valueClass={latest ? rateClass(latest.changeRate) : ''}
+              loading={!latest && marketLoading}
+              value={latest ? numFmt.format(latest.close) : null}
+              dir={latest ? rateClass(latest.changeRate) : undefined}
+              delta={latest ? (latest.changeRate == null ? '-' : `${Math.abs(latest.changeRate).toFixed(2)}%`) : undefined}
               sub={
-                latest && (
+                latest && (volumeSurgeText || latest.isLive || latest.date) ? (
                   <>
-                    <span className={`kpi-tile-sub ${rateClass(latest.changeRate)}`}>
-                      {rateLabel(latest.changeRate)}
-                      {latest.isLive ? (
-                        <>
-                          {' · '}
-                          <Badge kind="live">장중</Badge>
-                        </>
-                      ) : (
-                        <StaleDate date={latest.date} baseDate={baseDate} prefix=" · " />
-                      )}
-                    </span>
-                    {/* §5.24 시장 전체 거래량 급증 감지 — 데이터 부족(장 시작 직후
-                        등)이면 volumeSurgeText가 null이라 아무것도 렌더하지 않는다
-                        (placeholder/0 금지, 이 파일 기존 관례). "사라/팔아라" 같은
-                        판단 문구 없이 관찰 서술만 표시(§5 원칙). */}
-                    {volumeSurgeText && <span className="toggle-hint">{volumeSurgeText}</span>}
+                    {latest.isLive ? (
+                      <Badge kind="live">장중</Badge>
+                    ) : (
+                      <StaleDate date={latest.date} baseDate={baseDate} />
+                    )}
+                    {/* §5.24 시장 전체 거래량 급증 감지 — 데이터 부족이면 null이라 렌더하지 않는다
+                        (placeholder/0 금지). 관찰 서술만 표시(§5 원칙). */}
+                    {volumeSurgeText && <span className="mt-sub-note">{volumeSurgeText}</span>}
                   </>
-                )
+                ) : null
               }
               title={
                 latest?.isLive
@@ -1275,8 +1268,8 @@ export default function DashboardPage() {
           겸하므로 라이브 타일에는 StaleDate를 붙이지 않는다(작업 지시). 이 3개 타일은
           코스피+코스닥(현물) 기준이라 "(현물)"을 제목에 명시한다(PLAN.md §5.45-3) —
           선물 값은 클릭해 여는 FlowSummaryModal의 "선물" 필터에서 확인한다. */}
-      <div className="section-title">투자자별 수급 요약 (현물)</div>
-      <div className="kpi-grid">
+      <div className="section-title mt-title">투자자별 수급 요약 (현물)</div>
+      <div className="mt-row">
         {DEFAULT_INVESTORS.map((name) => {
           const liveValue = flowLiveSummary?.[name]
           const isLive = liveValue !== undefined
@@ -1288,26 +1281,23 @@ export default function DashboardPage() {
           const value = isLive ? liveValue : row?.net_value
           const hasValue = value !== undefined && value !== null
           return (
-            <KpiTile
+            <MetricTile
               key={name}
-              label={
-                <>
-                  <span className="dot" style={{ background: INVESTOR_COLOR_VAR[name] }} /> {name}
-                </>
-              }
-              value={hasValue ? eokLabel(value) : marketLoading ? '…' : '-'}
-              valueClass={hasValue ? (value >= 0 ? 'up' : 'down') : ''}
+              label={name}
+              dot={INVESTOR_COLOR_VAR[name]}
+              loading={!hasValue && marketLoading}
+              value={hasValue ? heroEok(value) : null}
+              dir={hasValue ? (value > 0 ? 'up' : value < 0 ? 'down' : '') : undefined}
+              delta={hasValue ? (value > 0 ? '순매수' : value < 0 ? '순매도' : '보합') : undefined}
               sub={
                 isLive ? (
-                  <span className="kpi-tile-sub">
-                    <Badge kind="live" />
-                  </span>
+                  <Badge kind="live" />
                 ) : (
                   row?.date && (
-                    <span className="kpi-tile-sub">
+                    <>
                       확정
                       <StaleDate date={row.date} baseDate={baseDate} prefix=" · " />
-                    </span>
+                    </>
                   )
                 )
               }

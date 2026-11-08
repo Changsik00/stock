@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { createNarrative, deleteNarrative, getNarratives, updateNarrative } from '../../api'
 import Badge from '../Badge'
 import Modal from '../Modal'
-import NarrativeRow from './NarrativeRow'
+import NarrativeRow, { NarrSkeleton } from './NarrativeRow'
 
 // 시장 내러티브 메모 (PLAN.md §5.90-1) — 사용자가 직접 기록한 서사를 실제 섹터
 // 수급/등락과 나란히 보여준다. 참고용이며 매매 신호가 아니다(자동 생성·확정 없음).
@@ -20,8 +20,9 @@ const ALIGN = {
 
 const numFmt = new Intl.NumberFormat('ko-KR')
 const signCls = (v) => (v > 0 ? 'up' : v < 0 ? 'down' : '')
-const fmtMil = (v) => (v == null ? '-' : `${v > 0 ? '+' : ''}${numFmt.format(Math.round(v / 100))}억`) // 백만원 -> 억원
-const fmtRate = (v) => (v == null ? '-' : `${v > 0 ? '+' : ''}${v.toFixed(2)}%`)
+// 방향은 ▲▼(CSS ::before, .up/.down)로 표시하므로 값은 부호 없는 절댓값으로 쓴다(숫자는 억 정수 · % 소수 2자리로 통일).
+const fmtMil = (v) => (v == null ? '-' : `${numFmt.format(Math.abs(Math.round(v / 100)))}억`) // 백만원 -> 억원
+const fmtRate = (v) => (v == null ? '-' : `${Math.abs(v).toFixed(2)}%`)
 
 function EvidenceRow({ e }) {
   const v = ALIGN[e.verdict] || ALIGN.unknown
@@ -33,12 +34,12 @@ function EvidenceRow({ e }) {
       </span>
       {e.source === 'sector_flow' ? (
         <span className="narr-ev-vals">
-          외 <span className={signCls(e.foreign_net)}>{fmtMil(e.foreign_net)}</span> · 기{' '}
-          <span className={signCls(e.institution_net)}>{fmtMil(e.institution_net)}</span> · 개{' '}
-          <span className={signCls(e.individual_net)}>{fmtMil(e.individual_net)}</span>
+          <span className="narr-ev-cell"><i>외</i><b className={signCls(e.foreign_net)}>{fmtMil(e.foreign_net)}</b></span>
+          <span className="narr-ev-cell"><i>기</i><b className={signCls(e.institution_net)}>{fmtMil(e.institution_net)}</b></span>
+          <span className="narr-ev-cell"><i>개</i><b className={signCls(e.individual_net)}>{fmtMil(e.individual_net)}</b></span>
         </span>
       ) : (
-        <span className={`narr-ev-vals ${signCls(e.change_rate)}`}>{fmtRate(e.change_rate)}</span>
+        <span className="narr-ev-vals"><span className="narr-ev-cell"><b className={signCls(e.change_rate)}>{fmtRate(e.change_rate)}</b></span></span>
       )}
       <span className={`narr-ev-verdict ${v.cls}`}>{e.verdict === 'unknown' ? '-' : v.label}</span>
     </div>
@@ -208,26 +209,34 @@ export default function NarrativeSection({ reloadKey = 0 }) {
 
   return (
     <>
-      <div className="section-title">
+      <div className="section-title mt-title">
         시장 내러티브{' '}
         <span className="narr-meta">{data?.disclaimer || '참고용, 매매 신호 아님'}</span>
       </div>
-      {data && <div className="narr-meta narr-summary-line">활성 {data.items.filter((n) => n.active).length}건{showInactive ? ` · 전체 ${data.items.length}건` : ''}</div>}
       <div className="narr-toolbar">
         <button type="button" className="btn btn-primary btn-sm" onClick={() => setEditing('new')}>+ 내러티브 추가</button>
         <label className="narr-check">
           <input type="checkbox" checked={showInactive} onChange={(e) => setShowInactive(e.target.checked)} /> 비활성/만료 포함
         </label>
+        {data && <span className="narr-meta narr-count">활성 {data.items.filter((n) => n.active).length}건{showInactive ? ` · 전체 ${data.items.length}건` : ''}</span>}
       </div>
-      {error && <div className="state">내러티브 처리 실패: {error}</div>}
-      {data && data.items.length === 0 && (
-        <div className="narr-meta">기록된 내러티브가 없습니다. 직접 추가해 실제 수급과 대조해 보세요.</div>
+      {error && (
+        <div className="narr-error" role="alert">
+          <span>내러티브 처리 실패: {error}</span>
+          <button type="button" className="btn btn-sm" onClick={load}>다시 시도</button>
+        </div>
       )}
-      <div className="narr-list">
-        {data?.items.map((n) => (
-          <NarrativeCard key={n.id} n={n} onEdit={setEditing} onDelete={handleDelete} />
-        ))}
-      </div>
+      {!data && !error && <NarrSkeleton rows={2} />}
+      {data && data.items.length === 0 && (
+        <div className="narr-empty">기록된 내러티브가 없습니다. 직접 추가해 실제 수급과 대조해 보세요.</div>
+      )}
+      {data && data.items.length > 0 && (
+        <div className="narr-list">
+          {data.items.map((n) => (
+            <NarrativeCard key={n.id} n={n} onEdit={setEditing} onDelete={handleDelete} />
+          ))}
+        </div>
+      )}
       <Modal open={Boolean(editing)} onClose={() => setEditing(null)} title={editing === 'new' ? '내러티브 추가' : '내러티브 수정'} maxWidth={560}>
         {editing && (
           <NarrativeForm
