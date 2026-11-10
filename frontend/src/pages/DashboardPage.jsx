@@ -3,6 +3,7 @@ import {
   STATIC_DATA,
   fetchAttention,
   fetchBasis,
+  fetchExpiryCumulative,
   fetchBasisLive,
   fetchBreadth,
   fetchBreadthLive,
@@ -45,7 +46,7 @@ import {
   MARKET_FUND_IDS,
   US_INDEX_SERIES,
 } from '../constants'
-import { formatDate } from '../format'
+import { formatDate, signedEokJoLabel } from '../format'
 import { isNewerDate, shouldUseClosedLiveIndexRow } from '../liveFallback'
 import {
   BREADTH_LIVE_POLL_MS,
@@ -199,6 +200,8 @@ export default function DashboardPage() {
   // 외인 현물/선물 순매수 자체는 새로 fetch하지 않고 위 marketData(선물 포함)와
   // 아래 flowInvestorSummary/flowLiveSummary(현물, 코스피+코스닥)를 그대로 재사용한다.
   const [basisData, setBasisData] = useState(null)
+  // 만기 사이클 누적 수급(Phase 5.100) — 다음 만기 타일 한 줄용. 로컬 전용.
+  const [expiryCum, setExpiryCum] = useState(null)
   const [derivativeFlow, setDerivativeFlow] = useState(null)
   const [programFlow, setProgramFlow] = useState({})
 
@@ -588,6 +591,20 @@ export default function DashboardPage() {
     fetchBasis(FOREIGN_POSITION_TILE_DAYS)
       .then((body) => {
         if (!cancelled) setBasisData(body)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // 만기 사이클 누적 수급(Phase 5.100) — 정적 배포에는 스냅샷이 없어 호출하지 않는다.
+  useEffect(() => {
+    if (STATIC_DATA) return undefined
+    let cancelled = false
+    fetchExpiryCumulative(6)
+      .then((body) => {
+        if (!cancelled) setExpiryCum(body)
       })
       .catch(() => {})
     return () => {
@@ -1472,7 +1489,42 @@ export default function DashboardPage() {
         <KpiTile
           label="다음 만기"
           value={expiry?.date ? `${mmdd(expiry.date)} · D-${expiry.d_day}` : '…'}
-          sub={expiry?.quadruple && <Badge kind="warn">네 마녀의 날</Badge>}
+          sub={
+            <>
+              {expiry?.quadruple && <Badge kind="warn">네 마녀의 날</Badge>}
+              {expiryCum?.current && (
+                <span
+                  className="kpi-tile-sub"
+                  style={{ display: 'block' }}
+                  title="직전 만기 익일부터 오늘까지 순매수 누적 — 현물은 코스피 시장 합계, 선물은 K200(옵션 아님)"
+                >
+                  {typeof expiryCum.current.spot_totals?.foreign === 'number' && (
+                    <>
+                      사이클 현물 외인{' '}
+                      <span className={expiryCum.current.spot_totals.foreign >= 0 ? 'up' : 'down'}>
+                        {expiryCum.current.spot_totals.foreign >= 0 ? '▲' : '▼'}{' '}
+                        {signedEokJoLabel(expiryCum.current.spot_totals.foreign)}
+                      </span>
+                      {expiryCum.current.absorption && (
+                        <> · 기관·개인 {Math.round(expiryCum.current.absorption.pct)}% 흡수</>
+                      )}
+                      <br />
+                    </>
+                  )}
+                  선물 외인{' '}
+                  <span className={expiryCum.current.totals.foreign >= 0 ? 'up' : 'down'}>
+                    {expiryCum.current.totals.foreign >= 0 ? '▲' : '▼'}{' '}
+                    {signedEokJoLabel(expiryCum.current.totals.foreign)}
+                  </span>
+                  {' · 기관 '}
+                  <span className={expiryCum.current.totals.institution >= 0 ? 'up' : 'down'}>
+                    {expiryCum.current.totals.institution >= 0 ? '▲' : '▼'}{' '}
+                    {signedEokJoLabel(expiryCum.current.totals.institution)}
+                  </span>
+                </span>
+              )}
+            </>
+          }
           title={expiry?.date ? formatDate(expiry.date) : undefined}
           onClick={() =>
             setModal(

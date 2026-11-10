@@ -130,6 +130,7 @@ from ..db import get_session
 from ..derivatives import days_to_expiry, is_quadruple_witching, next_futures_expiry
 from ..market_hours import KST, is_market_closed
 from ..models import IndexOhlcv
+from ..quant.expiry_cumulative import compute_expiry_cumulative
 from ..quant.expiry_pattern import compute_expiry_pattern
 
 logger = logging.getLogger(__name__)
@@ -379,6 +380,34 @@ async def basis_series(
         "latest": latest_status,
         "expiry": _build_expiry(dt.date.today()),
     }
+
+
+@router.get("/api/markets/basis/expiry-cumulative")
+async def basis_expiry_cumulative(
+    cycles: int = 6,
+    market: str = "kospi",
+    mode: str = "cycle",
+    days: int = 60,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """만기 사이클 누적 수급(PLAN.md Phase 5.100) — 외국인·기관계·개인의 K200
+    **선물** 순매수(백만원)를 만기 사이클(직전 만기 익일~만기 당일)별로 누적한다.
+    옵션 수급은 수집하지 않는다. 관찰 통계이며 예측 아님. 캐시 없음(값싼 DB 읽기).
+
+    Phase 5.101: ``market``(kospi|kosdaq) 현물 외국인/기관계/개인 누적과 같은 구간 지수
+    등락률(%)을 함께 반환(선물 필드는 그대로). ``mode``=cycle|recent(``days`` 거래일)|
+    peak(최근 120거래일 종가 고점 다음 날~오늘)."""
+    if market not in ("kospi", "kosdaq"):
+        raise HTTPException(status_code=422, detail="market은 kospi 또는 kosdaq")
+    if mode not in ("cycle", "recent", "peak"):
+        raise HTTPException(status_code=422, detail="mode는 cycle|recent|peak")
+    return await compute_expiry_cumulative(
+        session,
+        cycles=max(1, min(cycles, 24)),
+        market=market,
+        mode=mode,
+        days=max(1, min(days, 500)),
+    )
 
 
 @router.get("/api/markets/basis/expiry-pattern")

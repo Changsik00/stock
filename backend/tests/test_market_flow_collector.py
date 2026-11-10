@@ -25,11 +25,34 @@ from app.collectors import market_flow
 DATE = dt.date(2026, 7, 16)
 
 
+class _FakeResult:
+    def __init__(self, scalar=None, rows=()):
+        self._scalar = scalar
+        self._rows = list(rows)
+
+    def scalar(self):
+        return self._scalar
+
+    def all(self):
+        return self._rows
+
+
 class FakeSession:
-    def __init__(self):
+    """INSERT는 executed에 기록하고, SELECT(직전 영업일 조회)는 prev 설정으로 응답한다.
+
+    prev=(날짜, {투자자: 값}) 이면 그 날짜의 직전 영업일 행이 있는 것처럼 동작하고,
+    None이면 직전 행이 없는 것으로 응답한다(기본)."""
+
+    def __init__(self, prev=None):
         self.executed = []
+        self.prev = prev
 
     async def execute(self, stmt):
+        if getattr(stmt, "is_select", False):
+            if self.prev is None:
+                return _FakeResult(scalar=None, rows=[])
+            prev_date, values = self.prev
+            return _FakeResult(scalar=prev_date, rows=list(values.items()))
         self.executed.append(stmt)
 
 
@@ -252,3 +275,80 @@ def test_parse_amount_million_converts_eokwon_to_million_won():
     assert market_flow._parse_amount_million("abc") is None
     assert market_flow._parse_amount_million("-26,444") == -2_644_400
     assert market_flow._parse_amount_million(0) == 0
+
+
+# ---- Phase 5.102: 휴장일 유령 행 차단 ----
+
+
+async def test_collect_skips_krx_holiday_without_calling_kiwoom(monkeypatch):
+    """한글날(2026-10-09, 금)은 평일이지만 휴장 -> 키움 호출 없이 0행."""
+    fake = _patch_client(
+        monkeypatch,
+        {
+            "0": {"inds_netprps": [_summary_row("001_AL", "종합(KOSPI)")]},
+            "1": {"inds_netprps": [_summary_row("101_AL", "종합(KOSDAQ)")]},
+        },
+    )
+    session = FakeSession()
+    assert await market_flow.collect(session, dt.date(2026, 10, 9)) == 0
+    assert session.executed == []
+    assert fake.calls == []
+
+
+async def test_collect_skips_weekend_and_known_variable_holiday(monkeypatch):
+    """토요일과 실측 확인된 비고정 휴장일(대체휴일 2026-08-17)도 건너뛴다."""
+    fake = _patch_client(monkeypatch, {})
+    session = FakeSession()
+    assert await market_flow.collect(session, dt.date(2026, 11, 7)) == 0  # 토
+    assert await market_flow.collect(session, dt.date(2026, 8, 17)) == 0  # 대체휴일
+    assert session.executed == []
+    assert fake.calls == []
+
+
+async def test_collect_normal_trading_day_still_upserts(monkeypatch):
+    """정상 거래일 + 직전 영업일 값이 다르면 그대로 26행 적재."""
+    _patch_client(
+        monkeypatch,
+        {
+            "0": {"inds_netprps": [_summary_row("001_AL", "종합(KOSPI)")]},
+            "1": {"inds_netprps": [_summary_row("101_AL", "종합(KOSDAQ)")]},
+        },
+    )
+    prev = (dt.date(2026, 7, 15), {"외국인": 1, "개인": 2})
+    session = FakeSession(prev=prev)
+    assert await market_flow.collect(session, DATE) == 26
+
+
+async def test_collect_skips_copy_of_previous_trading_day(monkeypatch):
+    """달력에 없는 휴장일: 응답이 직전 영업일 저장값과 완전 동일하면 유령으로 보고
+    market_flow·sector_flow 모두 적재하지 않는다(키움 응답엔 기준일이 없다)."""
+    summary = _summary_row("001_AL", "종합(KOSPI)")
+    _patch_client(
+        monkeypatch,
+        {
+            "0": {
+                "inds_netprps": [
+                    summary,
+                    _sector_row("013_AL", "전기/전자", "-2000", "1500", "500"),
+                ]
+            },
+            "1": {"inds_netprps": [_summary_row("101_AL", "종합(KOSDAQ)")]},
+        },
+    )
+    flows = market_flow._summary_flows_from_rows([summary], "kospi", DATE)
+    prev_values = {f["investor"]: f["net_value"] for f in flows}
+    # 코스피만 직전과 동일하게 설정 — FakeSession은 시장 구분 없이 같은 prev를 주므로
+    # 코스닥(같은 _summary_row 값)도 동일 판정되어 전부 건너뛴다.
+    session = FakeSession(prev=(dt.date(2026, 7, 15), prev_values))
+    assert await market_flow.collect(session, DATE) == 0
+    assert session.executed == []
+
+
+async def test_copy_check_false_when_any_value_differs():
+    flows = [{"investor": "외국인", "net_value": 10}, {"investor": "개인", "net_value": -5}]
+    same = FakeSession(prev=(dt.date(2026, 7, 15), {"외국인": 10, "개인": -5}))
+    diff = FakeSession(prev=(dt.date(2026, 7, 15), {"외국인": 10, "개인": -6}))
+    none = FakeSession(prev=None)
+    assert await market_flow._is_copy_of_previous_day(same, "kospi", DATE, flows) is True
+    assert await market_flow._is_copy_of_previous_day(diff, "kospi", DATE, flows) is False
+    assert await market_flow._is_copy_of_previous_day(none, "kospi", DATE, flows) is False

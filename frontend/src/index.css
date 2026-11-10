@@ -1159,6 +1159,14 @@ header h1 {
   font-variant-numeric: tabular-nums;
 }
 
+.kpi-tile-sub .up {
+  color: var(--up);
+}
+
+.kpi-tile-sub .down {
+  color: var(--down);
+}
+
 .kpi-tile-sub.up {
   color: var(--up);
 }
@@ -2155,3 +2163,28 @@ header h1 {
 .narr-empty { padding: var(--sp-4); margin-bottom: var(--sp-5); font-size: var(--fs-body); color: var(--text-secondary); background: var(--surface); border: 1px dashed var(--axis); border-radius: var(--r-card); }
 .narr-error { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-2) var(--sp-3); padding: var(--sp-3) var(--sp-4); margin-bottom: var(--sp-3); font-size: 13px; color: var(--warn-text); border: 1px solid var(--warn-text); border-radius: var(--r-card); }
 .narr-skel-row { display: flex; flex-direction: column; gap: var(--sp-2); min-height: 64px; padding: var(--sp-4); }
+
+/* 만기 모달 흡수율·라벨 표(Phase 5.103) — 좁은 폭에서 줄바꿈으로 가로 스크롤 방지 */
+.absorb-table {
+  table-layout: fixed;
+}
+
+.absorb-table th:nth-child(1),
+.absorb-table td:nth-child(1) {
+  width: 22%;
+}
+
+.absorb-table th:nth-child(2),
+.absorb-table td:nth-child(2) {
+  width: 15%;
+}
+
+.absorb-table th,
+.absorb-table td {
+  white-space: normal;
+  word-break: keep-all;
+  font-size: 12px;
+  line-height: 1.35;
+  padding: 4px 6px;
+  vertical-align: top;
+}

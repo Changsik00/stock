@@ -52,4 +52,14 @@ export function formatEok(million) {
   return `${eokIntFmt.format(Math.round(million / 100))}억원`
 }
 
+// 부호 있는 억/조 표기(Phase 5.100) — 백만원 입력. 1조(1,000,000백만원) 이상은
+// "N.NN조", 그 미만은 억 정수. 부호는 +/−(U+2212). null이면 '-'.
+export function signedEokJoLabel(million) {
+  if (typeof million !== 'number') return '-'
+  const sign = million > 0 ? '+' : million < 0 ? '\u2212' : ''
+  const abs = Math.abs(million)
+  if (abs >= 1e6) return `${sign}${(abs / 1e6).toFixed(2)}조`
+  return `${sign}${Math.round(abs / 100).toLocaleString('ko-KR')}억`
+}
+
 export default formatDate

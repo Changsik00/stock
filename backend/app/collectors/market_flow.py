@@ -62,10 +62,12 @@ from __future__ import annotations
 import datetime as dt
 import logging
 
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..clients.kiwoom import KiwoomClient
+from ..krx_calendar import is_krx_closed
 from ..models import MarketFlow, SectorFlow
 from .base import REGISTRY
 
@@ -246,6 +248,42 @@ async def fetch_live_flow(client: KiwoomClient, market: str, target_date: dt.dat
     return await _fetch_kiwoom_flow(client, market, target_date)
 
 
+async def _is_copy_of_previous_day(
+    session: AsyncSession, market: str, target_date: dt.date, flows: list[dict]
+) -> bool:
+    """flows(13분류)가 DB에 저장된 직전 영업일 값과 **전부 동일**하면 True.
+
+    ka10051은 비영업일에 직전 확정치를 그대로 돌려주고 응답에 기준일이 없어
+    (Phase 5.102) 요청일과 비교할 수 없다. 달력(krx_calendar)이 모르는 휴장일의
+    2차 방어선이다. 13개 값이 모두 일치할 확률은 실질적으로 0이다. 직전 행이
+    없으면(백필 초기 등) False.
+    """
+    prev_date = (
+        await session.execute(
+            select(func.max(MarketFlow.date)).where(
+                MarketFlow.market == market,
+                MarketFlow.source == SOURCE,
+                MarketFlow.date < target_date,
+            )
+        )
+    ).scalar()
+    if prev_date is None:
+        return False
+    rows = (
+        await session.execute(
+            select(MarketFlow.investor, MarketFlow.net_value).where(
+                MarketFlow.market == market,
+                MarketFlow.source == SOURCE,
+                MarketFlow.date == prev_date,
+            )
+        )
+    ).all()
+    prev = {investor: value for investor, value in rows}
+    if len(prev) < len(flows):
+        return False
+    return all(prev.get(f["investor"]) == f["net_value"] for f in flows)
+
+
 async def collect(session: AsyncSession, target_date: dt.date) -> int:
     """kospi/kosdaq의 target_date 투자자별 순매수를 market_flow에 upsert하고,
     같은 ka10051 응답의 업종별 행을 sector_flow에도 함께 upsert한다(모듈
@@ -259,12 +297,28 @@ async def collect(session: AsyncSession, target_date: dt.date) -> int:
         기존 collect_log/테스트가 기대하는 "26행/일" 계약을 그대로 유지하기
         위함(업종별 적재 건수는 로그로만 남긴다).
     """
+    # 휴장일 가드(Phase 5.102): ka10051이 비영업일에 직전 확정치를 요청일 날짜로
+    # 돌려줘 유령 행이 쌓였다. 호출 전에 달력으로 막아 키움 호출도 아낀다.
+    if is_krx_closed(target_date):
+        logger.info("market_flow: %s 휴장일(달력), 적재 건너뜀", target_date)
+        return 0
+
     rows_written = 0
     async with KiwoomClient() as client:
         for market in MARKETS:
             raw_rows = await _fetch_ka10051_rows(client, market, target_date)
 
             flows = _summary_flows_from_rows(raw_rows, market, target_date)
+            # 달력에 없는 휴장일 2차 방어: 직전 영업일 값과 완전 동일하면 유령 행으로
+            # 보고 market_flow·sector_flow 모두 적재하지 않는다.
+            if flows and await _is_copy_of_previous_day(session, market, target_date, flows):
+                logger.warning(
+                    "market_flow: %s %s 값이 직전 영업일과 완전 동일 -> 휴장일 유령으로 "
+                    "판단, 건너뜀",
+                    market,
+                    target_date,
+                )
+                continue
             if not flows:
                 logger.info("market_flow: no data for %s %s, skipping", market, target_date)
             else:

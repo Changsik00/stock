@@ -461,6 +461,19 @@ export async function fetchExpiryPattern() {
   return getJson('/api/markets/basis/expiry-pattern')
 }
 
+// GET /api/markets/basis/expiry-cumulative?cycles=N -> { current, completed[], next_expiry,
+// unit: '백만원', basis, date_from, date_to } (PLAN.md Phase 5.100) — 만기 사이클(직전 만기
+// 익일~만기 당일)별 외국인·기관계·개인 K200 선물 순매수 누적. 옵션 아님, 관찰 통계.
+// 로컬 전용(STATIC_DATA 스냅샷 없음) — 정적 배포에서는 호출부가 가드한다.
+// Phase 5.101: opts={market:'kospi'|'kosdaq', mode:'cycle'|'recent'|'peak', days} — 현물
+// 외국인/기관계/개인 누적(spot_totals, 곡선의 spot_*)·구간 지수 등락률(index_pct) 추가,
+// recent/peak는 응답에 window(+peak)가 붙는다. 선물 필드는 5.100 그대로.
+export async function fetchExpiryCumulative(cycles = 6, { market = 'kospi', mode = 'cycle', days = 60 } = {}) {
+  return getJson(
+    `/api/markets/basis/expiry-cumulative?cycles=${cycles}&market=${market}&mode=${mode}&days=${days}`,
+  )
+}
+
 // GET /api/etf/derivative-flow?days=N -> { days, universe: {total, leverage, inverse},
 // latest: {date, net_bet, lp_hedge_est, leverage_inflow, inverse_inflow, counts}|null,
 // series: [...] } (PLAN.md §4.5-1/4.5-5) — 파생형(레버리지/인버스) ETF 방향성 게이지.

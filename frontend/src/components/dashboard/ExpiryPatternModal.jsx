@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
-import { fetchExpiryPattern } from '../../api'
+import { fetchExpiryCumulative, fetchExpiryPattern } from '../../api'
+import ExpiryCumulativeChart from '../ExpiryCumulativeChart'
 import ExpiryPatternChart from '../ExpiryPatternChart'
+import { signedEokJoLabel } from '../../format'
 
 // K200 선물 만기 수렴 패턴 상세(PLAN.md §5.42) — "다음 만기" 타일 클릭 시 여는
 // 모달. DerivativeEtfModal과 동일한 자기완결 패턴(마운트 시 1회만 fetch, 폴링
@@ -9,6 +11,256 @@ import ExpiryPatternChart from '../ExpiryPatternChart'
 // 않는다(fetchScalpHitrate와 동일 이유, api.js 주석 참고) — 대신 "다음 만기"
 // 타일의 onClick 자체가 STATIC_DATA일 때는 기존 foreignPosition 모달을 열도록
 // 분기해 정적 배포에서도 클릭이 헛돌지 않게 한다.
+// 누적 수급 섹션(Phase 5.100/5.101) — 선물(옵션 아님)·현물 순매수 누적, 관찰 통계.
+// 기간: 사이클 / 최근 20·60·120거래일 / 고점 이후. 시장 토글(코스피/코스닥).
+const PERIODS = [
+  { key: 'cycle', label: '사이클', mode: 'cycle', days: 60 },
+  { key: 'r20', label: '20일', mode: 'recent', days: 20 },
+  { key: 'r60', label: '60일', mode: 'recent', days: 60 },
+  { key: 'r120', label: '120일', mode: 'recent', days: 120 },
+  { key: 'peak', label: '고점 이후', mode: 'peak', days: 60 },
+]
+const MARKETS = [
+  { key: 'kospi', label: '코스피' },
+  { key: 'kosdaq', label: '코스닥' },
+]
+
+const dirCls = (v) => (v > 0 ? 'up' : v < 0 ? 'down' : '')
+const pct = (v) => (typeof v === 'number' ? `${v > 0 ? '+' : v < 0 ? '\u2212' : ''}${Math.abs(v).toFixed(1)}%` : '-')
+
+// 현물·선물 외국인 방향이 엇갈리면 관찰형 문구(권유 아님). 한쪽이 없으면 null.
+function divergenceNote(item) {
+  const s = item?.spot_totals?.foreign
+  const f = item?.totals?.foreign
+  if (typeof s !== 'number' || typeof f !== 'number' || s === 0 || f === 0) return null
+  if (s > 0 === f > 0) return '외국인 현물·선물 누적 방향이 같습니다.'
+  return `외국인 현물은 순${s > 0 ? '매수' : '매도'}, 선물은 순${f > 0 ? '매수' : '매도'}로 누적 방향이 엇갈립니다.`
+}
+
+const absLabel = (v) => signedEokJoLabel(Math.abs(v)).replace('+', '')
+const pctPlain = (v) => (typeof v === 'number' ? `${v < 0 ? '\u2212' : ''}${Math.abs(v).toFixed(0)}%` : '-')
+
+// 외인 현물 순매도 구간의 흡수율 요약(Phase 5.103) — 관찰형. 외인이 순매수면 해당없음.
+function AbsorptionSummary({ item, stats }) {
+  const a = item?.absorption
+  const f = item?.spot_totals?.foreign
+  if (typeof f !== 'number') return null
+  return (
+    <div className="toggle-hint" style={{ margin: '0 0 8px' }}>
+      {a ? (
+        <>
+          외인 현물 {absLabel(a.foreign)} 순매도 중 기관·개인이 <strong>{pctPlain(a.pct)}</strong> 받아냄
+          (기관 {pctPlain(a.institution_pct)} · 개인 {pctPlain(a.individual_pct)}).
+        </>
+      ) : (
+        <>외인 현물이 순매수{f > 0 ? '' : '·0'}인 구간이라 흡수율은 해당없음입니다.</>
+      )}
+      {stats?.n > 0 && (
+        <>
+          <br />
+          과거 완료 사이클(외인 순매도 {stats.n}개) 흡수율 최소 {pctPlain(stats.min)} · 중앙값 {pctPlain(stats.median)} · 최대{' '}
+          {pctPlain(stats.max)}. 외인 매도 규모가 작으면 비율이 크게 튑니다.
+        </>
+      )}
+    </div>
+  )
+}
+
+function ExpiryCumulativeSection() {
+  const [market, setMarket] = useState('kospi')
+  const [period, setPeriod] = useState('cycle')
+  const [showInst, setShowInst] = useState(false)
+  const [data, setData] = useState(null)
+  const [error, setError] = useState(null)
+  const [sel, setSel] = useState('current')
+
+  useEffect(() => {
+    let cancelled = false
+    const p = PERIODS.find((x) => x.key === period)
+    setData(null)
+    setError(null)
+    fetchExpiryCumulative(6, { market, mode: p.mode, days: p.days })
+      .then((body) => {
+        if (!cancelled) setData(body)
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e.message)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [market, period])
+
+  const controls = (
+    <>
+      <div className="toggle-row" style={{ marginBottom: 6 }}>
+        {MARKETS.map((m) => (
+          <button key={m.key} type="button" className={`toggle-chip ${market === m.key ? 'active' : ''}`} onClick={() => setMarket(m.key)}>
+            {m.label}
+          </button>
+        ))}
+        <button type="button" className={`toggle-chip ${showInst ? 'active' : ''}`} onClick={() => setShowInst((v) => !v)}>
+          기관 포함
+        </button>
+      </div>
+      <div className="toggle-row" style={{ marginBottom: 8 }}>
+        {PERIODS.map((p) => (
+          <button key={p.key} type="button" className={`toggle-chip ${period === p.key ? 'active' : ''}`} onClick={() => setPeriod(p.key)}>
+            {p.label}
+          </button>
+        ))}
+      </div>
+    </>
+  )
+
+  const hint = (
+    <div className="toggle-hint" style={{ marginBottom: 8 }}>
+      현물(키움 {market === 'kospi' ? '코스피' : '코스닥'} 시장 합계)·K200 선물(옵션 수급 아님) 순매수를 같은 기간에
+      누적하고, 같은 기간 지수 등락률과 나란히 둔 관찰치입니다. 수급과 지수의 동시기간 비교일 뿐
+      인과나 이후 방향을 뜻하지 않으며 매매 신호가 아닙니다. 표본기간 {data?.date_from ?? '-'} ~ {data?.date_to ?? '-'}.
+    </div>
+  )
+
+  let body = null
+  if (error) body = <div className="state error">{error}</div>
+  else if (!data) body = <div className="state">불러오는 중…</div>
+  else if (period === 'cycle') body = <CycleBody data={data} sel={sel} setSel={setSel} showInst={showInst} />
+  else body = <WindowBody data={data} period={period} showInst={showInst} />
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      {hint}
+      {controls}
+      {body}
+    </div>
+  )
+}
+
+function CycleBody({ data, sel, setSel, showInst }) {
+  const cycles = [
+    ...(data.current ? [{ key: 'current', label: '현재', item: data.current }] : []),
+    ...[...data.completed].reverse().map((c) => ({ key: c.expiry, label: c.expiry.slice(2), item: c })),
+  ]
+  const picked = cycles.find((c) => c.key === sel) ?? cycles[0]
+  if (!picked) return <div className="state">표시할 데이터가 없습니다.</div>
+  const cell = (v) => (
+    <td className={dirCls(v)} style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+      {typeof v === 'number' ? `${v > 0 ? '▲ ' : v < 0 ? '▼ ' : ''}${signedEokJoLabel(v)}` : '-'}
+    </td>
+  )
+  const note = divergenceNote(picked.item)
+  return (
+    <>
+      <div className="toggle-row">
+        {cycles.map((c) => (
+          <button key={c.key} type="button" className={`toggle-chip ${picked.key === c.key ? 'active' : ''}`} onClick={() => setSel(c.key)}>
+            {c.label}
+          </button>
+        ))}
+      </div>
+      <div className="toggle-hint" style={{ margin: '8px 0' }}>
+        {picked.item.start} ~ {picked.item.end} · {picked.item.trading_days}거래일 · 지수 {pct(picked.item.index_pct)}
+        {picked.key === 'current' ? ` · 다음 만기 ${data.next_expiry}` : ` · 만기 ${picked.item.expiry}`}
+        {note && <><br />{note}</>}
+      </div>
+      <AbsorptionSummary item={picked.item} stats={data.absorption_stats} />
+      <ExpiryCumulativeChart curve={picked.item.curve} showInst={showInst} />
+      <div className="table-scroll">
+        <table className="flow-rank-table">
+          <thead>
+            <tr>
+              <th style={{ textAlign: 'left' }}>사이클(만기)</th>
+              <th style={{ textAlign: 'right' }}>외인 현물</th>
+              <th style={{ textAlign: 'right' }}>외인 선물</th>
+              <th style={{ textAlign: 'right' }}>기관 현물</th>
+              <th style={{ textAlign: 'right' }}>기관 선물</th>
+              <th style={{ textAlign: 'right' }}>지수</th>
+            </tr>
+          </thead>
+          <tbody>
+            {cycles.map((c) => (
+              <tr key={c.key}>
+                <td>{c.key === 'current' ? `현재(~${data.next_expiry.slice(5)})` : c.item.expiry}</td>
+                {cell(c.item.spot_totals?.foreign)}
+                {cell(c.item.totals.foreign)}
+                {cell(c.item.spot_totals?.institution)}
+                {cell(c.item.totals.institution)}
+                <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{pct(c.item.index_pct)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {/* 흡수율·라벨은 열이 많아 별도 표로 둔다(390px에서 가로 스크롤 없이 줄바꿈) */}
+      <table className="flow-rank-table absorb-table" style={{ marginTop: 8 }}>
+        <thead>
+          <tr>
+            <th style={{ textAlign: 'left' }}>사이클</th>
+            <th style={{ textAlign: 'right' }}>흡수율</th>
+            <th style={{ textAlign: 'left' }}>외인 현·선</th>
+            <th style={{ textAlign: 'left' }}>기관 현물</th>
+          </tr>
+        </thead>
+        <tbody>
+          {cycles.map((c) => (
+            <tr key={c.key}>
+              <td>{c.key === 'current' ? '현재' : c.item.expiry.slice(2)}</td>
+              <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                {c.item.absorption ? pctPlain(c.item.absorption.pct) : '해당없음'}
+              </td>
+              <td>{c.item.pair_label ?? '-'}</td>
+              <td>{c.item.inst_flip?.label.replace('기관 현물 누적 ', '') ?? '-'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
+  )
+}
+
+function WindowBody({ data, period, showInst }) {
+  const w = data.window
+  const peak = data.peak
+  if (period === 'peak' && !peak) return <div className="state">지수 종가 데이터가 없습니다.</div>
+  if (!w) {
+    return (
+      <div className="state">
+        {period === 'peak' ? `최근 ${peak.lookback}거래일 고점(${peak.date})이 마지막 거래일이라 고점 이후 구간이 없습니다.` : '표시할 데이터가 없습니다.'}
+      </div>
+    )
+  }
+  const note = divergenceNote(w)
+  const row = (label, v) => (
+    <span style={{ marginRight: 12 }}>
+      {label}{' '}
+      <strong className={dirCls(v)}>{typeof v === 'number' ? `${v > 0 ? '▲ ' : v < 0 ? '▼ ' : ''}${signedEokJoLabel(v)}` : '-'}</strong>
+    </span>
+  )
+  return (
+    <>
+      <div className="toggle-hint" style={{ margin: '8px 0' }}>
+        {period === 'peak' && (
+          <>
+            최근 {peak.lookback}거래일 지수 고점 {peak.date} · 고점 대비 {pct(peak.index_pct)}
+            <br />
+          </>
+        )}
+        {w.start} ~ {w.end} · {w.trading_days}거래일{period === 'peak' ? '' : ` · 지수 ${pct(w.index_pct)}`}
+        {note && <><br />{note}</>}
+      </div>
+      <div className="toggle-hint" style={{ margin: '0 0 8px' }}>
+        {row('외인 현물', w.spot_totals?.foreign)}
+        {row('외인 선물', w.totals.foreign)}
+        {row('기관 현물', w.spot_totals?.institution)}
+        {row('기관 선물', w.totals.institution)}
+        {row('개인 현물', w.spot_totals?.individual)}
+      </div>
+      <AbsorptionSummary item={w} stats={data.absorption_stats} />
+      <ExpiryCumulativeChart curve={w.curve} showInst={showInst} />
+    </>
+  )
+}
+
 export default function ExpiryPatternModal() {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -46,6 +298,7 @@ export default function ExpiryPatternModal() {
 
   return (
     <div>
+      <ExpiryCumulativeSection />
       {/* PLAN.md §5.42 "표본 수(사이클 개수)를 항상 그래프에 함께 노출한다" —
           툴팁 안에 숨기지 않고 그래프 바로 위에 상시 노출. 관찰형 문구만 쓰고
           "이번에도 이렇게 수렴할 것"이라는 예측형 표현은 쓰지 않는다(§5.15/
