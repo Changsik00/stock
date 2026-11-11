@@ -128,7 +128,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..clients import naver_index
 from ..db import get_session
 from ..derivatives import days_to_expiry, is_quadruple_witching, next_futures_expiry
-from ..market_hours import KST, is_market_closed
+from ..market_hours import (
+    CLOSED_REFETCH_TTL_SECONDS,
+    KST,
+    is_market_closed,
+    kst_now,
+    required_confirm_kst,
+)
 from ..models import IndexOhlcv
 from ..quant.expiry_cumulative import compute_expiry_cumulative
 from ..quant.expiry_pattern import compute_expiry_pattern
@@ -193,6 +199,88 @@ async def _expiry_history(
     }
 
 
+async def _refetch_basis_closed(
+    session: AsyncSession | None, cached: dict | None, now: float, now_kst: dt.datetime
+) -> dict:
+    """마감 후 재조회(``_warm_basis_live``가 캐시 락 안에서 호출). 장중과 같은 소스로
+    선물·현물 일봉을 조회해 ``market_closed: true`` payload를 만든다.
+
+    - 응답 ``date``는 소스 row의 실제 날짜다(휴장일엔 직전 거래일) — 오늘로 덮지 않는다.
+    - 예외 / row 없음 / 선물·현물 날짜 불일치(한쪽만 갱신)는 실패로 취급해 502 없이
+      기존 캐시(있으면) 또는 전부 null payload로 폴백하고, ``fetched_at``은 갱신하지 않아
+      다음 간격에 재시도된다. DB에는 쓰지 않는다."""
+    today = now_kst.date()
+    start = today - dt.timedelta(days=5)
+    errors: dict[str, str] = {}
+    futures_row = spot_row = None
+    try:
+        rows = await asyncio.to_thread(_fetch_index_series_blocking, FUTURES_MARKET, start, today)
+        futures_row = rows[-1] if rows else None
+    except Exception as e:  # noqa: BLE001
+        errors["futures"] = str(e)[:200]
+    try:
+        rows = await asyncio.to_thread(_fetch_index_series_blocking, SPOT_MARKET, start, today)
+        spot_row = rows[-1] if rows else None
+    except Exception as e:  # noqa: BLE001
+        errors["spot"] = str(e)[:200]
+
+    if futures_row is not None and spot_row is not None and futures_row["date"] != spot_row["date"]:
+        errors["mismatch"] = f"futures={futures_row['date']} spot={spot_row['date']}"
+        futures_row = None
+
+    if futures_row is None or spot_row is None:
+        logger.warning("basis_live: 장마감 재조회 실패, 기존 캐시/null 폴백: %s", errors)
+        if cached is not None:
+            payload = {**cached, "market_closed": True}
+        else:
+            history = await _expiry_history(session, days_to_expiry(today), None)
+            payload = {
+                "date": None,
+                "futures_close": None,
+                "kospi200_close": None,
+                "basis": None,
+                "basis_pct": None,
+                "backwardation": None,
+                "futures_today": None,
+                "expiry": _build_expiry_with_history(today, history),
+                "market_closed": True,
+                "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            }
+        # fetched_at은 건드리지 않는다(확정 조회 아님) — ts만 갱신해 다음 간격에 재시도.
+        _basis_live_cache["data"] = payload
+        _basis_live_cache["ts"] = now
+        return payload
+
+    basis = futures_row["close"] - spot_row["close"]
+    basis_pct = (basis / spot_row["close"] * 100) if spot_row["close"] else None
+    futures_today = {
+        "date": futures_row["date"].isoformat(),
+        "open": futures_row["open"],
+        "high": futures_row["high"],
+        "low": futures_row["low"],
+        "close": futures_row["close"],
+        "volume": futures_row["volume"],
+    }
+    basis_pct_rounded = round(basis_pct, 4) if basis_pct is not None else None
+    history = await _expiry_history(session, days_to_expiry(today), basis_pct_rounded)
+    payload = {
+        "date": futures_row["date"].isoformat(),
+        "futures_close": futures_row["close"],
+        "kospi200_close": spot_row["close"],
+        "basis": round(basis, 2),
+        "basis_pct": basis_pct_rounded,
+        "backwardation": basis < 0,
+        "futures_today": futures_today,
+        "expiry": _build_expiry_with_history(today, history),
+        "market_closed": True,
+        "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+    _basis_live_cache["data"] = payload
+    _basis_live_cache["ts"] = now
+    _basis_live_cache["fetched_at"] = now_kst
+    return payload
+
+
 async def _warm_basis_live(session: AsyncSession | None = None) -> dict:
     """basis/live 캐시를 채우고 payload를 반환한다 — 라우트 핸들러와
     collectors/live_refresh.py의 5~10분 인터벌 잡이 공유한다.
@@ -204,36 +292,37 @@ async def _warm_basis_live(session: AsyncSession | None = None) -> dict:
     provisional_row``처럼 history가 필요 없는 호출부) ``expiry.history``는
     그냥 None — 크래시하지 않는다. 60초 캐시 안에서만 계산하므로(캐시 히트
     시엔 이미 계산된 값을 그대로 재사용) ``compute_expiry_pattern``의
-    무거운 전체 히스토리 쿼리가 매 요청마다 돌지 않는다."""
+    무거운 전체 히스토리 쿼리가 매 요청마다 돌지 않는다.
+
+    **2026-11-11 버그 수정(이슈 #3)**: 예전에는 마감이면 네이버 호출을 생략하고 마지막
+    캐시를 재사용(없으면 전부 null)해 15:30 직전 값이 굳고(K200 선물은 15:45 마감) 재시작 후엔
+    basis가 null이었다. 이제 마감 후에는 캐시가 ``required_confirm_kst`` 이후 소스에서 조회된
+    것이면 재호출 없이 ``market_closed: true``로 재사용하고, 아니면 ``CLOSED_REFETCH_TTL_SECONDS``
+    간격으로 재조회한다(``_refetch_basis_closed``; 조회 시각은 캐시 dict의 ``fetched_at``, payload
+    스키마 불변). 재조회 실패/선물·현물 날짜 불일치는 502 대신 기존 캐시·null 폴백이며
+    ``fetched_at`` 미갱신으로 다음 간격에 재시도된다. 장중 분기는 변경 없음
+    (``futures_flow/live``·``groups/live``와 같은 패턴)."""
     now = time.monotonic()
     async with _basis_live_cache_lock:
         cached = _basis_live_cache["data"]
-        if cached is not None and (now - _basis_live_cache["ts"]) < LIVE_TTL_SECONDS:
+        fetched_at = _basis_live_cache.get("fetched_at")
+        now_kst = kst_now()
+        closed = is_market_closed(now_kst)
+        if closed and cached is not None and fetched_at is not None and fetched_at >= required_confirm_kst(now_kst):
+            # 확정 기준 시각 이후에 소스에서 조회된 값 — 재호출 없이 재사용.
+            if not cached.get("market_closed"):
+                cached = {**cached, "market_closed": True}
+                _basis_live_cache["data"] = cached
+            return cached
+        # 마감 후 확정 전 구간은 장중(60초)보다 느린 간격으로 재조회한다.
+        ttl = CLOSED_REFETCH_TTL_SECONDS if closed else LIVE_TTL_SECONDS
+        if cached is not None and (now - _basis_live_cache["ts"]) < ttl:
+            if closed and not cached.get("market_closed"):
+                cached = {**cached, "market_closed": True}  # 장중 캐시가 마감 직후 TTL 내 재사용되는 경우
             return cached
 
-        now_kst = dt.datetime.now(KST)
-        if is_market_closed(now_kst):
-            if cached is not None:
-                payload = {**cached, "market_closed": True}
-            else:
-                today = now_kst.date()
-                d_day = days_to_expiry(today)
-                history = await _expiry_history(session, d_day, None)
-                payload = {
-                    "date": None,
-                    "futures_close": None,
-                    "kospi200_close": None,
-                    "basis": None,
-                    "basis_pct": None,
-                    "backwardation": None,
-                    "futures_today": None,
-                    "expiry": _build_expiry_with_history(today, history),
-                    "market_closed": True,
-                    "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                }
-            _basis_live_cache["data"] = payload
-            _basis_live_cache["ts"] = now
-            return payload
+        if closed:
+            return await _refetch_basis_closed(session, cached, now, now_kst)
 
         today = dt.date.today()
         start = today - dt.timedelta(days=5)

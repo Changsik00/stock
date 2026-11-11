@@ -346,9 +346,12 @@ async def _best_fill_price(client: KiwoomClient, code: str, side: str) -> float 
     return None
 
 
-_CONFIRM_HOLDINGS_RETRY_DELAYS_SEC: tuple[float, ...] = (1.0, 1.0)
+# 2026-11-11: 1.0초 → 1.5초. 키움 공지(2026-11-09 "국내주식 계좌 TR 유량제어 정책 변경")로
+# kt00018 포함 계좌 TR 19종이 2026-11-12 18시 이후 초당 5회 → 초당 1회로 줄어든다. 1.0초는
+# 새 한도와 여유가 0이라 0.5초 여유를 둔다(최악 대기 2초 → 3초).
+_CONFIRM_HOLDINGS_RETRY_DELAYS_SEC: tuple[float, ...] = (1.5, 1.5)
 """PLAN.md §5.82 — 첫 조회가 불일치할 때만 이 간격으로 추가 재조회한다(최대
-2회, 총 대기 2초). 첫 조회가 바로 일치하면 이 재시도는 전혀 실행되지
+2회, 총 대기 3초). 첫 조회가 바로 일치하면 이 재시도는 전혀 실행되지
 않는다 — kt00018은 TR별 독립 토큰버킷(1req/s)이라 이 정도 추가 호출은
 무시할 수준(모듈 docstring "미체결 확인" 절 참고)."""
 

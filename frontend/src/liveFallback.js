@@ -62,3 +62,24 @@ export function shouldUseGroupLive(groupLive, groupType, closedLiveIndexUsed) {
   if (groupLive.market_closed === false) return true
   return Boolean(closedLiveIndexUsed) && groupLive.market_closed === true && Array.isArray(groupLive.rows) && groupLive.rows.length > 0
 }
+
+// 마감 후 외인 현물 타일용 — 장중이 아니고 마감 후 라이브 수급 요약에 '외국인' 숫자가 있으면
+// { value, date }, 아니면 null (호출 측이 EOD 값으로 폴백). 요약 자체의 거래일 증거 판정은
+// flowClosedLiveSummary가 이미 수행한다.
+export function pickClosedForeignSpot(closedSummary) {
+  const value = closedSummary?.values?.['외국인']
+  if (typeof value !== 'number') return null
+  return { value, date: closedSummary.date }
+}
+
+// 베이시스 타일 표시 객체 선택. 장중(market_closed===false)이고 basis가 숫자면 라이브(isOpen),
+// 마감 후에는 거래일 증거가 있고 basis가 숫자이며 라이브 date가 EOD보다 최신일 때만 라이브.
+// 반환: { basis, backwardation, date, isOpen } | null — null이면 호출 측이 EOD로 폴백한다.
+export function pickClosedBasis(basisLive, { closedLiveIndexUsed, eodDate }) {
+  if (!basisLive || typeof basisLive.basis !== 'number') return null
+  const base = { basis: basisLive.basis, backwardation: basisLive.backwardation, date: basisLive.date ?? null }
+  if (basisLive.market_closed === false) return { ...base, isOpen: true }
+  if (!closedLiveIndexUsed || basisLive.market_closed !== true) return null
+  if (!isNewerDate(basisLive.date, eodDate)) return null
+  return { ...base, isOpen: false }
+}

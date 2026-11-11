@@ -49,6 +49,8 @@ import {
 import { formatDate, signedEokJoLabel } from '../format'
 import {
   isNewerDate,
+  pickClosedBasis,
+  pickClosedForeignSpot,
   pickClosedFuturesFlow,
   pickFxDisplay,
   shouldUseClosedLiveIndexRow,
@@ -958,9 +960,13 @@ export default function DashboardPage() {
   // flowInvestorSummary/flowLiveSummary의 '외국인' 값을 그대로 재사용하고(중복 fetch
   // 없음), 선물은 marketData.futures(지수 3종 fetch가 이미 flows까지 받아온다)의
   // '외국인' 마지막 행을 쓴다.
+  // 마감 후~배치 전에는 위 수급 섹션과 같이 flowClosedLiveSummary(오늘 값)를 쓴다("확정 · 날짜", 배지 없음).
   const foreignSpotLiveValue = flowLiveSummary?.['외국인']
   const foreignSpotIsLive = foreignSpotLiveValue !== undefined
-  const foreignSpotRow = flowInvestorSummary?.['외국인']
+  const foreignSpotClosed = foreignSpotIsLive ? null : pickClosedForeignSpot(flowClosedLiveSummary)
+  const foreignSpotRow = foreignSpotClosed
+    ? { net_value: foreignSpotClosed.value, date: foreignSpotClosed.date }
+    : flowInvestorSummary?.['외국인']
   const foreignSpotValue = foreignSpotIsLive ? foreignSpotLiveValue : foreignSpotRow?.net_value
   const foreignFuturesRow = latestFlowRow(marketData.futures?.flows, '외국인')
 
@@ -984,9 +990,14 @@ export default function DashboardPage() {
   const basisLatest = basisData?.latest
   // 베이시스 1분 라이브 오버레이(PLAN.md §4.7, §5.5-2로 7분→1분 이동) — KPI 타일
   // 표시 전용(시그널 판정 backwardationSignal은 EOD 기준 basisLatest 그대로).
-  const basisLiveActive = Boolean(
-    !STATIC_DATA && basisLive && basisLive.market_closed === false && typeof basisLive.basis === 'number'
-  )
+  // 마감 후~배치 전에는 거래일 증거(closedLiveIndexUsed)+라이브 date가 EOD보다 최신일 때만 라이브
+  // (장중 표기 없이 날짜 표기). baseDate에는 섞지 않는다.
+  const basisLivePick = STATIC_DATA
+    ? null
+    : pickClosedBasis(basisLive, { closedLiveIndexUsed, eodDate: basisLatest?.date })
+  const basisLiveActive = Boolean(basisLivePick?.isOpen)
+  // 타일 표시용 베이시스(라이브 우선, 없으면 EOD)
+  const basisShown = basisLivePick ?? basisLatest
   // 환율(USD/KRW) 1분 라이브 오버레이(PLAN.md §5.5-3) — basisLiveActive와 동일한
   // 관례. 값 표시만 라이브로 바꾸고 "전일 대비"라는 의미는 유지한 채 "현재"만 갱신한다.
   // 마감 후에도 라이브 date가 EOD 마지막보다 최신이면 라이브를 쓰고(장중 배지 없음), 전일비 기준은
@@ -1039,7 +1050,12 @@ export default function DashboardPage() {
   // 하락확률이 콘탱고와 거의 차이 없어(43.8% vs 43.0%, PLAN.md §5.15) 예측력이
   // 없다는 게 실증됐다. 베이시스 값 자체(콘탱고/역전 텍스트)는 위 KpiTile에 그대로
   // 남아 있다 — 이 배지 행에서만 뺀다.
-  const foreignSpotSign = foreignSpotValue === null || foreignSpotValue === undefined ? 0 : Math.sign(foreignSpotValue)
+  // 시그널(현·선 방향 배지)용 부호는 기존 기준 유지: 장중이면 라이브, 아니면 EOD. 마감 후 라이브
+  // 표시값(foreignSpotClosed)은 타일 표시 전용이라 여기 섞지 않는다(선물 부호가 EOD 기준이라
+  // 섞으면 오늘 현물 vs 어제 선물 비교가 된다).
+  const foreignSpotSignValue = foreignSpotIsLive ? foreignSpotLiveValue : flowInvestorSummary?.['외국인']?.net_value
+  const foreignSpotSign =
+    foreignSpotSignValue === null || foreignSpotSignValue === undefined ? 0 : Math.sign(foreignSpotSignValue)
   const foreignFuturesSign =
     foreignFuturesRow?.net_value === null || foreignFuturesRow?.net_value === undefined
       ? 0
@@ -1397,7 +1413,7 @@ export default function DashboardPage() {
               )
             )
           }
-          title="코스피+코스닥 합계"
+          title={foreignSpotClosed ? `코스피+코스닥 합계 · ${formatDate(foreignSpotClosed.date)}` : '코스피+코스닥 합계'}
           onClick={() => setModal({ type: 'foreignPosition', title: '외인 현물 vs 선물 · 베이시스' })}
         />
         <KpiTile
@@ -1463,24 +1479,13 @@ export default function DashboardPage() {
         />
         <KpiTile
           label="베이시스"
-          value={basisLabel(basisLiveActive ? basisLive.basis : basisLatest?.basis)}
-          valueClass={
-            basisLiveActive
-              ? basisLive.basis >= 0
-                ? 'up'
-                : 'down'
-              : basisLatest?.basis === undefined || basisLatest?.basis === null
-                ? ''
-                : basisLatest.basis >= 0
-                  ? 'up'
-                  : 'down'
-          }
+          value={basisLabel(basisShown?.basis)}
+          valueClass={basisShown?.basis === undefined || basisShown?.basis === null ? '' : basisShown.basis >= 0 ? 'up' : 'down'}
           sub={
             <span className="kpi-tile-sub">
-              {(basisLiveActive ? basisLive.backwardation : basisLatest?.backwardation) === undefined ||
-              (basisLiveActive ? basisLive.backwardation : basisLatest?.backwardation) === null ? (
+              {basisShown?.backwardation === undefined || basisShown?.backwardation === null ? (
                 '-'
-              ) : (basisLiveActive ? basisLive.backwardation : basisLatest?.backwardation) ? (
+              ) : basisShown.backwardation ? (
                 // 2026-07-23 수정(§4.5-5 후속) — 어제(2026-07-22)는 "차익 매도 유의"
                 // 문구를 순화해 배지 자체는 남겨뒀는데, 오늘 index_ohlcv/market_flow
                 // 3년치 실측 결과 백워데이션 다음날 하락확률(43.8%)이 콘탱고(43.0%)와
@@ -1491,10 +1496,10 @@ export default function DashboardPage() {
               ) : (
                 '콘탱고'
               )}
-              {basisLiveActive ? ' · 1분 갱신' : <StaleDate date={basisLatest?.date} baseDate={baseDate} prefix=" · " />}
+              {basisLiveActive ? ' · 1분 갱신' : <StaleDate date={basisShown?.date} baseDate={baseDate} prefix=" · " />}
             </span>
           }
-          title={basisLatest?.date ? formatDate(basisLatest.date) : undefined}
+          title={basisShown?.date ? formatDate(basisShown.date) : undefined}
           onClick={() => setModal({ type: 'foreignPosition', title: '외인 현물 vs 선물 · 베이시스' })}
         />
         <KpiTile

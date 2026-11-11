@@ -26,6 +26,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.db import engine
 from app.main import app
+from app.market_hours import KST
 from app.routers import basis
 
 FUT_ROWS = [
@@ -61,11 +62,9 @@ async def _dispose_engine_per_test():
 
 @pytest.fixture(autouse=True)
 def _reset_cache():
-    basis._basis_live_cache["data"] = None
-    basis._basis_live_cache["ts"] = 0.0
+    basis._basis_live_cache.update({"data": None, "ts": 0.0, "fetched_at": None})
     yield
-    basis._basis_live_cache["data"] = None
-    basis._basis_live_cache["ts"] = 0.0
+    basis._basis_live_cache.update({"data": None, "ts": 0.0, "fetched_at": None})
 
 
 # 이 파일의 happy-path 테스트는 실제 wall-clock과 무관하게 "장중"을 가정한다 —
@@ -125,23 +124,6 @@ async def test_basis_live_502_when_both_fail(monkeypatch):
     assert resp.status_code == 502
 
 
-async def test_basis_live_market_closed_skips_fetch_no_cache(monkeypatch):
-    monkeypatch.setattr(basis, "is_market_closed", lambda now_kst: True)
-
-    def _raise(market, start, end):  # pragma: no cover - 불리면 안 됨
-        raise AssertionError("naver_index should not be called when market is closed")
-
-    monkeypatch.setattr(basis, "_fetch_index_series_blocking", _raise)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/api/markets/basis/live")
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["market_closed"] is True
-    assert body["basis"] is None
-
-
 async def test_basis_live_includes_futures_today_ohlcv(monkeypatch):
     """PLAN.md §5.21-1 — futures_row 전체(open/high/low/close/volume)가
     futures_today로 노출되어야 한다(기존엔 close만 basis 계산에 쓰고 나머지는
@@ -164,45 +146,6 @@ async def test_basis_live_includes_futures_today_ohlcv(monkeypatch):
         "close": 1049.85,
         "volume": 9866,
     }
-
-
-async def test_basis_live_market_closed_no_cache_sets_futures_today_none(monkeypatch):
-    monkeypatch.setattr(basis, "is_market_closed", lambda now_kst: True)
-
-    def _raise(market, start, end):  # pragma: no cover - 불리면 안 됨
-        raise AssertionError("naver_index should not be called when market is closed")
-
-    monkeypatch.setattr(basis, "_fetch_index_series_blocking", _raise)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/api/markets/basis/live")
-
-    body = resp.json()
-    assert body["futures_today"] is None
-
-
-async def test_basis_live_market_closed_reuse_carries_over_futures_today(monkeypatch):
-    """장 마감 + 캐시 재사용 분기(`{**cached, "market_closed": True}`)가
-    futures_today를 그대로 이어받는지 확인 — PLAN.md §5.21-1 "carry over" 요구사항."""
-
-    def fake_fetch(market, start, end):
-        return FUT_ROWS if market == basis.FUTURES_MARKET else SPOT_ROWS
-
-    monkeypatch.setattr(basis, "_fetch_index_series_blocking", fake_fetch)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        r1 = await client.get("/api/markets/basis/live")
-    assert r1.json()["futures_today"] is not None
-
-    basis._basis_live_cache["ts"] = 0.0  # TTL 만료 시뮬레이션
-    monkeypatch.setattr(basis, "is_market_closed", lambda now_kst: True)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        r2 = await client.get("/api/markets/basis/live")
-
-    body = r2.json()
-    assert body["market_closed"] is True
-    assert body["futures_today"] == r1.json()["futures_today"]
 
 
 def _fake_pattern(points: list[dict], cycle_count: int = 20, reason: str | None = None):
@@ -342,10 +285,10 @@ async def test_warm_basis_live_session_none_history_none_no_crash(monkeypatch):
 async def test_basis_live_market_closed_no_cache_history_field_present(monkeypatch):
     """장마감 + 캐시 없음(cold start) 분기에서도 session이 주어졌다면 history가
     (오늘 basis_pct가 없으므로 deviation_pct는 None인 채로) 계산되는지 확인."""
-    monkeypatch.setattr(basis, "is_market_closed", lambda now_kst: True)
+    _go_closed(monkeypatch, _at(11, 19, 0))
 
-    def _raise(market, start, end):  # pragma: no cover - 불리면 안 됨
-        raise AssertionError("naver_index should not be called when market is closed")
+    def _raise(market, start, end):
+        raise RuntimeError("boom")  # 마감 재조회 실패 → null 폴백(history는 그대로 계산)
 
     monkeypatch.setattr(basis, "_fetch_index_series_blocking", _raise)
 
@@ -382,28 +325,191 @@ async def test_basis_live_market_closed_no_cache_history_field_present(monkeypat
     assert history["n"] == 12
 
 
-async def test_basis_live_market_closed_reuses_last_cache(monkeypatch):
-    def fake_fetch(market, start, end):
-        return FUT_ROWS if market == basis.FUTURES_MARKET else SPOT_ROWS
+# ---------------------------------------------------------------------------
+# 마감 후 재조회 (2026-11-11 버그 수정, 이슈 #3) — futures-flow/live와 같은 패턴.
+# ---------------------------------------------------------------------------
 
-    monkeypatch.setattr(basis, "_fetch_index_series_blocking", fake_fetch)
 
+def _at(day, hour, minute):
+    return dt.datetime(2026, 11, day, hour, minute, tzinfo=KST)
+
+
+def _go_closed(monkeypatch, now_kst):
+    """마감 상태 + 현재 KST 시각 고정."""
+    monkeypatch.setattr(basis, "is_market_closed", lambda n: True)
+    monkeypatch.setattr(basis, "kst_now", lambda: now_kst)
+
+
+def _counting_fetch(monkeypatch, fut_rows=None, spot_rows=None):
+    calls = []
+
+    def fake(market, start, end):
+        calls.append(market)
+        if market == basis.FUTURES_MARKET:
+            return FUT_ROWS if fut_rows is None else fut_rows
+        return SPOT_ROWS if spot_rows is None else spot_rows
+
+    monkeypatch.setattr(basis, "_fetch_index_series_blocking", fake)
+    return calls
+
+
+def _cached_payload(basis_value, market_closed):
+    return {
+        "date": "2026-11-11",
+        "futures_close": 1.0,
+        "kospi200_close": 1.0,
+        "basis": basis_value,
+        "basis_pct": 0.0,
+        "backwardation": False,
+        "futures_today": {"date": "2026-11-11", "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1},
+        "expiry": {"date": "2026-12-11", "d_day": 30, "quadruple": False, "history": None},
+        "market_closed": market_closed,
+        "cached_at": "x",
+    }
+
+
+async def _get():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        r1 = await client.get("/api/markets/basis/live")
-    assert r1.json()["market_closed"] is False
+        return await client.get("/api/markets/basis/live")
 
-    basis._basis_live_cache["ts"] = 0.0  # TTL 만료 시뮬레이션
 
-    def _raise(market, start, end):  # pragma: no cover - 불리면 안 됨
-        raise AssertionError("naver_index should not be called when market is closed")
+async def test_closed_no_cache_fetches_from_source(monkeypatch):
+    _go_closed(monkeypatch, _at(11, 15, 47))
+    calls = _counting_fetch(monkeypatch)
+
+    body = (await _get()).json()
+
+    assert calls == [basis.FUTURES_MARKET, basis.SPOT_MARKET]
+    assert body["market_closed"] is True
+    assert body["basis"] == round(1049.85 - 1075.96, 2)
+    assert body["date"] == "2026-07-20"  # 소스 row 날짜 그대로
+    assert body["futures_today"]["close"] == 1049.85
+    assert basis._basis_live_cache["fetched_at"] == _at(11, 15, 47)
+
+
+async def test_closed_cache_fetched_before_confirm_is_replaced(monkeypatch):
+    _go_closed(monkeypatch, _at(11, 15, 47))
+    basis._basis_live_cache.update(
+        {"data": _cached_payload(-99.0, False), "ts": 0.0, "fetched_at": _at(11, 15, 28)}
+    )
+    calls = _counting_fetch(monkeypatch)
+
+    body = (await _get()).json()
+
+    assert len(calls) == 2
+    assert body["market_closed"] is True
+    assert body["basis"] == round(1049.85 - 1075.96, 2)
+
+
+async def test_closed_cache_fetched_after_confirm_skips_source(monkeypatch):
+    _go_closed(monkeypatch, _at(11, 19, 0))
+    basis._basis_live_cache.update(
+        {"data": _cached_payload(-5.5, False), "ts": 0.0, "fetched_at": _at(11, 18, 10)}
+    )
+    calls = _counting_fetch(monkeypatch)
+
+    body = (await _get()).json()
+
+    assert calls == []
+    assert body["market_closed"] is True
+    assert body["basis"] == -5.5
+    assert body["futures_today"]["date"] == "2026-11-11"  # futures_today 이어받음
+
+
+async def test_closed_next_morning_with_yesterday_1810_cache_skips_source(monkeypatch):
+    _go_closed(monkeypatch, _at(12, 8, 0))
+    basis._basis_live_cache.update(
+        {"data": _cached_payload(-5.5, True), "ts": 0.0, "fetched_at": _at(11, 18, 10)}
+    )
+    calls = _counting_fetch(monkeypatch)
+
+    body = (await _get()).json()
+
+    assert calls == []
+    assert body["basis"] == -5.5
+
+
+async def test_closed_refetch_failure_falls_back_to_cache_and_retries(monkeypatch):
+    _go_closed(monkeypatch, _at(11, 15, 47))
+    basis._basis_live_cache.update(
+        {"data": _cached_payload(-73.0, False), "ts": 0.0, "fetched_at": _at(11, 15, 28)}
+    )
+
+    def _raise(market, start, end):
+        raise RuntimeError("boom")
 
     monkeypatch.setattr(basis, "_fetch_index_series_blocking", _raise)
-    monkeypatch.setattr(basis, "is_market_closed", lambda now_kst: True)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        r2 = await client.get("/api/markets/basis/live")
-
-    assert r2.status_code == 200
-    body = r2.json()
+    resp = await _get()
+    assert resp.status_code == 200  # 502 아님
+    body = resp.json()
     assert body["market_closed"] is True
-    assert body["basis"] == r1.json()["basis"]
+    assert body["basis"] == -73.0
+    assert basis._basis_live_cache["fetched_at"] == _at(11, 15, 28)  # 미갱신
+
+    # TTL(300초) 만료 후 다음 요청에서 재시도되어 성공하면 교체된다.
+    basis._basis_live_cache["ts"] = 0.0
+    calls = _counting_fetch(monkeypatch)
+    body = (await _get()).json()
+    assert len(calls) == 2
+    assert body["basis"] == round(1049.85 - 1075.96, 2)
+
+
+async def test_closed_refetch_failure_no_cache_returns_null_payload(monkeypatch):
+    _go_closed(monkeypatch, _at(11, 15, 47))
+    calls = _counting_fetch(monkeypatch, fut_rows=[])  # 선물 row 없음
+
+    resp = await _get()
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["market_closed"] is True
+    assert body["basis"] is None
+    assert body["date"] is None
+    assert body["futures_today"] is None
+    assert basis._basis_live_cache["fetched_at"] is None
+    assert len(calls) == 2
+
+
+async def test_closed_date_mismatch_is_failure_with_fallback(monkeypatch):
+    _go_closed(monkeypatch, _at(11, 15, 47))
+    basis._basis_live_cache.update(
+        {"data": _cached_payload(-73.0, False), "ts": 0.0, "fetched_at": _at(11, 15, 28)}
+    )
+    fut = [{**FUT_ROWS[0], "date": dt.date(2026, 11, 11)}]  # 선물만 갱신, 현물은 7/20
+    _counting_fetch(monkeypatch, fut_rows=fut)
+
+    body = (await _get()).json()
+
+    assert body["basis"] == -73.0  # 불일치 조합으로 계산하지 않고 캐시 폴백
+    assert body["market_closed"] is True
+    assert basis._basis_live_cache["fetched_at"] == _at(11, 15, 28)
+
+
+async def test_closed_date_mismatch_no_cache_returns_null(monkeypatch):
+    _go_closed(monkeypatch, _at(11, 15, 47))
+    fut = [{**FUT_ROWS[0], "date": dt.date(2026, 11, 11)}]
+    _counting_fetch(monkeypatch, fut_rows=fut)
+
+    body = (await _get()).json()
+
+    assert body["basis"] is None
+    assert basis._basis_live_cache["fetched_at"] is None
+
+
+async def test_closed_saturday_refetch_keeps_friday_date(monkeypatch):
+    """휴장일(토) 재조회 — 소스 마지막 일봉은 금요일이고 date는 오늘(토)로 덮지 않는다."""
+    _go_closed(monkeypatch, _at(14, 10, 0))  # 2026-11-14 토요일
+    fri = dt.date(2026, 11, 13)
+    _counting_fetch(
+        monkeypatch,
+        fut_rows=[{**FUT_ROWS[0], "date": fri}],
+        spot_rows=[{**SPOT_ROWS[0], "date": fri}],
+    )
+
+    body = (await _get()).json()
+
+    assert body["date"] == "2026-11-13"
+    assert body["futures_today"]["date"] == "2026-11-13"
+    assert body["market_closed"] is True
+    assert body["basis"] == round(1049.85 - 1075.96, 2)
