@@ -8,11 +8,11 @@
 from __future__ import annotations
 
 import datetime as dt
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import narrative_llm
@@ -20,7 +20,7 @@ from ..collectors import narrative_news
 from ..collectors.base import _upsert_log
 from ..db import get_session
 from ..market_hours import KST
-from ..models import CollectLog, GroupSnapshot, MarketNarrative, NarrativeProposal, NewsItem, SectorFlow
+from ..models import CollectLog, GroupSnapshot, MarketNarrative, NarrativeProposal, NewsIssue, NewsItem, SectorFlow
 
 router = APIRouter(prefix="/api/narratives", tags=["narratives"])
 
@@ -226,16 +226,25 @@ def _item(r: MarketNarrative, evidence: dict | None = None) -> dict:
     return out
 
 
-async def _with_evidence(session: AsyncSession, rows: list[MarketNarrative]) -> list[dict]:
+async def _evidence_for(session: AsyncSession, rows: list[Any]) -> list[tuple[list[dict], str]]:
+    """beneficiaries/victims 속성을 가진 객체(MarketNarrative, NewsIssue)별 (evidence, alignment).
+    sector_flow/group_snapshot 조회는 전체 용어를 모아 한 번만 한다."""
     all_terms = sorted({t for r in rows for t in (r.beneficiaries or []) + (r.victims or [])})
     flow_rows, group_rows = await _load_latest(session, all_terms)
-    items = []
+    out = []
     for r in rows:
         ev = build_evidence("beneficiary", r.beneficiaries or [], flow_rows, group_rows) + build_evidence(
             "victim", r.victims or [], flow_rows, group_rows
         )
-        items.append(_item(r, {"evidence": ev, "alignment": summarize(ev), "disclaimer": DISCLAIMER}))
-    return items
+        out.append((ev, summarize(ev)))
+    return out
+
+
+async def _with_evidence(session: AsyncSession, rows: list[MarketNarrative]) -> list[dict]:
+    pairs = await _evidence_for(session, rows)
+    return [
+        _item(r, {"evidence": ev, "alignment": al, "disclaimer": DISCLAIMER}) for r, (ev, al) in zip(rows, pairs)
+    ]
 
 
 # ---------------------------------------------------------------- 엔드포인트
@@ -297,6 +306,383 @@ async def _update(narrative_id: int, body: NarrativePatch, session: AsyncSession
     await session.commit()
     await session.refresh(row)
     return (await _with_evidence(session, [row]))[0]
+
+
+# ---------------------------------------------------------------- 5.106 오늘의 이슈 (뉴스 묶음)
+# 라우트 순서: 아래 /issues* 는 /{narrative_id} 동적 경로보다 먼저 등록한다.
+
+ISSUES_JOB = "narrative_issues_ingest"  # collect_log 기록 job명
+ISSUE_WINDOW_HOURS = 24
+ISSUE_CONTEXT_MAX = 150
+ISSUE_MAX_ITEMS = 8
+ISSUE_KEEP_DAYS = 30
+ISSUE_BATCH_LIST_DAYS = 7
+ISSUE_MAX_FACTS = 3
+ISSUE_TRACK_MAX_SOURCES = 5
+IssueStatus = Literal["new", "tracked", "hidden"]
+
+
+def _issue_item(r: NewsIssue, ev: list[dict], alignment: str) -> dict:
+    return {
+        "id": r.id,
+        "rank": r.rank,
+        "title": r.title,
+        "direction": r.direction,
+        "confidence": r.confidence,
+        "continuing": r.continuing,
+        "facts": r.facts or [],
+        "interpretation": r.interpretation or "",
+        "counter": r.counter or "",
+        "beneficiaries": r.beneficiaries or [],
+        "victims": r.victims or [],
+        "sources": r.sources or [],
+        "article_count": len(r.sources or []),
+        "status": r.status,
+        "narrative_id": r.narrative_id,
+        "evidence": ev,
+        "alignment": alignment,
+    }
+
+
+async def _issue_items(session: AsyncSession, rows: list[NewsIssue]) -> list[dict]:
+    pairs = await _evidence_for(session, rows)
+    return [_issue_item(r, ev, al) for r, (ev, al) in zip(rows, pairs)]
+
+
+async def _latest_batch_at(session: AsyncSession) -> dt.datetime | None:
+    return (await session.execute(select(func.max(NewsIssue.batch_at)))).scalar()
+
+
+@router.get("/issues/context")
+async def issues_context(
+    limit: int = Query(ISSUE_CONTEXT_MAX, ge=1, le=300),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """호스트 스크립트용 입력. 최근 24h 뉴스 최신순 상한 limit.
+    ingest-context와 달리 '이미 근거로 쓴 기사 제외'를 하지 않는다(이어지는 이슈는 매번 갱신)."""
+    now = dt.datetime.now(dt.timezone.utc)
+    since = now - dt.timedelta(hours=ISSUE_WINDOW_HOURS)
+    ts = func.coalesce(NewsItem.published_at, NewsItem.fetched_at)
+    rows = list(
+        (await session.execute(select(NewsItem).where(ts >= since).order_by(ts.desc(), NewsItem.id.desc()).limit(limit)))
+        .scalars()
+    )
+    news = [
+        {
+            "n": i,
+            "id": r.id,
+            "source": r.source,
+            "title": r.title,
+            "url": r.url,  # 스크립트가 기사 번호 -> URL 변환에 쓴다(프롬프트에는 넣지 않음)
+            "snippet": (r.summary or "")[:120],
+            "published_at": r.published_at.isoformat() if r.published_at else None,
+        }
+        for i, r in enumerate(rows, 1)
+    ]
+    latest = await _latest_batch_at(session)
+    prev_titles: list[str] = []
+    if latest is not None:
+        prev_titles = list(
+            (
+                await session.execute(
+                    select(NewsIssue.title).where(NewsIssue.batch_at == latest).order_by(NewsIssue.rank)
+                )
+            ).scalars()
+        )
+    today = now.astimezone(KST).date()
+    narr = (
+        await session.execute(
+            select(MarketNarrative).where(
+                MarketNarrative.active.is_(True),
+                or_(MarketNarrative.expires_on.is_(None), MarketNarrative.expires_on >= today),
+            )
+        )
+    ).scalars()
+    return {
+        "news": news,
+        "window": {"from": since.isoformat(), "to": now.isoformat()},
+        "previous_issue_titles": prev_titles,
+        "active_narratives": [{"title": r.title, "direction": r.direction} for r in narr],
+        "vocabulary": await narrative_news._vocab(session),
+    }
+
+
+def _trunc(v: Any, n: int) -> str:
+    return v.strip()[:n].strip() if isinstance(v, str) else ""
+
+
+class IssueRaw(BaseModel):
+    """LLM이 만든 이슈 한 건(느슨한 타입 검증). 길이/enum 보정은 _clean_issue에서 한다."""
+
+    title: str
+    direction: Any = "neutral"
+    confidence: Any = "low"
+    continuing: bool = False
+    facts: list[Any] = []
+    interpretation: Any = ""
+    counter: Any = ""
+    beneficiaries: list[Any] = []
+    victims: list[Any] = []
+    article_urls: list[Any] = []
+
+
+def _clean_issue(raw: IssueRaw) -> dict | None:
+    """길이 제한·enum 보정만 한다(텍스트 안의 지시는 해석하지 않음). 제목이 비면 None."""
+    title = _trunc(raw.title, 200)
+    if not title:
+        return None
+    facts = [f for f in (_trunc(x, 200) for x in raw.facts) if f][:ISSUE_MAX_FACTS]
+    ben = _clean_list([x for x in raw.beneficiaries if isinstance(x, str)])[:6]
+    vic = _clean_list([x for x in raw.victims if isinstance(x, str)])[:6]
+    urls: list[str] = []
+    for u in raw.article_urls:
+        if isinstance(u, str) and u.strip() and u.strip() not in urls:
+            urls.append(u.strip())
+    return {
+        "title": title,
+        "direction": raw.direction if raw.direction in ("bullish", "bearish", "neutral") else "neutral",
+        "confidence": raw.confidence if raw.confidence in ("low", "mid", "high") else "low",
+        "continuing": raw.continuing,
+        "facts": facts,
+        "interpretation": _trunc(raw.interpretation, 300),
+        "counter": _trunc(raw.counter, 300),
+        "beneficiaries": ben,
+        "victims": vic,
+        "urls": urls,
+    }
+
+
+class IssuesIngestBody(BaseModel):
+    """이슈는 느슨하게(dict) 받는다 — 불량 항목 하나가 전체를 막지 않게."""
+
+    model: str | None = Field(default=None, max_length=60)
+    window: dict | None = None
+    news_total: int | None = Field(default=None, ge=0)
+    issues: list[dict | str | int | None] = Field(max_length=50)
+
+
+@router.post("/issues/ingest")
+async def ingest_issues(body: IssuesIngestBody, session: AsyncSession = Depends(get_session)) -> dict:
+    """호스트(Claude Code) 생성 이슈 수신. 환각 URL 제거·기사 중복 제거·길이/enum 보정 후 한 배치로 저장."""
+    reasons: list[str] = []
+    cleaned: list[dict] = []
+    for idx, raw in enumerate(body.issues, 1):
+        if not isinstance(raw, dict):
+            reasons.append(f"#{idx} 객체가 아님")
+            continue
+        try:
+            c = _clean_issue(IssueRaw.model_validate(raw))
+        except Exception as e:  # noqa: BLE001 - 불량 항목은 버리고 계속
+            reasons.append(f"#{idx} 검증 실패: {str(e).splitlines()[0][:80]}")
+            continue
+        if c is None:
+            reasons.append(f"#{idx} 제목 없음")
+            continue
+        cleaned.append(c)
+
+    # news_item에 실제 있는 URL만 유효(없는 URL = 환각)
+    all_urls = {u for c in cleaned for u in c["urls"]}
+    news_by_url: dict[str, NewsItem] = {}
+    if all_urls:
+        found = (await session.execute(select(NewsItem).where(NewsItem.url.in_(all_urls)))).scalars()
+        news_by_url = {n.url: n for n in found}
+
+    kept: list[tuple[dict, list[NewsItem]]] = []
+    used: set[str] = set()
+    seen_titles: set[str] = set()
+    for c in cleaned:
+        if len(kept) >= ISSUE_MAX_ITEMS:
+            reasons.append(f"'{c['title'][:30]}' 이슈 {ISSUE_MAX_ITEMS}개 초과")
+            continue
+        key = narrative_llm._norm_title(c["title"])
+        if key in seen_titles:
+            reasons.append(f"'{c['title'][:30]}' 배치 내 제목 중복")
+            continue
+        valid = [u for u in c["urls"] if u in news_by_url and u not in used]  # 한 기사는 앞선 이슈에만
+        if not valid:
+            reasons.append(f"'{c['title'][:30]}' 유효 기사 0건")
+            continue
+        seen_titles.add(key)
+        used.update(valid)
+        items = [news_by_url[u] for u in valid]
+        # 최신순 정렬하되 첫 유효 URL(대표 기사)을 맨 앞에
+        lead, rest = items[0], sorted(
+            items[1:], key=lambda n: n.published_at or n.fetched_at, reverse=True
+        )
+        kept.append((c, [lead, *rest]))
+
+    now = dt.datetime.now(dt.timezone.utc)
+    batch_at: dt.datetime | None = None
+    if kept:
+        batch_at = now
+        model = body.model
+        for rank, (c, items) in enumerate(kept, 1):
+            session.add(
+                NewsIssue(
+                    batch_at=batch_at,
+                    rank=rank,
+                    title=c["title"],
+                    direction=c["direction"],
+                    confidence=c["confidence"],
+                    continuing=c["continuing"],
+                    facts=c["facts"],
+                    interpretation=c["interpretation"],
+                    counter=c["counter"],
+                    beneficiaries=c["beneficiaries"],
+                    victims=c["victims"],
+                    sources=[
+                        {
+                            "title": n.title,
+                            "url": n.url,
+                            "source": n.source,
+                            "published_at": n.published_at.isoformat() if n.published_at else None,
+                        }
+                        for n in items
+                    ],
+                    status="new",
+                    generated_by=model[:60] if model else None,
+                    news_total=body.news_total,
+                )
+            )
+    # 30일 지난 이슈 정리(narrative는 별도 테이블이라 영향 없음)
+    await session.execute(delete(NewsIssue).where(NewsIssue.batch_at < now - dt.timedelta(days=ISSUE_KEEP_DAYS)))
+    dropped = len(body.issues) - len(kept)
+    msg = f"이슈 수신 {len(body.issues)}건 -> 저장 {len(kept)}건, 버림 {dropped}건"
+    if body.model:
+        msg += f" ({body.model})"
+    if body.news_total is not None:
+        msg += f" / 창 내 기사 {body.news_total}건"
+    await _upsert_log(session, ISSUES_JOB, dt.datetime.now(KST).date(), "ok", len(kept), msg[:500])
+    await session.commit()
+    return {
+        "saved": len(kept),
+        "dropped": dropped,
+        "reasons": reasons,
+        "batch_at": batch_at.isoformat() if batch_at else None,
+    }
+
+
+@router.get("/issues")
+async def list_issues(
+    batch_at: dt.datetime | None = Query(None, description="특정 배치(ISO). 없으면 최신 배치"),
+    include_hidden: bool = Query(False),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    target = batch_at if batch_at is not None else await _latest_batch_at(session)
+    rows: list[NewsIssue] = []
+    if target is not None:
+        rows = list(
+            (
+                await session.execute(
+                    select(NewsIssue).where(NewsIssue.batch_at == target).order_by(NewsIssue.rank, NewsIssue.id)
+                )
+            ).scalars()
+        )
+    since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=ISSUE_BATCH_LIST_DAYS)
+    batches = (
+        await session.execute(
+            select(NewsIssue.batch_at, func.count())
+            .where(NewsIssue.batch_at >= since)
+            .group_by(NewsIssue.batch_at)
+            .order_by(NewsIssue.batch_at.desc())
+        )
+    ).all()
+    visible = rows if include_hidden else [r for r in rows if r.status != "hidden"]
+    log = await _last_log(session, ISSUES_JOB)
+    return {
+        "disclaimer": DISCLAIMER,
+        "batch_at": rows[0].batch_at.isoformat() if rows else None,
+        "generated_by": rows[0].generated_by if rows else None,
+        "stats": {
+            "articles_in_window": rows[0].news_total if rows else None,
+            "grouped": sum(len(r.sources or []) for r in rows),
+        },
+        "items": await _issue_items(session, visible),
+        "batches": [{"batch_at": b.isoformat(), "count": n} for b, n in batches],
+        "last_ingest": log,
+    }
+
+
+async def _last_log(session: AsyncSession, job: str) -> dict | None:
+    row = (
+        await session.execute(
+            select(CollectLog).where(CollectLog.job == job).order_by(CollectLog.ran_at.desc()).limit(1)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    return {"ran_at": row.ran_at.isoformat() if row.ran_at else None, "status": row.status, "message": row.message}
+
+
+async def _get_issue(session: AsyncSession, issue_id: int) -> NewsIssue:
+    r = (await session.execute(select(NewsIssue).where(NewsIssue.id == issue_id).with_for_update())).scalar_one_or_none()
+    if r is None:
+        raise HTTPException(404, "이슈를 찾을 수 없습니다")
+    return r
+
+
+def _track_summary(r: NewsIssue) -> str:
+    parts = []
+    if r.facts:
+        parts.append("사실: " + " / ".join(r.facts))
+    if r.interpretation:
+        parts.append("해석: " + r.interpretation)
+    if r.counter:
+        parts.append("반대 해석: " + r.counter)
+    summary = "\n".join(parts)
+    srcs = (r.sources or [])[:ISSUE_TRACK_MAX_SOURCES]
+    if srcs:  # approve_proposal과 같은 형식으로 근거 URL을 요지 끝에 보존
+        summary += "\n\n출처:\n" + "\n".join(f"- {s.get('title', '')} {s.get('url', '')}".strip() for s in srcs)
+    return summary.strip()
+
+
+@router.post("/issues/{issue_id}/track")
+async def track_issue(issue_id: int, session: AsyncSession = Depends(get_session)) -> dict:
+    """이슈를 내러티브로 고정한다(사용자 명시 동작). 이미 추적 중이면 기존 narrative_id를 그대로 반환(멱등)."""
+    r = await _get_issue(session, issue_id)
+    if r.status == "tracked" and r.narrative_id is not None:
+        nid = r.narrative_id
+    else:
+        today = dt.datetime.now(KST).date()
+        row = MarketNarrative(
+            title=r.title[:200],
+            summary=_track_summary(r) or None,
+            direction=r.direction,
+            beneficiaries=_clean_list(r.beneficiaries),
+            victims=_clean_list(r.victims),
+            confidence=r.confidence,
+            expires_on=today + dt.timedelta(days=DEFAULT_EXPIRY_DAYS),
+            active=True,
+        )
+        session.add(row)
+        await session.flush()
+        r.status = "tracked"
+        r.narrative_id = row.id
+        nid = row.id
+        await session.commit()
+        await session.refresh(r)
+    return {"narrative_id": nid, "issue": (await _issue_items(session, [r]))[0]}
+
+
+@router.post("/issues/{issue_id}/hide")
+async def hide_issue(issue_id: int, session: AsyncSession = Depends(get_session)) -> dict:
+    r = await _get_issue(session, issue_id)
+    if r.status == "tracked":
+        raise HTTPException(409, "추적 중인 이슈는 숨길 수 없습니다")
+    r.status = "hidden"
+    await session.commit()
+    await session.refresh(r)
+    return {"issue": (await _issue_items(session, [r]))[0]}
+
+
+@router.post("/issues/{issue_id}/unhide")
+async def unhide_issue(issue_id: int, session: AsyncSession = Depends(get_session)) -> dict:
+    r = await _get_issue(session, issue_id)
+    if r.status == "hidden":
+        r.status = "new"
+        await session.commit()
+        await session.refresh(r)
+    return {"issue": (await _issue_items(session, [r]))[0]}
 
 
 @router.put("/{narrative_id}")

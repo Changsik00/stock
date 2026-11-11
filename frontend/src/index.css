@@ -1824,11 +1824,8 @@ header h1 {
 .narr-form-row label { flex: 1 1 120px; }
 .narr-check { flex-direction: row !important; align-items: center; gap: 6px !important; font-size: 12px; }
 .narr-check input { width: auto; }
-.narr-proposal { border-style: dashed; }
 .narr-sources { margin: 0; padding-left: 18px; font-size: 12px; display: flex; flex-direction: column; gap: 2px; }
 .narr-sources a, .narr-news-list a { color: var(--text-secondary); }
-.narr-nokey { margin-bottom: 8px; }
-.narr-refresh-msg { margin-bottom: 8px; }
 .narr-news { margin-bottom: 24px; }
 .narr-news-list { margin: 6px 0 0; padding-left: 18px; font-size: 12px; display: flex; flex-direction: column; gap: 3px; max-height: 320px; overflow-y: auto; }
 
@@ -2152,8 +2149,6 @@ header h1 {
 .narr-page .narr-evidence-row:has(.narr-ev-vals > .narr-ev-cell:only-child) .narr-ev-vals { grid-template-columns: 1fr; }
 .narr-page .narr-actions { margin-top: var(--sp-1); gap: var(--sp-2); }
 .narr-page .narr-summary-line { margin-bottom: var(--sp-2); font-variant-numeric: tabular-nums; }
-.narr-page .narr-external, .narr-page .narr-nokey, .narr-page .narr-refresh-msg { margin-bottom: var(--sp-2); line-height: 1.5; }
-.narr-clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .narr-page .narr-news { margin-bottom: var(--sp-5); }
 .narr-page .narr-news-list { padding-left: var(--sp-4); gap: var(--sp-2); }
 .narr-page .narr-news-list a, .narr-page .narr-sources a { color: var(--text-primary); }
@@ -2188,3 +2183,59 @@ header h1 {
   padding: 4px 6px;
   vertical-align: top;
 }
+
+/* ===== 오늘의 이슈 (Phase 5.106) — 펼친 카드 목록. 본문 줄 길이 제한으로 1280px에서도 읽기 편하게 ===== */
+.narr-page { max-width: 880px; }
+.ni-meta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1) var(--sp-3); margin-bottom: var(--sp-2); font-variant-numeric: tabular-nums; }
+.ni-sched { margin: 0; line-height: 1.5; }
+/* 헤더 묶음 간격 리듬(DESIGN.md "그룹 안/밖 간격이 다르다"): 제목↔메타 8px, 메타↔조작부 12px,
+   조작부 안(버튼 줄↔안내문) 8px, 헤더↔카드 목록 16px. */
+.narr-page .mt-title.ni-sec-title { margin-bottom: var(--sp-2); }
+.ni-header { display: flex; flex-direction: column; gap: var(--sp-3); margin-bottom: var(--sp-4); }
+.ni-header .ni-meta, .narr-page .ni-header .narr-toolbar { margin-bottom: 0; }
+.ni-controls { display: flex; flex-direction: column; gap: var(--sp-2); }
+.ni-batch { display: inline-flex; align-items: center; gap: var(--sp-1); }
+.ni-batch select { min-height: 32px; padding: 0 var(--sp-2); border-radius: 6px; border: 1px solid var(--axis); background: var(--surface); color: var(--text-primary); font: inherit; font-size: var(--fs-label); max-width: 100%; }
+.ni-batch select:focus-visible { outline: 2px solid var(--series-price); outline-offset: 1px; }
+.ni-list { display: flex; flex-direction: column; margin-bottom: var(--sp-5); background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-card); overflow: hidden; }
+.ni-card { display: flex; flex-direction: column; gap: var(--sp-3); padding: var(--sp-4); min-width: 0; }
+/* 카드 안 리듬: 제목 줄↔칩 8px(같은 묶음), 그 아래 본문 묶음들은 12px. */
+.ni-card > .ni-h + * { margin-top: calc(-1 * var(--sp-1)); }
+/* 데스크톱에서는 본문을 제목 글자 시작선(순번 원 24px + 간격 12px)에 맞춘다. 모바일은 폭이 좁아 맞추지 않는다. */
+@media (min-width: 640px) { .ni-card > :not(.ni-h) { margin-left: calc(24px + var(--sp-3)); } }
+.ni-card + .ni-card { border-top: 1px solid var(--border); }
+.ni-hidden { background: var(--page); }
+.ni-hidden .ni-title { color: var(--text-secondary); }
+.ni-h { margin: 0; font: inherit; }
+.ni-head { display: flex; gap: var(--sp-3); align-items: flex-start; width: 100%; min-height: 44px; padding: 0; background: none; border: none; color: var(--text-primary); font: inherit; text-align: left; cursor: pointer; border-radius: var(--sp-2); }
+.ni-head:hover .ni-title { text-decoration: underline; text-underline-offset: 3px; }
+.ni-head:focus-visible { outline: 2px solid var(--series-price); outline-offset: 4px; }
+.ni-head .narr-chevron { margin-top: var(--sp-2); }
+.narr-page .ni-head[aria-expanded="true"] .narr-chevron { transform: rotate(-135deg); }
+.ni-rank { flex: 0 0 auto; width: 24px; height: 24px; border-radius: 50%; border: 1px solid var(--axis); color: var(--text-secondary); font-size: var(--fs-label); font-weight: 700; display: inline-flex; align-items: center; justify-content: center; font-variant-numeric: tabular-nums; }
+.ni-head-main { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-1); }
+.ni-tags { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1) var(--sp-2); }
+.ni-tag { font-size: var(--fs-label); padding: 1px 8px; border-radius: 999px; border: 1px solid var(--axis); color: var(--text-secondary); white-space: nowrap; }
+.ni-tag-on { color: var(--text-primary); background: var(--chip-bg); }
+.ni-title { display: block; margin: 0; font-size: var(--fs-title); line-height: 1.4; font-weight: 700; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.ni-evidence { display: flex; flex-direction: column; gap: var(--sp-1); }
+.ni-chips { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-2); margin: 0; padding: 0; list-style: none; }
+.ni-chip { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--sp-1); padding: 3px 10px; border-radius: 999px; background: var(--chip-bg); font-size: var(--fs-label); color: var(--text-primary); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.ni-chip i { font-style: normal; color: var(--text-secondary); }
+.ni-chip b { font-weight: 700; }
+.ni-chip b.up { color: var(--up); }
+.ni-chip b.down { color: var(--down); }
+.ni-chip-none { color: var(--text-secondary); }
+.ni-chip-v { color: var(--text-secondary); }
+.ni-chip-bad { color: var(--warn-text); font-weight: 700; }
+.ni-ev-sum { display: flex; flex-wrap: wrap; align-items: center; gap: 0 var(--sp-2); }
+.ni-noev { margin: 0; }
+.ni-evrows { max-width: 520px; }
+.ni-interp { margin: 0; font-size: var(--fs-body); line-height: 1.6; max-width: 68ch; overflow-wrap: anywhere; }
+.ni-facts { margin: 0; padding-left: var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-1); font-size: 13px; line-height: 1.55; color: var(--text-secondary); max-width: 68ch; overflow-wrap: anywhere; }
+.ni-counter { font-size: 13px; line-height: 1.55; color: var(--text-secondary); max-width: 68ch; overflow-wrap: anywhere; }
+.ni-counter b { color: var(--text-secondary); font-weight: 700; margin-right: var(--sp-1); }
+.ni-sources ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--sp-2); font-size: 13px; line-height: 1.5; }
+.ni-sources a { color: var(--text-primary); overflow-wrap: anywhere; }
+.ni-src-meta { white-space: nowrap; }
+.ni-card .narr-actions { margin-top: 0; }

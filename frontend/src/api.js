@@ -713,11 +713,16 @@ export const createNarrative = (body) => postJson('/api/narratives/', body)
 export const updateNarrative = (id, body) => sendJson('PUT', `/api/narratives/${id}`, body)
 export const deleteNarrative = (id) => sendJson('DELETE', `/api/narratives/${id}`)
 
-// 5.90-2 뉴스 기반 내러티브 제안 큐. GET -> { llm_configured, running, last_refresh, items: [...] }.
-export const getNarrativeProposals = (status = 'pending') => getJson(`/api/narratives/proposals?status=${status}`)
-export const approveNarrativeProposal = (id, overrides) =>
-  sendJson('POST', `/api/narratives/proposals/${id}/approve`, overrides || {})
-export const dismissNarrativeProposal = (id) => sendJson('POST', `/api/narratives/proposals/${id}/dismiss`)
+// 5.106 오늘의 이슈 (뉴스 묶음). GET -> { disclaimer, batch_at, generated_by, stats, items, batches, last_ingest }.
+export function getNarrativeIssues({ batchAt, includeHidden } = {}) {
+  const q = new URLSearchParams()
+  if (batchAt) q.set('batch_at', batchAt)
+  if (includeHidden) q.set('include_hidden', 'true')
+  const qs = q.toString()
+  return getJson(`/api/narratives/issues${qs ? `?${qs}` : ''}`)
+}
+export const trackNarrativeIssue = (id) => sendJson('POST', `/api/narratives/issues/${id}/track`)
+export const hideNarrativeIssue = (id) => sendJson('POST', `/api/narratives/issues/${id}/hide`)
+export const unhideNarrativeIssue = (id) => sendJson('POST', `/api/narratives/issues/${id}/unhide`)
 export const refreshNarratives = () => sendJson('POST', '/api/narratives/refresh')
-export const getNarrativeRefreshStatus = () => getJson('/api/narratives/refresh-status')
 export const getNarrativeNews = (limit = 50) => getJson(`/api/narratives/news?limit=${limit}`)

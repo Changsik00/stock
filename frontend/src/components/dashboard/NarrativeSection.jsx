@@ -3,63 +3,18 @@ import { createNarrative, deleteNarrative, getNarratives, updateNarrative } from
 import Badge from '../Badge'
 import Modal from '../Modal'
 import NarrativeRow, { NarrSkeleton } from './NarrativeRow'
+import EvidenceRow from './NarrativeEvidence'
+import { CONFIDENCE, DIRECTION, alignSummary } from './narrativeShared'
 
-// 시장 내러티브 메모 (PLAN.md §5.90-1) — 사용자가 직접 기록한 서사를 실제 섹터
+// 추적 중인 내러티브 (PLAN.md §5.90-1, 5.106) — 직접 기록하거나 오늘의 이슈에서 추적으로 고정한 서사를 실제 섹터
 // 수급/등락과 나란히 보여준다. 참고용이며 매매 신호가 아니다(자동 생성·확정 없음).
 // 한국 관행: 상승/순매수(+)=빨강(.up), 하락/순매도(-)=파랑(.down).
 
-const DIRECTION = { bullish: '강세', bearish: '약세', neutral: '중립' }
-const CONFIDENCE = { low: '낮음', mid: '보통', high: '높음' }
-const ALIGN = {
-  aligned: { label: '수급 일치', cls: 'narr-aligned' },
-  divergent: { label: '수급 불일치', cls: 'narr-divergent' },
-  mixed: { label: '일부 불일치', cls: 'narr-mixed' },
-  unknown: { label: '판정 불가', cls: 'narr-none' },
-  none: { label: '매칭 섹터 없음', cls: 'narr-none' },
-}
-
-const numFmt = new Intl.NumberFormat('ko-KR')
-const signCls = (v) => (v > 0 ? 'up' : v < 0 ? 'down' : '')
-// 방향은 ▲▼(CSS ::before, .up/.down)로 표시하므로 값은 부호 없는 절댓값으로 쓴다(숫자는 억 정수 · % 소수 2자리로 통일).
-const fmtMil = (v) => (v == null ? '-' : `${numFmt.format(Math.abs(Math.round(v / 100)))}억`) // 백만원 -> 억원
-const fmtRate = (v) => (v == null ? '-' : `${Math.abs(v).toFixed(2)}%`)
-
-function EvidenceRow({ e }) {
-  const v = ALIGN[e.verdict] || ALIGN.unknown
-  return (
-    <div className="narr-evidence-row">
-      <span className="narr-ev-name">
-        {e.role === 'beneficiary' ? '수혜' : '피해'} · {e.name}
-        {e.market ? ` (${e.market === 'kospi' ? '코스피' : '코스닥'})` : e.group_type === 'theme' ? ' (테마)' : ' (업종)'}
-      </span>
-      {e.source === 'sector_flow' ? (
-        <span className="narr-ev-vals">
-          <span className="narr-ev-cell"><i>외</i><b className={signCls(e.foreign_net)}>{fmtMil(e.foreign_net)}</b></span>
-          <span className="narr-ev-cell"><i>기</i><b className={signCls(e.institution_net)}>{fmtMil(e.institution_net)}</b></span>
-          <span className="narr-ev-cell"><i>개</i><b className={signCls(e.individual_net)}>{fmtMil(e.individual_net)}</b></span>
-        </span>
-      ) : (
-        <span className="narr-ev-vals"><span className="narr-ev-cell"><b className={signCls(e.change_rate)}>{fmtRate(e.change_rate)}</b></span></span>
-      )}
-      <span className={`narr-ev-verdict ${v.cls}`}>{e.verdict === 'unknown' ? '-' : v.label}</span>
-    </div>
-  )
-}
-
-// 수급 일치 요약 배지: 일치/불일치 건수를 한 덩어리로 (판정 가능한 evidence만 집계).
-function alignSummary(n) {
-  const cnt = (v) => n.evidence.filter((e) => e.verdict === v).length
-  const ok = cnt('aligned')
-  const bad = cnt('divergent')
-  const a = ALIGN[n.alignment] || ALIGN.none
-  if (ok + bad === 0) return { label: a.label, cls: a.cls }
-  return { label: `일치 ${ok}${bad ? ` · 불일치 ${bad}` : ''}`, cls: a.cls }
-}
-
-function NarrativeCard({ n, onEdit, onDelete }) {
-  const a = alignSummary(n)
+function NarrativeCard({ n, onEdit, onDelete, defaultOpen }) {
+  const a = alignSummary(n.evidence, n.alignment)
   return (
     <NarrativeRow
+      defaultOpen={defaultOpen}
       className={n.active ? '' : 'narr-inactive'}
       title={n.title}
       titleBadge={<span className={`narr-dir narr-dir-${n.direction}`}>{DIRECTION[n.direction]}</span>}
@@ -192,7 +147,7 @@ export default function NarrativeSection({ reloadKey = 0 }) {
     }
   }, [showInactive])
 
-  // reloadKey: 제안 승인 후 상위에서 올려 활성 목록을 다시 불러오게 한다.
+  // reloadKey: 이슈 추적 후 상위에서 올려 활성 목록을 다시 불러오게 한다.
   useEffect(() => {
     load()
   }, [load, reloadKey])
@@ -210,7 +165,7 @@ export default function NarrativeSection({ reloadKey = 0 }) {
   return (
     <>
       <div className="section-title mt-title">
-        시장 내러티브{' '}
+        추적 중인 내러티브{' '}
         <span className="narr-meta">{data?.disclaimer || '참고용, 매매 신호 아님'}</span>
       </div>
       <div className="narr-toolbar">
@@ -233,7 +188,7 @@ export default function NarrativeSection({ reloadKey = 0 }) {
       {data && data.items.length > 0 && (
         <div className="narr-list">
           {data.items.map((n) => (
-            <NarrativeCard key={n.id} n={n} onEdit={setEditing} onDelete={handleDelete} />
+            <NarrativeCard key={n.id} n={n} defaultOpen={data.items.length <= 3} onEdit={setEditing} onDelete={handleDelete} />
           ))}
         </div>
       )}

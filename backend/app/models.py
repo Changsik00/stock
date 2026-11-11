@@ -17,6 +17,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Integer,
     Numeric,
     SmallInteger,
     String,
@@ -842,6 +843,38 @@ class NewsItem(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class NewsIssue(Base):
+    """뉴스 이슈 묶음 (PLAN.md §5.106). 호스트 Claude Code가 같은 사건 기사를 묶어 만든 '오늘의 이슈'.
+    ``batch_at``이 같은 행들이 한 번의 생성 실행(배치). ``sources``는 [{title,url,source,published_at}]이며
+    첫 항목이 대표 기사. ``news_total``은 생성 시점 창 내 전체 기사 수(통계용, 배치 내 동일값).
+    status: new|tracked|hidden. 참고용이며 매매 신호가 아니다."""
+
+    __tablename__ = "news_issue"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    batch_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    direction: Mapped[str] = mapped_column(String(10), nullable=False, default="neutral")
+    confidence: Mapped[str] = mapped_column(String(10), nullable=False, default="low")
+    continuing: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    facts: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    interpretation: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    counter: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    beneficiaries: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    victims: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    sources: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="new", server_default="new")
+    narrative_id: Mapped[int | None] = mapped_column(
+        ForeignKey("market_narrative.id", ondelete="SET NULL"), nullable=True
+    )
+    generated_by: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    news_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class NarrativeProposal(Base):
