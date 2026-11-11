@@ -47,7 +47,13 @@ import {
   US_INDEX_SERIES,
 } from '../constants'
 import { formatDate, signedEokJoLabel } from '../format'
-import { isNewerDate, shouldUseClosedLiveIndexRow } from '../liveFallback'
+import {
+  isNewerDate,
+  pickClosedFuturesFlow,
+  pickFxDisplay,
+  shouldUseClosedLiveIndexRow,
+  shouldUseGroupLive,
+} from '../liveFallback'
 import {
   BREADTH_LIVE_POLL_MS,
   DEFAULT_CANDLE_DAYS,
@@ -966,6 +972,14 @@ export default function DashboardPage() {
     !STATIC_DATA && futuresFlowLive && futuresFlowLive.market_closed === false
       ? (futuresFlowLive.investors?.['외국인']?.net_value ?? null)
       : null
+  // 마감 후~배치 전: 거래일 증거(closedLiveIndexUsed)가 있고 라이브 date가 EOD 선물수급
+  // date보다 최신일 때만 라이브 값을 표시한다(장중 배지 없음, "확정 · 날짜" 표기는 수급 타일 관례).
+  // baseDate에는 섞지 않는다. 시그널(foreignFuturesSign)은 EOD 기준 그대로.
+  const futuresClosedLive =
+    STATIC_DATA || futuresFlowLiveNetValue !== null
+      ? null
+      : pickClosedFuturesFlow(futuresFlowLive, { closedLiveIndexUsed, eodDate: foreignFuturesRow?.date })
+  const futuresShownValue = futuresFlowLiveNetValue ?? futuresClosedLive?.value ?? null
 
   const basisLatest = basisData?.latest
   // 베이시스 1분 라이브 오버레이(PLAN.md §4.7, §5.5-2로 7분→1분 이동) — KPI 타일
@@ -974,11 +988,21 @@ export default function DashboardPage() {
     !STATIC_DATA && basisLive && basisLive.market_closed === false && typeof basisLive.basis === 'number'
   )
   // 환율(USD/KRW) 1분 라이브 오버레이(PLAN.md §5.5-3) — basisLiveActive와 동일한
-  // 관례. 값 표시만 라이브로 바꾸고, DiffArrow의 기준(prev)은 여전히 macroPrev
-  // (전일 종가)를 쓴다 — "전일 대비"라는 의미 자체는 유지한 채 "현재"만 갱신한다.
-  const fxLiveActive = Boolean(
-    !STATIC_DATA && fxLive && fxLive.market_closed === false && typeof fxLive.usdkrw?.value === 'number'
-  )
+  // 관례. 값 표시만 라이브로 바꾸고 "전일 대비"라는 의미는 유지한 채 "현재"만 갱신한다.
+  // 마감 후에도 라이브 date가 EOD 마지막보다 최신이면 라이브를 쓰고(장중 배지 없음), 전일비 기준은
+  // 라이브 date가 더 최신일 때 EOD 마지막 값(직전 거래일 종가), 같으면 macroPrev다(장중·마감 후 공통).
+  // 기존엔 항상 macroPrev(끝에서 두 번째)를 써서 EOD 마지막이 어제인 시간대엔 "그제 대비"였다.
+  // baseDate에는 라이브 date를 섞지 않는다.
+  const fxPick = STATIC_DATA
+    ? { active: false }
+    : pickFxDisplay(fxLive, {
+        eodDate: macroDate('usdkrw'),
+        eodLatest: macroLatest('usdkrw'),
+        eodPrev: macroPrev('usdkrw'),
+      })
+  const fxLiveActive = fxPick.active
+  const fxCurrent = fxLiveActive ? fxPick.value : macroLatest('usdkrw')
+  const fxPrevValue = fxLiveActive ? fxPick.prev : macroPrev('usdkrw')
   const expiry = basisData?.expiry
   const derivativeLatest = derivativeFlow?.latest
   const derivativeUniverse = derivativeFlow?.universe
@@ -1075,7 +1099,9 @@ export default function DashboardPage() {
   // GroupTreemap.jsx는 이 병합 여부를 모르는 순수 컴포넌트라 그대로 재사용한다.
   // groupLive가 없거나(정적 배포/폴링 전/실패) 해당 그룹 타입과 다르면 groupItems를
   // 그대로 쓴다.
-  const groupLiveActive = Boolean(!STATIC_DATA && groupLive && groupLive.type === groupType && groupLive.market_closed === false)
+  // 마감 후엔 거래일 증거(closedLiveIndexUsed)+rows 비어있지 않음일 때만 라이브(장중 배지 없음).
+  const groupLiveActive = !STATIC_DATA && shouldUseGroupLive(groupLive, groupType, closedLiveIndexUsed)
+  const groupLiveOpen = groupLiveActive && groupLive.market_closed === false
   const groupTreemapItems = groupLiveActive
     ? groupItems.map((item) => {
         const live = groupLive.rows.find((r) => r.name === item.name)
@@ -1377,8 +1403,8 @@ export default function DashboardPage() {
         <KpiTile
           label="외인 선물 (K200)"
           value={
-            futuresFlowLiveNetValue !== null
-              ? eokLabel(futuresFlowLiveNetValue)
+            futuresShownValue !== null
+              ? eokLabel(futuresShownValue)
               : foreignFuturesRow
                 ? eokLabel(foreignFuturesRow.net_value)
                 : marketLoading
@@ -1386,8 +1412,8 @@ export default function DashboardPage() {
                   : '-'
           }
           valueClass={
-            futuresFlowLiveNetValue !== null
-              ? futuresFlowLiveNetValue >= 0
+            futuresShownValue !== null
+              ? futuresShownValue >= 0
                 ? 'up'
                 : 'down'
               : foreignFuturesRow
@@ -1399,6 +1425,11 @@ export default function DashboardPage() {
           sub={
             futuresFlowLiveNetValue !== null ? (
               <span className="kpi-tile-sub">1분 갱신 · 장중</span>
+            ) : futuresClosedLive ? (
+              <span className="kpi-tile-sub">
+                확정
+                <StaleDate date={futuresClosedLive.date} baseDate={baseDate} prefix=" · " />
+              </span>
             ) : (
               foreignFuturesRow?.date && (
                 <span className="kpi-tile-sub">
@@ -1408,7 +1439,13 @@ export default function DashboardPage() {
               )
             )
           }
-          title={foreignFuturesRow?.date ? formatDate(foreignFuturesRow.date) : undefined}
+          title={
+            futuresClosedLive
+              ? formatDate(futuresClosedLive.date)
+              : foreignFuturesRow?.date
+                ? formatDate(foreignFuturesRow.date)
+                : undefined
+          }
           onClick={() => setModal({ type: 'foreignPosition', title: '외인 현물 vs 선물 · 베이시스' })}
         />
         <KpiTile
@@ -1700,23 +1737,27 @@ export default function DashboardPage() {
             브렌트는 타일에서 생략하고 모달(MacroModal)에서만 보여준다. */}
         <KpiTile
           label="환율(USD/KRW)"
-          value={fxLabel(fxLiveActive ? fxLive.usdkrw.value : macroLatest('usdkrw'))}
+          value={fxLabel(fxCurrent)}
           sub={
             <>
               <DiffArrow
-                current={fxLiveActive ? fxLive.usdkrw.value : macroLatest('usdkrw')}
-                prev={macroPrev('usdkrw')}
-                formatter={(v) => `${fxFmt.format(v)}원${pctSuffix(v, macroPrev('usdkrw'))}`}
+                current={fxCurrent}
+                prev={fxPrevValue}
+                formatter={(v) => `${fxFmt.format(v)}원${pctSuffix(v, fxPrevValue)}`}
                 neutral
               />
-              {fxLiveActive ? (
+              {fxLiveActive && fxPick.isOpen ? (
                 <span className="kpi-tile-sub"> · 1분 갱신 · 장중</span>
               ) : (
-                <StaleDate date={macroDate('usdkrw')} baseDate={baseDate} prefix=" · " />
+                <StaleDate date={fxLiveActive ? fxPick.date : macroDate('usdkrw')} baseDate={baseDate} prefix=" · " />
               )}
             </>
           }
-          title={macroDate('usdkrw') ? formatDate(macroDate('usdkrw')) : undefined}
+          title={
+            (fxLiveActive ? fxPick.date : macroDate('usdkrw'))
+              ? formatDate(fxLiveActive ? fxPick.date : macroDate('usdkrw'))
+              : undefined
+          }
           onClick={() => setModal({ type: 'macro', title: '환율 · 유가 · 전일 미국장' })}
         />
         <KpiTile
@@ -1773,7 +1814,7 @@ export default function DashboardPage() {
           </button>
         ))}
         <span className="toggle-hint">
-          {groupLiveActive ? '박스 크기 = 일별 거래대금 · 색(등락률) 1분 갱신 · 장중' : '일별 스냅샷 · 색 = 등락률'}
+          {groupLiveActive ? (groupLiveOpen ? '박스 크기 = 일별 거래대금 · 색(등락률) 1분 갱신 · 장중' : '박스 크기 = 일별 거래대금 · 색(등락률) 오늘 종가') : '일별 스냅샷 · 색 = 등락률'}
         </span>
       </div>
       {groupLoading && <div className="state">불러오는 중…</div>}

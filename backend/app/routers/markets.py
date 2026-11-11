@@ -101,7 +101,14 @@ from ..clients.kiwoom import (
 from ..collectors import intraday_snapshot
 from ..collectors.market_flow import fetch_live_flow
 from ..db import get_session
-from ..market_hours import KST, is_market_closed as _market_closed_kst, is_nxt_closed
+from ..market_hours import (
+    CLOSED_REFETCH_TTL_SECONDS,
+    KST,
+    is_market_closed as _market_closed_kst,
+    is_nxt_closed,
+    kst_now,
+    required_confirm_kst,
+)
 from ..models import (
     IndexIntradayBar,
     IndexOhlcv,
@@ -960,7 +967,9 @@ async def market_attention_live(session: AsyncSession = Depends(get_session)):
 # 스케줄러 잡 배정을 함께 옮기는 걸 빠뜨려 실제로는 계속 7분 캐시로 응답하는
 # 회귀가 있었다(§5.6 후속 사용자 지적으로 재발견). TTL도 맞춘다.
 _FUTURES_FLOW_LIVE_TTL_SECONDS = 60
-_futures_flow_live_cache: dict[str, object] = {"ts": 0.0, "data": None}
+# "fetched_at": 소스(네이버)에서 마지막으로 **성공 조회한** KST 시각(aware datetime) —
+# 마감 후 "확정 기준 시각(18:05) 이후 조회분인가" 판정용. payload 스키마에는 넣지 않는다.
+_futures_flow_live_cache: dict[str, object] = {"ts": 0.0, "data": None, "fetched_at": None}
 _futures_flow_live_cache_lock = asyncio.Lock()
 
 
@@ -970,38 +979,79 @@ def _fetch_futures_flow_blocking(target_date: dt.date) -> dict | None:
 
 async def _warm_futures_flow_live() -> dict:
     """futures-flow/live 캐시를 채우고 payload를 반환한다 — 라우트 핸들러와
-    collectors/live_refresh.py의 5~10분 인터벌 잡이 공유한다. 장 마감이면
-    네이버 호출을 생략하고 마지막 캐시(있으면)를 ``market_closed: true``로
-    재사용한다 — 신규 5~10분 티어 전체의 기본 원칙(2026-07-20, breadth/flow/attention
-    라이브와 동일한 게이트)."""
+    collectors/live_refresh.py의 60초 인터벌 잡이 공유한다.
+
+    **장중**: TTL마다 네이버를 재조회한다(실패 시 502).
+
+    **장 마감(2026-11-11 버그 수정, 이슈 #3)**: 예전에는 마감이면 네이버 호출을 아예
+    생략하고 마지막 캐시를 재사용했는데, K200 선물은 15:45에 마감하고 현물은 종가
+    단일가가 있어 15:30 직전 캐시가 굳어 틀린 값이 남았다(실측 15:28 캐시 외국인
+    -73,400 → 15:47 실제 -269,400). 이제 "확정 기준 시각"(가장 최근에 지난 18:05 KST,
+    ``last_close_confirm_kst``/``required_confirm_kst``) 이후에 소스에서 실제 조회한 캐시면 재호출 없이
+    ``market_closed: true``로 재사용하고(밤새/주말/다음날 개장 전 재호출 없음), 아니면
+    (캐시 없음 또는 18:05 이전 조회분) 5분(``CLOSED_REFETCH_TTL_SECONDS``) 간격으로 재조회한다 — 15:30~18:05 사이엔
+    계속 재조회되는 게 의도다(마감 후에도 값이 여러 번 바뀜, market_hours.py 실측 주석). 조회 시각은 캐시 dict의 ``fetched_at``에 따로 보관한다
+    (payload 스키마 불변).
+    - 마감 재조회가 예외로 실패하면 502 대신 기존 캐시(있으면)를 ``market_closed: true``로,
+      없으면 빈 investors로 응답하고 warning을 남긴다. 이때 ``fetched_at``은 갱신하지 않아
+      다음 TTL에 다시 시도된다.
+    - ``fetch_futures_flow``가 None(휴장/데이터 없음)이면 빈 investors, date=오늘로 응답하고
+      조회 완료로 기록한다(휴장일에 계속 두드리지 않도록). 단 기존 캐시에 같은 날짜의 비어
+      있지 않은 investors가 있으면 그 캐시를 유지한다.
+    DB에는 쓰지 않는다."""
     now = time.monotonic()
     async with _futures_flow_live_cache_lock:
         cached = _futures_flow_live_cache["data"]
-        if cached is not None and (now - _futures_flow_live_cache["ts"]) < _FUTURES_FLOW_LIVE_TTL_SECONDS:
+        fetched_at = _futures_flow_live_cache.get("fetched_at")
+        now_kst = kst_now()
+        closed = _market_closed_kst(now_kst)
+        if closed and cached is not None and fetched_at is not None and fetched_at >= required_confirm_kst(now_kst):
+            # 확정 기준 시각 이후에 조회된 값 — 네이버 재호출 없이 재사용.
+            if not cached.get("market_closed"):
+                cached = {**cached, "market_closed": True}
+                _futures_flow_live_cache["data"] = cached
             return cached
-
-        now_kst = dt.datetime.now(KST)
-        if _market_closed_kst(now_kst):
-            if cached is not None:
-                payload = {**cached, "market_closed": True}
-            else:
-                payload = {
-                    "date": now_kst.date().isoformat(),
-                    "investors": {},
-                    "market_closed": True,
-                    "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                }
-            _futures_flow_live_cache["data"] = payload
-            _futures_flow_live_cache["ts"] = now
-            return payload
+        # 마감 후 확정 전 구간은 장중(60초)보다 느린 간격으로 재조회한다.
+        ttl = CLOSED_REFETCH_TTL_SECONDS if closed else _FUTURES_FLOW_LIVE_TTL_SECONDS
+        if cached is not None and (now - _futures_flow_live_cache["ts"]) < ttl:
+            if closed and not cached.get("market_closed"):
+                cached = {**cached, "market_closed": True}  # 장중에 만든 캐시가 마감 직후 TTL 내 재사용되는 경우
+            return cached
 
         today_kst = now_kst.date()
         try:
             result = await asyncio.to_thread(_fetch_futures_flow_blocking, today_kst)
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(502, f"futures-flow live fetch failed: {str(e)[:200]}") from e
+            if not closed:
+                raise HTTPException(502, f"futures-flow live fetch failed: {str(e)[:200]}") from e
+            logger.warning("futures_flow_live: 장마감 재조회 실패, 기존 캐시/빈 값 폴백: %s", e)
+            if cached is not None:
+                payload = {**cached, "market_closed": True}
+            else:
+                payload = {
+                    "date": today_kst.isoformat(),
+                    "investors": {},
+                    "market_closed": True,
+                    "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                }
+            # fetched_at은 건드리지 않는다(확정 조회 아님) — ts만 갱신해 다음 TTL에 재시도.
+            _futures_flow_live_cache["data"] = payload
+            _futures_flow_live_cache["ts"] = now
+            return payload
 
         if result is None:
+            if (
+                closed
+                and cached is not None
+                and cached.get("investors")
+                and cached.get("date") == today_kst.isoformat()
+            ):
+                # 같은 날짜의 유효 캐시가 있으면 None(일시적 빈 응답)으로 덮지 않는다.
+                payload = {**cached, "market_closed": True}
+                _futures_flow_live_cache["data"] = payload
+                _futures_flow_live_cache["ts"] = now
+                _futures_flow_live_cache["fetched_at"] = now_kst
+                return payload
             investors: dict[str, dict] = {}
             date = today_kst.isoformat()
         else:
@@ -1011,11 +1061,12 @@ async def _warm_futures_flow_live() -> dict:
         payload = {
             "date": date,
             "investors": investors,
-            "market_closed": False,
+            "market_closed": closed,
             "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         }
         _futures_flow_live_cache["data"] = payload
         _futures_flow_live_cache["ts"] = now
+        _futures_flow_live_cache["fetched_at"] = now_kst
         return payload
 
 
@@ -1026,8 +1077,11 @@ async def futures_flow_live():
     네이버 모바일 트렌드 API를 온디맨드로 재조회해 7분 메모리 캐시로 감싼다
     (market_flow DB에는 쓰지 않는다 — §3.5 원칙, EOD 확정치는 여전히
     collectors/futures_flow.py 일별 배치가 담당). 휴장/데이터 없음이면
-    ``investors``가 빈 dict. **장 마감이면 네이버 호출을 생략**하고 마지막 캐시를
-    ``market_closed: true``로 재사용한다(`_warm_futures_flow_live` docstring 참고).
+    ``investors``가 빈 dict. **장 마감 후에도 18:05(확정 기준 시각) 이후 값이 확보될
+    때까지는 TTL마다 네이버를 재조회**하고, 확보된 뒤에는 재호출 없이 그 값을
+    ``market_closed: true``로 재사용한다(2026-11-11 버그 수정 이슈 #3,
+    `_warm_futures_flow_live` docstring 참고). 마감 재조회 실패는 502가 아니라 기존
+    캐시/빈 값 폴백이다.
 
     Returns ``{"date": iso8601, "investors": {투자자명: {net_value, net_volume}},
     "market_closed": bool, "cached_at": iso8601}``.

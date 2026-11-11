@@ -21,10 +21,12 @@ group_snapshot 테이블을 그대로 읽어 반환할 뿐, 이 라우터에서 
 책임이 없다, 프런트 DashboardPage가 담당). DB(group_snapshot)에는 쓰지 않는다
 (§3.5 원칙).
 
-**장 마감 게이트(2026-07-20, 신규 5~10분 티어 전체의 기본 원칙)**: 장 마감이면
-``is_market_closed``로 걸러 네이버를 아예 호출하지 않는다. DB 폴백이 없으므로
-마지막 캐시(있으면)를 ``market_closed: true``로 재사용하고, 캐시조차 없으면
-빈 rows + ``market_closed: true``로 응답한다(502 아님).
+**장 마감 게이트(2026-07-20 도입, 2026-11-11 이슈 #3로 수정)**: 원래는 장 마감이면
+네이버를 아예 호출하지 않고 마지막 캐시를 재사용했으나, 15:30 직전 값이 굳는 문제가
+있어(실측 업종 1위 8.40 → 9.12) 이제 "확정 기준 시각"(가장 최근에 지난 18:05 KST)
+이후 조회된 캐시가 있을 때만 재호출 없이 ``market_closed: true``로 재사용하고, 그렇지
+않으면 TTL마다 재조회한다. 마감 재조회 실패는 502가 아니라 기존 캐시/빈 rows 폴백이다
+(``_warm_groups_live`` docstring 참고).
 
 ## GET /api/groups/top-stocks (PLAN.md §5.12 "업종·테마 트리맵 클릭 → 대장 종목
 TOP10", 2026-07-22)
@@ -54,6 +56,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import logging
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -62,8 +65,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..clients import naver_group
 from ..db import get_session
-from ..market_hours import KST, is_market_closed
+from ..market_hours import CLOSED_REFETCH_TTL_SECONDS, is_market_closed, kst_now, required_confirm_kst
 from ..models import GroupSnapshot
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["groups"])
 
@@ -77,9 +82,11 @@ GROUP_TYPES = {"upjong", "theme"}
 # 재호출에도 byte-for-byte 동일 응답으로 실측 확인). 이번에 TTL도 함께 맞춘다.
 LIVE_TTL_SECONDS = 60
 
+# "fetched_at": 소스에서 마지막으로 성공 조회한 KST 시각(aware datetime) — 마감 후
+# 확정 기준 시각(18:05) 이후 조회분인지 판정용(payload 스키마에는 넣지 않는다).
 _groups_live_cache: dict[str, dict] = {
-    "upjong": {"ts": 0.0, "data": None},
-    "theme": {"ts": 0.0, "data": None},
+    "upjong": {"ts": 0.0, "data": None, "fetched_at": None},
+    "theme": {"ts": 0.0, "data": None, "fetched_at": None},
 }
 _groups_live_cache_lock = asyncio.Lock()
 
@@ -159,16 +166,45 @@ async def _warm_top_stocks(group_type: str, name: str, no: int, limit: int) -> d
 
 async def _warm_groups_live(group_type: str) -> dict:
     """groups/live 캐시(group_type별 독립)를 채우고 payload를 반환한다 — 라우트
-    핸들러와 collectors/live_refresh.py의 5~10분 인터벌 잡이 공유한다."""
+    핸들러와 collectors/live_refresh.py의 60초 인터벌 잡이 공유한다.
+
+    **장중**: TTL마다 목록 페이지를 재조회한다(실패 시 502).
+
+    **장 마감(2026-11-11 버그 수정, 이슈 #3)**: 예전에는 마감이면 네이버 호출을 생략하고
+    마지막 캐시를 굳혀서 15:30 직전 값이 남았다(실측 업종 1위 등락률 8.40 → 장 마감 후
+    실제 9.12). 이제 "확정 기준 시각"(가장 최근에 지난 18:05 KST,
+    ``last_close_confirm_kst``/``required_confirm_kst``) 이후에 소스에서 실제 조회한 캐시면 재호출 없이
+    ``market_closed: true``로 재사용하고(밤새/주말/다음날 개장 전 재호출 없음), 아니면
+    (캐시 없음 또는 18:05 이전 조회분) 5분(``CLOSED_REFETCH_TTL_SECONDS``) 간격으로 재조회한다. 조회 시각은 캐시 엔트리의
+    ``fetched_at``에 따로 보관한다(payload 스키마 불변). 마감 재조회가 실패하면 502 대신
+    기존 캐시(있으면)를 ``market_closed: true``로, 없으면 빈 rows로 응답하고 warning을
+    남기며 ``fetched_at``은 갱신하지 않아 다음 TTL에 재시도된다. DB에는 쓰지 않는다."""
     now = time.monotonic()
     async with _groups_live_cache_lock:
         entry = _groups_live_cache[group_type]
         cached = entry["data"]
-        if cached is not None and (now - entry["ts"]) < LIVE_TTL_SECONDS:
+        fetched_at = entry.get("fetched_at")
+        now_kst = kst_now()
+        closed = is_market_closed(now_kst)
+        if closed and cached is not None and fetched_at is not None and fetched_at >= required_confirm_kst(now_kst):
+            # 확정 기준 시각 이후에 조회된 값 — 네이버 재호출 없이 재사용.
+            if not cached.get("market_closed"):
+                cached = {**cached, "market_closed": True}
+                entry["data"] = cached
+            return cached
+        # 마감 후 확정 전 구간은 장중(60초)보다 느린 간격으로 재조회한다.
+        ttl = CLOSED_REFETCH_TTL_SECONDS if closed else LIVE_TTL_SECONDS
+        if cached is not None and (now - entry["ts"]) < ttl:
+            if closed and not cached.get("market_closed"):
+                cached = {**cached, "market_closed": True}  # 장중에 만든 캐시가 마감 직후 TTL 내 재사용되는 경우
             return cached
 
-        now_kst = dt.datetime.now(KST)
-        if is_market_closed(now_kst):
+        try:
+            rows = await asyncio.to_thread(_fetch_group_list_blocking, group_type)
+        except Exception as e:  # noqa: BLE001
+            if not closed:
+                raise HTTPException(502, f"groups live fetch failed: {str(e)[:200]}") from e
+            logger.warning("groups_live(%s): 장마감 재조회 실패, 기존 캐시/빈 값 폴백: %s", group_type, e)
             if cached is not None:
                 payload = {**cached, "market_closed": True}
             else:
@@ -178,14 +214,10 @@ async def _warm_groups_live(group_type: str) -> dict:
                     "market_closed": True,
                     "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                 }
+            # fetched_at은 건드리지 않는다(확정 조회 아님) — ts만 갱신해 다음 TTL에 재시도.
             entry["data"] = payload
             entry["ts"] = now
             return payload
-
-        try:
-            rows = await asyncio.to_thread(_fetch_group_list_blocking, group_type)
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(502, f"groups live fetch failed: {str(e)[:200]}") from e
 
         payload = {
             "type": group_type,
@@ -193,11 +225,12 @@ async def _warm_groups_live(group_type: str) -> dict:
                 {"name": r["name"], "change_rate": r["change_rate"], "value": None, "market_sum": None}
                 for r in rows
             ],
-            "market_closed": False,
+            "market_closed": closed,
             "cached_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         }
         entry["data"] = payload
         entry["ts"] = now
+        entry["fetched_at"] = now_kst
         return payload
 
 
@@ -247,6 +280,10 @@ async def group_snapshot_live(
 
     목록 페이지만 재조회해 7분 메모리 캐시로 감싼다(모듈 docstring 참고 —
     거래대금 합산은 라이브에서 하지 않는다). DB(group_snapshot)에는 쓰지 않는다.
+    장 마감 후에도 18:05(확정 기준 시각) 이후 값이 확보될 때까지는 TTL마다 재조회하고,
+    확보된 뒤에는 재호출 없이 ``market_closed: true``로 재사용한다(2026-11-11 버그
+    수정 이슈 #3, `_warm_groups_live` docstring 참고). 마감 재조회 실패는 502가 아니라
+    기존 캐시/빈 rows 폴백.
 
     Returns ``{"type": ..., "rows": [{"name", "change_rate", "value": null,
     "market_sum": null}, ...], "cached_at": iso8601}``.

@@ -46,6 +46,36 @@ MARKET_CLOSE_TIME_KST = dt.time(15, 30)
 NXT_OPEN_TIME_KST = dt.time(8, 0)
 NXT_CLOSE_TIME_KST = dt.time(20, 0)
 
+# 마감 후 라이브 값 "확정 기준 시각"(2026-11-11, 이슈 #3) — 이 시각 이후에 조회한 값이어야
+# 그날 최종값으로 보고 다음 개장까지 재조회를 멈춘다. 일배치(18:00) 직후로 잡는다.
+# 근거(2026-11-11 1분 간격 실측, 네이버 K200 선물수급 외국인, 백만원): 15:28 -73,400 →
+# 15:47 -269,400 → 15:55 -398,700(10분간 고정) → 16:05 -805,100(다시 점프, 16:10까지 고정).
+# 선물 마감(15:45) 뒤에도 값이 여러 번 바뀌어 "언제 확정되는지"를 고정 시각으로 단정할 수 없다
+# (15:50, 16:05로 잡아 봤다가 둘 다 덜 확정된 값이 굳을 수 있음을 확인). 그래서 배치 시각까지는
+# 아래 CLOSED_REFETCH_TTL_SECONDS 간격으로 계속 재조회한다.
+CLOSE_CONFIRM_TIME_KST = dt.time(18, 5)
+# 마감 후 확정 전 구간의 재조회 간격(초) — 장중 60초보다 느리게(마감 후 폴링 최소화 원칙).
+CLOSED_REFETCH_TTL_SECONDS = 300
+
+
+def kst_now() -> dt.datetime:
+    """현재 KST 시각 — 테스트에서 monkeypatch로 시각을 고정하기 위한 얇은 래퍼."""
+    return dt.datetime.now(KST)
+
+
+def last_close_confirm_kst(now_kst: dt.datetime) -> dt.datetime:
+    """가장 최근에 지난 18:05 KST(확정 기준 시각)를 돌려준다.
+
+    지금이 18:05 이후(18:05 정각 포함)면 오늘 18:05, 아니면 어제 18:05. 주말/공휴일은
+    구분하지 않는다(캘린더 기준) — 주말에 한 번 더 조회될 수 있을 뿐 값은 틀어지지 않는다.
+    """
+    today_cut = now_kst.replace(
+        hour=CLOSE_CONFIRM_TIME_KST.hour, minute=CLOSE_CONFIRM_TIME_KST.minute, second=0, microsecond=0
+    )
+    if now_kst >= today_cut:
+        return today_cut
+    return today_cut - dt.timedelta(days=1)
+
 
 def is_market_closed(now_kst: dt.datetime) -> bool:
     """KRX 정규장(지수/집계 통계 기준) — 09:00~15:30."""
@@ -59,3 +89,18 @@ def is_nxt_closed(now_kst: dt.datetime) -> bool:
     if now_kst.weekday() >= 5:  # 토(5)/일(6)
         return True
     return not (NXT_OPEN_TIME_KST <= now_kst.time() < NXT_CLOSE_TIME_KST)
+
+
+def required_confirm_kst(now_kst: dt.datetime) -> dt.datetime:
+    """마감 후 캐시가 "확정값"이려면 이 시각 이후에 조회돼야 한다는 기준 시각.
+
+    평일 15:30~18:05 사이에는 오늘 18:05(아직 미래 — 어떤 캐시도 충족 못 하므로 TTL마다
+    재조회)이고, 그 외에는 ``last_close_confirm_kst``와 같다. 이게 필요한 이유: 15:47에는
+    ``last_close_confirm_kst``가 어제 18:05이라 "오늘 15:28 조회분"(종가 확정 전 값)이
+    확정으로 오인되기 때문이다.
+    """
+    last = last_close_confirm_kst(now_kst)
+    # last가 어제 18:05인데(= 오늘 18:05 이전) 오늘 정규장이 이미 끝났으면 기준은 오늘 18:05
+    if now_kst.weekday() < 5 and now_kst.time() >= MARKET_CLOSE_TIME_KST and last.date() < now_kst.date():
+        return last + dt.timedelta(days=1)
+    return last

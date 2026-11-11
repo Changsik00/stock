@@ -24,3 +24,41 @@ export function isNewerDate(liveDate, fallbackDate) {
 export function shouldUseClosedLiveIndexRow(liveRow, fallbackRow) {
   return Boolean(liveRow) && isNewerDate(liveRow.date, fallbackRow?.date)
 }
+
+// 환율 표시값/전일비 기준 선택. 라이브 값이 숫자이고 (장중이거나 라이브 date가 EOD 마지막
+// date보다 최신)이면 라이브를 쓴다. prev는 라이브 date가 EOD 마지막보다 최신일 때 EOD 마지막 값
+// (=직전 거래일 종가), 같으면(배치가 이미 오늘 값을 넣음) EOD 끝에서 두 번째 값이다.
+// 반환: { active, value, prev, isOpen, date } — active=false면 호출 측이 EOD 값으로 폴백한다.
+export function pickFxDisplay(fxLive, { eodDate, eodLatest, eodPrev }) {
+  const value = fxLive?.usdkrw?.value
+  if (typeof value !== 'number') return { active: false }
+  const isOpen = fxLive.market_closed === false
+  const liveDate = fxLive.usdkrw.date
+  const newer = isNewerDate(liveDate, eodDate)
+  if (!isOpen && !newer) return { active: false }
+  return {
+    active: true,
+    value,
+    prev: newer ? eodLatest : eodPrev,
+    isOpen,
+    date: liveDate ?? null,
+  }
+}
+
+// 마감 후 선물수급 라이브 사용 여부 — 거래일 증거(지수 라이브 사용)가 있고, 외국인 net_value가
+// 숫자이며, 라이브 date가 EOD 선물수급 date보다 최신일 때만. 반환: { value, date } | null
+export function pickClosedFuturesFlow(futuresFlowLive, { closedLiveIndexUsed, eodDate }) {
+  if (!closedLiveIndexUsed || futuresFlowLive?.market_closed !== true) return null
+  const value = futuresFlowLive.investors?.['외국인']?.net_value
+  if (typeof value !== 'number') return null
+  if (!isNewerDate(futuresFlowLive.date, eodDate)) return null
+  return { value, date: futuresFlowLive.date }
+}
+
+// 업종·테마 라이브 rows 사용 여부 — 장중이면 type 일치 시, 마감 후에는 거래일 증거가 있고
+// type 일치 + rows 비어있지 않을 때만 true.
+export function shouldUseGroupLive(groupLive, groupType, closedLiveIndexUsed) {
+  if (!groupLive || groupLive.type !== groupType) return false
+  if (groupLive.market_closed === false) return true
+  return Boolean(closedLiveIndexUsed) && groupLive.market_closed === true && Array.isArray(groupLive.rows) && groupLive.rows.length > 0
+}
