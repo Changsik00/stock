@@ -108,6 +108,7 @@ import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from ..market_hours import kst_now
 from .base import REGISTRY, run_job
 
 logger = logging.getLogger(__name__)
@@ -123,7 +124,15 @@ _scheduler: AsyncIOScheduler | None = None
 # 2026-11-05 — narrative_proposals(뉴스 수집+LLM 제안, PLAN.md §5.90-2)도 18:00 본배치에서
 # 제외하고 전용 크론(08:30/12:00/16:30 평일)에서만 돌린다.
 # 2026-11-06 — nq_futures(NQ=F 5분봉 섀도 적재, PLAN.md §5.91)도 제외: 전용 5분 크론에서만 돈다.
-_EXCLUDED_FROM_DAILY_BATCH = {"accumulation_screener", "narrative_proposals", "nq_futures", "market_minute_bars"}
+# 2026-11-12 — nxt_minute_bars / premarket_outlook_log(PLAN.md §5.107)도 제외: 전용 크론(08:12·08:55·20:05 / 08:15)에서만 돈다.
+_EXCLUDED_FROM_DAILY_BATCH = {
+    "accumulation_screener",
+    "narrative_proposals",
+    "nq_futures",
+    "market_minute_bars",
+    "nxt_minute_bars",
+    "premarket_outlook_log",
+}
 
 
 async def _run_all_jobs() -> None:
@@ -256,6 +265,27 @@ async def _run_market_minute_bars_job() -> None:
         logger.warning("market_minute_bars job 실패(무시): %s", e)
 
 
+async def _run_nxt_minute_bars_job() -> None:
+    """평일 KST 08:12(프리 시가 확보)/08:55/20:05 — NXT 5분봉 + KRX 정규장 종가 upsert(PLAN.md §5.107).
+    collect_log는 run_job이 기록한다. 18:00 본배치에서는 제외."""
+    collect_fn = REGISTRY.get("nxt_minute_bars")
+    if collect_fn is None:
+        logger.warning("nxt_minute_bars job not found in REGISTRY — skipping")
+        return
+    # 컨테이너 시계는 UTC라 08:12 KST에 date.today()는 전날이다 — KST 일자를 명시해서 넘긴다.
+    await run_job("nxt_minute_bars", kst_now().date(), collect_fn)
+
+
+async def _run_premarket_outlook_log_job() -> None:
+    """평일 KST 08:15 — 프리마켓 예상 시작점 표본 외 기록(PLAN.md §5.107). 08:12 NXT 봉 수집 뒤에 돈다."""
+    collect_fn = REGISTRY.get("premarket_outlook_log")
+    if collect_fn is None:
+        logger.warning("premarket_outlook_log job not found in REGISTRY — skipping")
+        return
+    # 컨테이너 시계는 UTC라 08:15 KST에 date.today()는 전날이다 — KST 일자를 명시해서 넘긴다.
+    await run_job("premarket_outlook_log", kst_now().date(), collect_fn)
+
+
 def start_scheduler() -> AsyncIOScheduler:
     """Create, start, and return the module-level scheduler (idempotent)."""
     global _scheduler
@@ -311,12 +341,42 @@ def start_scheduler() -> AsyncIOScheduler:
             misfire_grace_time=3600,
         )
     # PLAN.md §5.91 — NQ=F 5분봉 섀도 적재(완성봉 반영 위해 매 5분 +1분).
+    # 2026-11-12(§5.107) 08~16시 -> 07~20시로 연장: 07:01~19:56 + 20:01·20:06(NXT 마감 직후까지).
     scheduler.add_job(
         _run_nq_futures_job,
-        CronTrigger(day_of_week="mon-fri", hour="8-16", minute="1-59/5", timezone="Asia/Seoul"),
+        CronTrigger(day_of_week="mon-fri", hour="7-19", minute="1-59/5", timezone="Asia/Seoul"),
         id="nq_futures_5m",
         replace_existing=True,
         misfire_grace_time=120,
+        coalesce=True,
+        max_instances=1,
+    )
+    scheduler.add_job(
+        _run_nq_futures_job,
+        CronTrigger(day_of_week="mon-fri", hour=20, minute="1,6", timezone="Asia/Seoul"),
+        id="nq_futures_5m_2000",
+        replace_existing=True,
+        misfire_grace_time=120,
+        coalesce=True,
+        max_instances=1,
+    )
+    # PLAN.md §5.107 — NXT 5분봉 + KRX 종가 적재(08:12 프리 시가 확보 / 08:55 / 20:05) + 08:15 예측 표본 외 기록.
+    for hh, mm in ((8, 12), (8, 55), (20, 5)):
+        scheduler.add_job(
+            _run_nxt_minute_bars_job,
+            CronTrigger(day_of_week="mon-fri", hour=hh, minute=mm, timezone="Asia/Seoul"),
+            id=f"nxt_minute_bars_{hh:02d}{mm:02d}",
+            replace_existing=True,
+            misfire_grace_time=600,
+            coalesce=True,
+            max_instances=1,
+        )
+    scheduler.add_job(
+        _run_premarket_outlook_log_job,
+        CronTrigger(day_of_week="mon-fri", hour=8, minute=15, timezone="Asia/Seoul"),
+        id="premarket_outlook_log_0815",
+        replace_existing=True,
+        misfire_grace_time=600,
         coalesce=True,
         max_instances=1,
     )

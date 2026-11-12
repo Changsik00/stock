@@ -16,6 +16,7 @@ from sqlalchemy import (
     Boolean,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     Numeric,
@@ -129,6 +130,60 @@ class IndexIntradayBar(Base):
     low: Mapped[float | None] = mapped_column(Numeric(12, 2))
     close: Mapped[float | None] = mapped_column(Numeric(12, 2))
     volume: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class NxtIntradayBar(Base):
+    """NXT(넥스트레이드) 5분봉 이력 — PLAN.md §5.107, 참고용(매매 입력 아님).
+
+    키움 ka10080에 종목코드 뒤 ``_NX``를 붙여 받는 08:00~19:55 5분봉. ``time``은 봉 시작
+    "HHMM"(키움 규약), 가격은 부호 접두를 뗀 정수. 정규장 분봉(``stock_intraday_bar``)과 거래소가
+    달라 별도 테이블로 두며 stocks FK는 걸지 않는다."""
+
+    __tablename__ = "nxt_intraday_bar"
+
+    code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    time: Mapped[str] = mapped_column(String(4), primary_key=True)
+    open: Mapped[int | None] = mapped_column(BigInteger)
+    high: Mapped[int | None] = mapped_column(BigInteger)
+    low: Mapped[int | None] = mapped_column(BigInteger)
+    close: Mapped[int | None] = mapped_column(BigInteger)
+    volume: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class KrxRegularClose(Base):
+    """KRX 정규장 종가(15:30 종가 단일가) — PLAN.md §5.107 갭 계산의 기준가.
+
+    ``stock_ohlcv`` 일봉 종가는 NXT 애프터마켓(~20:00)까지 포함한 마지막 체결가로 계속 바뀌어
+    (2026-11-11 삼성전자: 15:30 206,000 / 18시 배치 206,500 / 최종 208,000) KRX 종가가 아니다.
+    키움 5분봉(종목코드 그대로, 통합 시세)의 15:30 봉 종가가 KRX 종가라 그것을 따로 적재한다."""
+
+    __tablename__ = "krx_regular_close"
+
+    code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    close: Mapped[int] = mapped_column(BigInteger)
+
+
+class PremarketOutlookLog(Base):
+    """프리마켓 예상 시작점의 표본 외 기록 — PLAN.md §5.107. 그날 08:00 직전 NQ와 그날 이전 데이터로만
+    적합한 파라미터로 낸 예측을 실제 프리 시가와 함께 적재한다(과거분 백필 금지). 퍼센트는 단순 변화율 %."""
+
+    __tablename__ = "premarket_outlook_log"
+
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    nq_change_pct: Mapped[float | None] = mapped_column(Float)
+    expected_gap_pct: Mapped[float | None] = mapped_column(Float)
+    resid_std_pct: Mapped[float | None] = mapped_column(Float)
+    n: Mapped[int | None] = mapped_column(Integer)
+    alpha_pct: Mapped[float | None] = mapped_column(Float)
+    beta: Mapped[float | None] = mapped_column(Float)
+    base_close: Mapped[int | None] = mapped_column(BigInteger)
+    actual_open: Mapped[int | None] = mapped_column(BigInteger)
+    actual_gap_pct: Mapped[float | None] = mapped_column(Float)
+    error_pct: Mapped[float | None] = mapped_column(Float)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class MarketFlow(Base):

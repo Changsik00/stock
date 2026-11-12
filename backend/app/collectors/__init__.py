@@ -32,7 +32,9 @@ def register_all() -> None:
     from . import market_minute_bars as _market_minute_bars_collector  # noqa: F401
     from . import narrative_news as _narrative_news_collector  # noqa: F401
     from . import nq_futures_sampler as _nq_futures_sampler_collector  # noqa: F401
+    from . import nxt_minute_bars as _nxt_minute_bars_collector  # noqa: F401
     from . import ohlcv as _ohlcv_collector  # noqa: F401
+    from . import premarket_outlook_log as _premarket_outlook_log_collector  # noqa: F401
     from . import program_flow as _program_flow_collector  # noqa: F401
     from . import short_selling_market as _short_selling_market_collector  # noqa: F401
     from . import stock_intraday_history as _stock_intraday_history_collector  # noqa: F401

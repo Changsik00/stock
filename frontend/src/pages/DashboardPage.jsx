@@ -21,6 +21,7 @@ import {
   fetchMarketSeries,
   fetchRegime,
   fetchVolRegime,
+  fetchPremarketOutlook,
   fetchScalpCandidates,
   fetchScalpHitrate,
   fetchSectorRotation,
@@ -33,6 +34,7 @@ import Badge from '../components/Badge'
 import GroupTreemap from '../components/GroupTreemap'
 import Modal from '../components/Modal'
 import RiskAlertBanner from '../components/RiskAlertBanner'
+import PremarketOutlookCard from '../components/dashboard/PremarketOutlookCard'
 import VolRegimeCard from '../components/dashboard/VolRegimeCard'
 import MetricTile, { heroEok } from '../components/dashboard/MetricTile'
 import StockDetailModal from '../components/StockDetailModal'
@@ -281,6 +283,8 @@ export default function DashboardPage() {
   const [regime, setRegime] = useState(null)
   // 오늘 변동성 레짐(PLAN.md §5.95, 표시 전용) — 장 마감 후엔 마지막 값 유지, 실패 시에도 이전 값 유지.
   const [volRegime, setVolRegime] = useState(null)
+  // 프리마켓 예상 시작점(PLAN.md §5.107, 표시 전용) — null=로딩, {error:true}=첫 로드 실패, 이후 실패는 마지막 값 유지.
+  const [premarket, setPremarket] = useState(null)
 
   // 종목 랭킹 요약 3개 카드(거래대금 상위/실시간 관심 TOP5/스켈핑 후보)의 시장
   // 필터(PLAN.md §5.15-3) — 'all'|'kospi'|'kosdaq', 기본 전체. 수급 상위/ETF
@@ -454,6 +458,16 @@ export default function DashboardPage() {
         .catch(() => {}) // 실패 시 마지막 값 유지
     }
 
+    function loadPremarket() {
+      return fetchPremarketOutlook()
+        .then((body) => {
+          if (!cancelled) setPremarket(body)
+        })
+        .catch(() => {
+          if (!cancelled) setPremarket((prev) => prev ?? { error: true })
+        })
+    }
+
     // 지수 3종 타일 1D 실시간(PLAN.md 작업 지시, 2026-07-21) — 기존 1분 티어에
     // 편입(별도 setInterval 신설 금지). 실패 시 null로 두면 렌더 쪽이 자동으로
     // marketData(3M EOD)의 마지막 봉으로 폴백한다(아래 렌더부 indexTileOf 참고).
@@ -524,7 +538,8 @@ export default function DashboardPage() {
           loadFuturesFlowLive(),
           loadFxLive(),
           loadRegime(),
-          loadVolRegime()
+          loadVolRegime(),
+          loadPremarket()
         )
       }
       return Promise.all(tasks)
@@ -1272,6 +1287,10 @@ export default function DashboardPage() {
           </div>
         </>
       )}
+
+      {/* 프리마켓 예상 시작점(PLAN.md §5.107) — 장 시작 전 가장 먼저 볼 정보라 변동성 레짐 위에 둔다.
+          정규장 중(phase=hidden)엔 컴포넌트가 null이라 자리를 차지하지 않는다. 정적 배포에서는 숨김 */}
+      {!STATIC_DATA && <PremarketOutlookCard data={premarket} />}
 
       {/* 오늘 변동성 레짐(PLAN.md §5.95) — 표시 전용, 정적 배포에서는 숨김 */}
       {!STATIC_DATA && <VolRegimeCard data={volRegime} />}

@@ -2239,3 +2239,63 @@ header h1 {
 .ni-sources a { color: var(--text-primary); overflow-wrap: anywhere; }
 .ni-src-meta { white-space: nowrap; }
 .ni-card .narr-actions { margin-top: 0; }
+
+/* ===== 프리마켓 예상 시작점 카드(.pm-*, PLAN.md §5.107) — 간격 리듬: 제목↔메타 8, 핵심 줄 내부 8, 핵심↔리스트 16, 리스트↔하단 12, 카드↔다음 섹션 24 ===== */
+.pm-title { flex-wrap: wrap; gap: var(--sp-1) var(--sp-2); }
+.pm-meta { font-size: var(--fs-label); font-weight: 400; color: var(--text-secondary); }
+.pm-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-card); padding: var(--sp-4); }
+.pm-state { color: var(--text-secondary); font-size: var(--fs-body); }
+.pm-hero-block { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sp-2); }
+.pm-hero-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-1) var(--sp-2); }
+.pm-hero-label { margin: 0; }
+.pm-hero { font-size: var(--fs-hero); line-height: 1.2; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.pm-hero .pm-arrow { font-size: 14px; margin-right: var(--sp-1); }
+.pm-sub { font-size: var(--fs-label); color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.pm-pct { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pm-pct.pm-strong { font-weight: 700; }
+.pm-arrow { font-size: 10px; margin-right: 2px; }
+.pm-arrow.up { color: var(--up); }
+.pm-arrow.down { color: var(--down); }
+.pm-na, .pm-na-text { color: var(--text-secondary); font-size: var(--fs-label); }
+
+/* 종목 리스트: 한 덩어리, 행 사이 1px 구분선. 데스크톱 = 열, 모바일 = 2줄 행 */
+.pm-list { list-style: none; margin: var(--sp-4) 0 0; padding: 0; font-size: var(--fs-body); font-variant-numeric: tabular-nums; }
+.pm-head, .pm-row { display: grid; grid-template-columns: minmax(0, 1.4fr) repeat(3, minmax(0, 1fr)); column-gap: var(--sp-3); align-items: baseline; }
+.pm-list-opened .pm-head, .pm-row-opened { grid-template-columns: minmax(0, 1.4fr) repeat(4, minmax(0, 1fr)); }
+.pm-head { padding-bottom: var(--sp-2); font-size: var(--fs-label); color: var(--text-secondary); border-bottom: 1px solid var(--border); }
+.pm-row { padding: var(--sp-3) 0; border-bottom: 1px solid var(--border); }
+.pm-row:last-child { border-bottom: 0; padding-bottom: 0; }
+.pm-c { text-align: right; }
+.pm-head .pm-c { text-align: right; }
+.pm-name { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.pm-lbl { display: none; font-size: var(--fs-label); color: var(--text-secondary); font-weight: 400; }
+.pm-range, .pm-price, .pm-diff { font-size: var(--fs-body); }
+.pm-weak .pm-pct { color: var(--text-secondary); font-weight: 400; }
+.pm-row-na { display: flex; justify-content: space-between; gap: var(--sp-3); }
+.pm-diff { color: var(--text-secondary); }
+.pm-foot { margin-top: var(--sp-3); padding-top: var(--sp-3); border-top: 1px solid var(--border); font-size: var(--fs-label); line-height: 1.5; color: var(--text-secondary); display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-1) var(--sp-3); }
+.pm-toggle { margin-right: -4px; }
+.pm-detail { margin-top: var(--sp-3); font-size: var(--fs-label); color: var(--text-secondary); }
+.pm-dl { list-style: none; margin: 0; padding: 0; }
+.pm-dl li { display: flex; flex-direction: column; gap: var(--sp-1); padding: var(--sp-2) 0; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+.pm-dl li:first-child { padding-top: 0; }
+.pm-dl-name { color: var(--text-primary); font-weight: 600; }
+.pm-notes { margin: var(--sp-3) 0 0; padding-left: var(--sp-4); line-height: 1.5; }
+.pm-limits { margin-top: var(--sp-2); }
+@media (max-width: 640px) {
+  .pm-head { display: none; }
+  .pm-lbl { display: inline; }
+  .pm-row { grid-template-columns: minmax(0, 1fr) auto; row-gap: var(--sp-1); align-items: baseline; }
+  .pm-row .pm-exp, .pm-row .pm-act { text-align: right; }
+  .pm-range, .pm-price, .pm-diff { font-size: var(--fs-label); color: var(--text-secondary); }
+  .pm-range { grid-column: 1; text-align: left; }
+  .pm-price { grid-column: 2; }
+  /* 시작 후: 1줄 종목명 + 실제 갭(강조), 2줄 예상 갭 · 범위 / 차이 */
+  .pm-row-opened .pm-name { grid-row: 1; grid-column: 1; }
+  .pm-row-opened .pm-act { grid-row: 1; grid-column: 2; font-size: var(--fs-body); }
+  .pm-row-opened .pm-exp { grid-row: 2; grid-column: 1; text-align: left; font-size: var(--fs-label); color: var(--text-secondary); }
+  .pm-row-opened .pm-exp .pm-pct { font-weight: 400; }
+  .pm-row-opened .pm-diff { grid-row: 2; grid-column: 2; }
+  .pm-row-opened .pm-range { grid-row: 3; grid-column: 1 / -1; }
+}
+.pm-hero-row .badge { font-size: var(--fs-label); font-weight: 600; padding: var(--sp-1) var(--sp-2); letter-spacing: 0; }

@@ -280,6 +280,11 @@ export async function fetchVolRegime() {
   return getJson('/api/markets/vol-regime')
 }
 
+// GET /api/markets/premarket-outlook — 프리마켓 예상 시작점(PLAN.md §5.107, 표시 전용, 로컬 전용).
+export async function fetchPremarketOutlook() {
+  return getJson('/api/markets/premarket-outlook')
+}
+
 // GET /api/groups?type=upjong|theme -> [{name, change_rate, value, market_sum}] —
 // 해당 group_type의 최신 날짜 스냅샷 (PLAN.md §4.6 3.6-3 트리맵).
 export async function fetchGroups(type = 'upjong') {
