@@ -125,8 +125,11 @@ _scheduler: AsyncIOScheduler | None = None
 # 제외하고 전용 크론(08:30/12:00/16:30 평일)에서만 돌린다.
 # 2026-11-06 — nq_futures(NQ=F 5분봉 섀도 적재, PLAN.md §5.91)도 제외: 전용 5분 크론에서만 돈다.
 # 2026-11-12 — nxt_minute_bars / premarket_outlook_log(PLAN.md §5.107)도 제외: 전용 크론(08:12·08:55·20:05 / 08:15)에서만 돈다.
+# 2026-11-15 — flow_rank도 제외: stock_flow 전 종목분(accumulation_screener 20:00 시작, ~21:05 완료)이
+# 있어야 하므로 전용 21:30 크론(flow_rank_catchup)에서만 돈다(18:00엔 상위 ~200종목뿐이라 부분 적재 위험).
 _EXCLUDED_FROM_DAILY_BATCH = {
     "accumulation_screener",
+    "flow_rank",
     "narrative_proposals",
     "nq_futures",
     "market_minute_bars",
@@ -167,10 +170,11 @@ async def _run_macro_job() -> None:
 
 
 async def _run_flow_rank_catchup_job() -> None:
-    """평일 19:30 KST 저녁 재실행분 — PLAN.md §5.46, 18:00 정기 배치 시점엔 네이버가
-    아직 그날 최종 수급 랭킹을 발행하지 않았을 수 있어(실측: 07-30 18:03 실행분
-    message가 07-28/07-29 재적재를 남김) 소스가 좀 더 준비됐을 시각에 한 번 더
-    당겨온다.
+    """평일 21:30 KST flow_rank 전용 실행 — 2026-11-15 소스 교체(stock_flow 기반)로
+    19:30에서 이동. stock_flow 전 종목분은 accumulation_screener(20:00 시작, 약 65분
+    소요 -> ~21:05 완료)가 채우므로 그 뒤에 돌아야 한다(미완이면 수집기가 80% 미만
+    검사로 그 날짜를 건너뛰고 다음 실행에서 최근 5거래일 빈 날을 복구한다). 원래
+    PLAN.md §5.46의 19:30 재수집은 네이버 소스 지연 대응이었다.
 
     REGISTRY 전체를 순회하는 ``_run_all_jobs``와 달리 "flow_rank" 잡 하나만
     실행한다 — 나머지 잡은 이 타이밍 문제와 무관하므로 18:00 스케줄에 남아야 맞다.
@@ -186,7 +190,7 @@ async def _run_flow_rank_catchup_job() -> None:
         # 이 잡은 스케줄러 프로세스 안에서 반복 실행되므로, 한 번 실패했다고
         # 이후 실행까지 막히면 안 된다.
         logger.warning(
-            "flow_rank job not found in REGISTRY (registered: %s) — skipping 19:30 run",
+            "flow_rank job not found in REGISTRY (registered: %s) — skipping 21:30 run",
             sorted(REGISTRY),
         )
         return
@@ -265,6 +269,9 @@ async def _run_market_minute_bars_job() -> None:
         logger.warning("market_minute_bars job 실패(무시): %s", e)
 
 
+NXT_MISFIRE_GRACE_SECONDS = 4 * 3600  # Mac 절전 대비 — upsert라 늦은 실행도 안전
+
+
 async def _run_nxt_minute_bars_job() -> None:
     """평일 KST 08:12(프리 시가 확보)/08:55/20:05 — NXT 5분봉 + KRX 정규장 종가 upsert(PLAN.md §5.107).
     collect_log는 run_job이 기록한다. 18:00 본배치에서는 제외."""
@@ -277,7 +284,8 @@ async def _run_nxt_minute_bars_job() -> None:
 
 
 async def _run_premarket_outlook_log_job() -> None:
-    """평일 KST 08:15 — 프리마켓 예상 시작점 표본 외 기록(PLAN.md §5.107). 08:12 NXT 봉 수집 뒤에 돈다."""
+    """평일 KST 08:15/09:10/20:10 — 프리마켓 예상 시작점 표본 외 기록(PLAN.md §5.107). 08:12 NXT 봉 수집 뒤에 돈다.
+    최근 7일 중 누락 거래일을 모두 채우므로(시각 고정 입력) Mac 절전으로 08:15가 버려져도 뒤 실행이 메운다."""
     collect_fn = REGISTRY.get("premarket_outlook_log")
     if collect_fn is None:
         logger.warning("premarket_outlook_log job not found in REGISTRY — skipping")
@@ -301,7 +309,11 @@ def start_scheduler() -> AsyncIOScheduler:
         # 2026-07-22 버그 수정(모듈 docstring 참고) — 기본값(사실상 초 단위)이면
         # 이벤트 루프가 몇 분만 늦어도 그날 배치를 통째로 조용히 건너뛴다. 하루
         # 1회뿐인 배치라 "늦게라도 반드시 돈다"가 "정시"보다 훨씬 중요하다.
-        misfire_grace_time=3600,
+        # 2026-11-15(PLAN.md §5.108): 1시간 -> 5시간. breadth·group_snapshot은 소스가
+        # 과거 날짜 조회를 지원하지 않아 그날 못 돌면 영영 못 채운다 — Mac 절전에서
+        # 23:00 KST까지만 깨어나면 돌게 한다(자정을 넘기면 소스가 다음 날로 넘어갈 수
+        # 있어 그 전에서 끊는다).
+        misfire_grace_time=5 * 3600,
     )
     scheduler.add_job(
         _run_macro_job,
@@ -314,7 +326,7 @@ def start_scheduler() -> AsyncIOScheduler:
     )
     scheduler.add_job(
         _run_flow_rank_catchup_job,
-        CronTrigger(day_of_week="mon-fri", hour=19, minute=30, timezone="Asia/Seoul"),
+        CronTrigger(day_of_week="mon-fri", hour=21, minute=30, timezone="Asia/Seoul"),
         id="flow_rank_catchup",
         replace_existing=True,
         # 18:00/07:30 잡과 같은 이유(모듈 docstring의 2026-07-22 버그 참고)로 넉넉히
@@ -367,19 +379,21 @@ def start_scheduler() -> AsyncIOScheduler:
             CronTrigger(day_of_week="mon-fri", hour=hh, minute=mm, timezone="Asia/Seoul"),
             id=f"nxt_minute_bars_{hh:02d}{mm:02d}",
             replace_existing=True,
-            misfire_grace_time=600,
+            misfire_grace_time=NXT_MISFIRE_GRACE_SECONDS,
             coalesce=True,
             max_instances=1,
         )
-    scheduler.add_job(
-        _run_premarket_outlook_log_job,
-        CronTrigger(day_of_week="mon-fri", hour=8, minute=15, timezone="Asia/Seoul"),
-        id="premarket_outlook_log_0815",
-        replace_existing=True,
-        misfire_grace_time=600,
-        coalesce=True,
-        max_instances=1,
-    )
+    # 08:15 외 09:10·20:10(20:05 NXT 봉 수집 뒤) 누락 보충. upsert라 재실행 안전 — 늦게 깨어나도 한 번은 돈다.
+    for hh, mm in ((8, 15), (9, 10), (20, 10)):
+        scheduler.add_job(
+            _run_premarket_outlook_log_job,
+            CronTrigger(day_of_week="mon-fri", hour=hh, minute=mm, timezone="Asia/Seoul"),
+            id=f"premarket_outlook_log_{hh:02d}{mm:02d}",
+            replace_existing=True,
+            misfire_grace_time=NXT_MISFIRE_GRACE_SECONDS,
+            coalesce=True,
+            max_instances=1,
+        )
     # PLAN.md §5.93 — 지수/ETF 1분봉 적재: 09:00~14:55 매 5분 + 15:00~15:40 매 5분(15:40=마감 후 보정).
     for hour_expr, minute_expr, suffix in (("9-14", "*/5", "am"), ("15", "0-40/5", "close")):
         scheduler.add_job(
@@ -397,7 +411,7 @@ def start_scheduler() -> AsyncIOScheduler:
         "scheduler started: weekday 18:00 Asia/Seoul daily batch (%d jobs registered: %s, "
         "accumulation_screener excluded from this batch) "
         "+ weekday 07:30 Asia/Seoul macro-only catch-up (PLAN.md §5.22) "
-        "+ weekday 19:30 Asia/Seoul flow_rank-only catch-up (PLAN.md §5.46) "
+        "+ weekday 21:30 Asia/Seoul flow_rank-only run (PLAN.md §5.46) "
         "+ weekday 20:00 Asia/Seoul accumulation_screener-only run "
         "+ weekday 08:30/12:00/16:30 Asia/Seoul narrative_proposals-only run (PLAN.md §5.90-2)",
         len(REGISTRY),

@@ -1,60 +1,47 @@
-"""투자자별(외인/기관) 순매수·순매도 상위 종목 스냅샷 수집 -> flow_rank upsert
-(PLAN.md §4.5/§6 3.5-2b).
+"""투자자별(외인/기관) 순매수·순매도 상위 종목 스냅샷 수집 -> flow_rank
+(PLAN.md §4.5/§6 3.5-2b, 소스 교체: 2026-11-15).
 
-소스: clients/naver_rank.py(``sise_deal_rank_iframe.naver``). 실호출로 확인된 핵심
-제약(naver_rank.py 모듈 docstring 참고) 때문에 이 수집기는 아래 처리를 배치의
-일반 패턴(collectors/macro.py, collectors/ohlcv.py의 LOOKBACK_DAYS)과 다르게
-한다:
+## 소스 교체 배경
+기존 소스(네이버 ``sise_deal_rank_iframe.naver``)가 2026-09-17부터 HTTP 410(페이지
+삭제)을 돌려줘 flow_rank가 09-15 이후 비어 있었다. 새 소스는 이미 DB에 있는 값과
+키움 ka10059다.
 
-1. **날짜 파라미터 없음** — 소스가 항상 "최근 2거래일" 고정 응답만 준다. 그래서
-   ``target_date``를 소스 쿼리에 쓰지 않는다(쿼리할 방법 자체가 없음). 대신 소스가
-   실제로 반환한 날짜(들)를 그대로 ``flow_rank.date``에 적재한다 — target_date와 다를
-   수 있다(예: 주말/공휴일에 수동 트리거하면 마지막 거래일이 온다). 이 결과 이 잡은
-   ``run_job``에 어떤 target_date를 넘겨도 동일하게 동작한다(idempotent).
-2. **시장(코스피/코스닥) 구분은 rank 공간을 나누지 않고 별도 컬럼으로만 보존한다**
-   — models.py의 FlowRank PK는 여전히 (date, investor, side, rank)뿐이다(수정
-   금지 대상). PLAN.md §4.5 작업 지시가 "investor에 시장을 합성하지 말고
-   (foreign_kospi 등 금지), 시장별로 rank 공간을 나누지도 말 것"이라고 명시했고
-   "상위 N 안에서 시장 섞임 허용"을 대안으로 제시했다 — 그래서 이 수집기는
-   **코스피 top20 + 코스닥 top20을 하나로 합쳐 |net_value| 내림차순으로
-   재정렬**해 investor(foreign/institution) x side(buy/sell) 하나의 rank
-   1..N(최대 40)으로 적재한다. 즉 "외국인 순매수 상위"는 코스피·코스닥 통합
-   기준이다. 다만 PLAN.md §4.6 3.6-1(시황 대시보드, market 배지 요구)에서
-   FlowRank에 nullable ``market`` 컬럼(PK 아님)이 추가됐다 — 병합 직전에 각
-   row가 어느 시장 페이지(``MARKETS`` 루프)에서 왔는지 태깅해 두고, 병합·재정렬
-   후에도 그 값을 그대로 저장한다(_upsert_rank_rows의 ``market=row.get("market")``).
-   2026-07-18 이전 적재분은 이 태깅 없이 저장돼 market이 NULL로 남는다
-   (models.py FlowRank docstring 참고).
-3. **side/부호 정규화 (§6 3.5-2b 결정)** — naver_rank.fetch_deal_rank가 type="sell"
-   에 대해 반환하는 net_value/quantity는 소스 그대로 음수다. 이 수집기는 그 값을
-   ``abs()``로 정규화해 **항상 양수(크기) + side='buy'|'sell' 컬럼**으로 저장한다.
-   이유: 부호와 방향 컬럼을 동시에 두면(sell인데 양수, 혹은 반대) 어느 쪽이 진실인지
-   헷갈리고 UI 색상 규칙(순매수=빨강/순매도=파랑, side 기준)과도 어긋난다. 랭킹 정렬은
-   |net_value| 기준(side별로 이미 양수/음수가 갈려 있으므로 buy는 net_value 자체,
-   sell은 절대값 — 정규화 이전 raw 값 기준으로 정렬한 뒤 저장 시점에 abs()한다).
-4. **회전율(turnover, %) = 당일 거래대금 ÷ 시가총액 × 100** — 수집 시점에 계산해
-   저장한다(§6 3.5-2b "API 조회 시 계산 vs 수집 시 저장" 결정: 수집 시 저장 채택 —
-   과거 스냅샷을 그대로 재현할 수 있고, 조회 시마다 종목당 API를 다시 부르지 않아도
-   되기 때문. 근거는 PLAN.md 작업 로그 참고). 소스가 둘로 갈린다:
-     - **ETF**: clients/naver_etf.fetch_etf_list()가 이미 벌크로
-       amount_million(거래대금)·aum_million(시가총액)을 주므로 종목당 추가 호출 없이
-       계산한다.
-     - **개별주**: 랭킹에 오른 종목마다 clients/naver_rank.fetch_stock_market_value()로
-       개별 조회한다(네이버가 벌크 API를 제공하지 않음). 하루 랭킹에 오른 종목은
-       중복 제거하면 ~100개 내외(§6 3.5-2b 작업 지시 추정과 일치)이므로 종목당 1회,
-       0.5초 간격으로만 호출한다(전체 배치에 buy/sell/foreign/institution 8번의
-       deal-rank 호출 + ETF 목록 1회 + 개별주 최대 ~100회 = 대략 110회, 앞서 이미
-       존재하던 배치 실행 시간과 같은 자릿수).
+- **개별주**: ``stock_flow``(date=D, investor '외국인'->foreign, '기관계'->institution)
+  의 net_value(백만 원). ``stock_flow``는 전 종목분이 ``accumulation_screener``(평일
+  20:00 KST 시작, 약 65분 소요 -> 21:05 전후 완료)에서 채워진다. 18:00 본배치와
+  ``live_refresh._run_stock_flow_scan``은 거래대금 상위 ~200종목만 채운다.
+- **ETF**: stock_flow에는 ETF가 없어 키움 ka10059(``stock_investor_daily``)를 ETF당
+  1콜 호출한다. 응답 한 번에 최근 100거래일치(일자 내림차순)가 와서 과거 날짜 백필도
+  추가 호출이 없다. 금액 단위는 백만 원으로 stock_flow와 같은 스케일이다.
+  ETF 유니버스 = (네이버 ETF 목록 거래대금 상위 ``ETF_TOP_N``) ∪ (최근
+  ``ETF_HISTORY_DAYS``일 flow_rank에 is_etf로 등장한 코드).
+- 키움 ka90009(외국인기관매매상위)는 금액이 stock_flow와 5~10배 어긋나 쓰지 않는다.
 
-is_etf 태깅은 stocks.is_etf에 의존하지 않는다(다른 배치가 동시에 stocks를 적재
-중이라 PLAN.md 지시에 따라 의존 금지) — naver_etf.fetch_etf_list()로 독립적으로
-조회한 전체 ETF 목록과 대조한다(예전에는 naver_rank.fetch_etf_codes()를 따로
-불렀지만 같은 엔드포인트를 두 번 때리는 셈이라 회전율 계산에 필요한 fetch_etf_list
-하나로 통합했다 — naver_rank.fetch_etf_codes 자체는 계속 존재/테스트됨, 이 수집기가
-안 쓸 뿐).
+## 랭킹 규칙
+개별주+ETF를 합쳐 investor별로 net_value>0 내림차순 상위 ``TOP_N``(40) = side 'buy',
+net_value<0 절대값 내림차순 상위 40 = 'sell'. 저장은 기존과 같다(net_value는 양수
+크기, 방향은 side). 재실행 시 더 큰 rank의 잔여 행이 남지 않도록 (date, investor,
+side) 기존 행을 지우고 넣는다.
 
-REGISTRY["flow_rank"]로 등록된다 (collectors/macro.py와 동일한 패턴 — routers/admin.py가
-이 모듈을 import해야 실제로 실행 가능해진다; admin.py 배선은 이 작업 범위 밖).
+- ``market``: stocks.market을 'kospi'/'kosdaq'으로 소문자 변환. ETF는 'kospi'(기존
+  적재분의 ETF 값과 동일 — 상장 시장 구분 소스가 없다).
+- ``quantity``: 소스가 금액만 줘서(수량은 별도 콜이 필요) NULL이다.
+  routers/flow_rank.py는 그대로 내려보내고 프론트(FlowRankTable.qtyLabel)가 '-'로
+  표시한다.
+- ``turnover``(%): 개별주는 value_rank(date, code)의 value/market_value_million, 없고
+  D가 오늘이면 naver_rank.fetch_stock_market_value로 보충. ETF는 ka10059의
+  acc_trde_prica(거래대금)/AUM — AUM은 D가 오늘이면 naver ETF 목록 aum_million,
+  과거면 etf_stats.aum(D 이하 가장 최근 값). 못 구하면 NULL.
+
+## 부분 적재 방지 / 자가 복구
+D의 stock_flow 종목 수가 직전 거래일(stock_flow 기준)의 ``COMPLETE_RATIO``(80%)
+미만이면 그 날짜는 쓰지 않고 message로 남긴다(18:00 시점 ~200종목 상태에서 쓰지
+않기 위함). 일별 실행은 target_date와 함께 stock_flow 기준 최근
+``RECOVER_DAYS``(5)거래일 중 flow_rank가 비어 있는 날도 채운다(Mac이 잠들어 하루
+건너뛰어도 복구). 그래서 전 종목 수급이 준비된 뒤(21:30)에 도는 실행이 반드시 하나
+있어야 한다(collectors/scheduler.py ``flow_rank_catchup``; 18:00 본배치에서는 제외).
+
+REGISTRY["flow_rank"]로 등록된다.
 """
 
 from __future__ import annotations
@@ -64,31 +51,94 @@ import datetime as dt
 import logging
 import time
 
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..clients import naver_etf, naver_rank
-from ..models import FlowRank
+from ..models import EtfStat, FlowRank, Stock, StockFlow, ValueRank
 from .base import REGISTRY
 
 logger = logging.getLogger(__name__)
 
-MARKETS = ("kospi", "kosdaq")
-INVESTORS = ("foreign", "institution")
-SIDES = ("buy", "sell")
+TOP_N = 40
+ETF_TOP_N = 200
+ETF_HISTORY_DAYS = 120
+RECOVER_DAYS = 5
+COMPLETE_RATIO = 0.8
 
-# 네이버 요청 간 0.5초 간격 (PLAN.md 지시 — 서버 부담/차단 방지). deal-rank 호출뿐
-# 아니라 개별주 회전율 조회(fetch_stock_market_value)에도 동일하게 적용한다.
+# stock_flow.investor(한글) -> flow_rank.investor
+STOCK_FLOW_INVESTORS = {"외국인": "foreign", "기관계": "institution"}
+# ka10059 응답 필드 -> flow_rank.investor
+KA10059_FIELDS = {"frgnr_invsr": "foreign", "orgn": "institution"}
+
+# 네이버 개별주 회전율 조회 간격(서버 부담 방지)
 NAVER_REQUEST_DELAY_SECONDS = 0.5
 
 
-def _fetch_deal_rank_blocking(market: str, investor: str, side: str) -> list[dict]:
-    time.sleep(NAVER_REQUEST_DELAY_SECONDS)
-    return naver_rank.fetch_deal_rank(market, investor, type_=side)
+# ---------------------------------------------------------------------------
+# 순수 함수
+# ---------------------------------------------------------------------------
+
+
+def build_rankings(items: list[dict]) -> dict[tuple[str, str], list[dict]]:
+    """items = [{"code","name","market","is_etf","foreign","institution"}, ...]
+    (값은 부호 있는 net_value, 없으면 None) -> {(investor, side): [상위 TOP_N rows]}.
+
+    각 row는 {"code","name","market","is_etf","net_value"(양수 크기)}.
+    동률은 코드 오름차순으로 안정 정렬한다(재실행해도 순서가 같도록).
+    """
+    out: dict[tuple[str, str], list[dict]] = {}
+    for investor in ("foreign", "institution"):
+        for side in ("buy", "sell"):
+            picked = []
+            for it in items:
+                v = it.get(investor)
+                if v is None:
+                    continue
+                if (side == "buy" and v > 0) or (side == "sell" and v < 0):
+                    picked.append((abs(v), it))
+            picked.sort(key=lambda p: (-p[0], p[1]["code"]))
+            out[(investor, side)] = [
+                {
+                    "code": it["code"],
+                    "name": it.get("name"),
+                    "market": it.get("market"),
+                    "is_etf": it.get("is_etf", False),
+                    "net_value": mag,
+                }
+                for mag, it in picked[:TOP_N]
+            ]
+    return out
+
+
+def parse_etf_history(data: dict) -> dict[dt.date, dict]:
+    """ka10059 응답 body -> {date: {"foreign": int|None, "institution": int|None,
+    "value": 거래대금 백만원|None}}. 부호는 소스 그대로(순매도=음수)."""
+    from ..routers.stocks import _parse_signed_int  # 지연 import(순환 방지)
+
+    out: dict[dt.date, dict] = {}
+    for row in data.get("stk_invsr_orgn") or []:
+        raw = row.get("dt")
+        if not raw:
+            continue
+        try:
+            d = dt.datetime.strptime(raw, "%Y%m%d").date()
+        except ValueError:
+            continue
+        entry = {name: _parse_signed_int(row.get(f)) for f, name in KA10059_FIELDS.items()}
+        value = _parse_signed_int(row.get("acc_trde_prica"))
+        entry["value"] = None if value is None else abs(value)
+        out[d] = entry
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 외부 호출(테스트에서 mock)
+# ---------------------------------------------------------------------------
 
 
 def _fetch_etf_list_blocking() -> list[dict]:
-    time.sleep(NAVER_REQUEST_DELAY_SECONDS)
     return naver_etf.fetch_etf_list()
 
 
@@ -97,159 +147,312 @@ def _fetch_stock_market_value_blocking(code: str) -> dict:
     return naver_rank.fetch_stock_market_value(code)
 
 
-def _etf_turnover_map(etf_items: list[dict]) -> dict[str, float]:
-    """ETF의 거래대금/시가총액을 이미 벌크로 갖고 있으니(fetch_etf_list) 종목당
-    API 호출 없이 회전율(%)을 계산한다. 둘 중 하나라도 없거나 시가총액이 0이면
-    스킵(turnover는 그 코드에 대해 그냥 없는 채로 남는다 — NULL)."""
-    turnover: dict[str, float] = {}
-    for item in etf_items:
-        code = item.get("code")
-        amount = item.get("amount_million")
-        aum = item.get("aum_million")
-        if not code or amount is None or not aum:
-            continue
-        turnover[code] = round(amount / aum * 100, 4)
-    return turnover
+async def _fetch_etf_histories(codes: list[str], end_date: dt.date) -> dict[str, dict]:
+    """ETF 코드별 ka10059 일별 이력 {code: {date: {...}}}. 한 종목 실패는 경고만 남기고
+    건너뛴다. KiwoomClient는 TR별 초당 1회 제한이 인스턴스 속성이라 하나만 연다."""
+    from ..clients.kiwoom import KiwoomClient
+
+    result: dict[str, dict] = {}
+    async with KiwoomClient() as client:
+        for code in codes:
+            try:
+                data, _ = await client.stock_investor_daily(code, end_date)
+                hist = parse_etf_history(data)
+            except Exception:
+                logger.warning("flow_rank: ETF %s ka10059 조회 실패", code, exc_info=True)
+                continue
+            if hist:
+                result[code] = hist
+    return result
 
 
-async def _fetch_stock_turnover_map(codes: set[str]) -> dict[str, float]:
-    """개별주(ETF 아님) 코드 집합에 대해 종목당 1회씩 회전율을 조회한다. 실패한
-    종목은 조용히 건너뛴다(수백 종목 중 하나 실패로 배치 전체가 죽지 않도록) —
-    warning 로그만 남긴다."""
-    turnover: dict[str, float] = {}
-    for code in sorted(codes):
-        try:
-            mv = await asyncio.to_thread(_fetch_stock_market_value_blocking, code)
-        except Exception:
-            logger.warning("flow_rank: 종목 %s 회전율 조회 실패", code, exc_info=True)
-            continue
-        amount = mv.get("accumulated_trading_value_million")
-        market_value = mv.get("market_value_million")
-        if amount is not None and market_value:
-            turnover[code] = round(amount / market_value * 100, 4)
-    return turnover
+# ---------------------------------------------------------------------------
+# DB 조회
+# ---------------------------------------------------------------------------
 
 
-async def _upsert_rank_rows(
-    session: AsyncSession,
-    date: dt.date,
-    investor: str,
-    side: str,
-    rows: list[dict],
-    etf_codes: set[str],
-    turnover_map: dict[str, float],
-) -> int:
-    count = 0
-    for i, row in enumerate(rows, start=1):
-        code = row["code"]
-        net_value = row.get("net_value")
-        quantity = row.get("quantity")
-        stmt = pg_insert(FlowRank).values(
-            date=date,
-            investor=investor,
-            side=side,
-            rank=i,
-            code=code,
-            name=row["name"],
-            # §모듈독스트링 3번: 소스 부호(sell=음수)를 여기서 양수 크기로 정규화한다.
-            net_value=None if net_value is None else abs(net_value),
-            quantity=None if quantity is None else abs(quantity),
-            turnover=turnover_map.get(code),
-            is_etf=code in etf_codes,
-            # §4.6 3.6-1: 어느 시장 랭킹 페이지에서 왔는지(kospi/kosdaq) — 병합
-            # 전에 collect_flow_rank가 row별로 태깅해 둔 값을 그대로 저장한다.
-            market=row.get("market"),
+async def stock_flow_count(session: AsyncSession, date: dt.date) -> int:
+    return (
+        await session.execute(
+            select(func.count(func.distinct(StockFlow.code))).where(StockFlow.date == date)
         )
-        stmt = stmt.on_conflict_do_update(
-            index_elements=[FlowRank.date, FlowRank.investor, FlowRank.side, FlowRank.rank],
-            set_={
-                "code": stmt.excluded.code,
-                "name": stmt.excluded.name,
-                "net_value": stmt.excluded.net_value,
-                "quantity": stmt.excluded.quantity,
-                "turnover": stmt.excluded.turnover,
-                "is_etf": stmt.excluded.is_etf,
-                "market": stmt.excluded.market,
+    ).scalar_one()
+
+
+async def _prev_flow_date(session: AsyncSession, date: dt.date) -> dt.date | None:
+    return (
+        await session.execute(select(func.max(StockFlow.date)).where(StockFlow.date < date))
+    ).scalar_one_or_none()
+
+
+async def check_complete(session: AsyncSession, date: dt.date) -> tuple[bool, str]:
+    """D의 stock_flow가 직전 거래일의 COMPLETE_RATIO 이상 채워졌는지."""
+    cnt = await stock_flow_count(session, date)
+    if cnt == 0:
+        return False, f"{date} stock_flow 없음"
+    prev = await _prev_flow_date(session, date)
+    if prev is None:
+        return True, ""
+    prev_cnt = await stock_flow_count(session, prev)
+    if prev_cnt and cnt < prev_cnt * COMPLETE_RATIO:
+        return False, f"{date} stock_flow {cnt}종목 < 직전 거래일({prev}) {prev_cnt}종목의 80%"
+    return True, ""
+
+
+async def _load_stock_items(session: AsyncSession, date: dt.date) -> list[dict]:
+    stmt = (
+        select(StockFlow.code, StockFlow.investor, StockFlow.net_value, Stock.name, Stock.market)
+        .join(Stock, Stock.code == StockFlow.code)
+        .where(StockFlow.date == date, StockFlow.investor.in_(list(STOCK_FLOW_INVESTORS)))
+    )
+    by_code: dict[str, dict] = {}
+    for code, investor, net_value, name, market in (await session.execute(stmt)).all():
+        it = by_code.setdefault(
+            code,
+            {
+                "code": code,
+                "name": name,
+                "market": (market or "").lower() or None,
+                "is_etf": False,
+                "foreign": None,
+                "institution": None,
             },
         )
-        await session.execute(stmt)
-        count += 1
-    return count
+        it[STOCK_FLOW_INVESTORS[investor]] = net_value
+    return list(by_code.values())
+
+
+async def _load_etf_history_codes(session: AsyncSession, today: dt.date) -> dict[str, str | None]:
+    """최근 ETF_HISTORY_DAYS일 flow_rank에 is_etf로 등장한 {code: name}."""
+    since = today - dt.timedelta(days=ETF_HISTORY_DAYS)
+    rows = (
+        await session.execute(
+            select(FlowRank.code, FlowRank.name)
+            .where(FlowRank.is_etf.is_(True), FlowRank.date >= since)
+            .distinct()
+        )
+    ).all()
+    return {code: name for code, name in rows}
+
+
+async def _stock_turnover_map(
+    session: AsyncSession, date: dt.date, codes: set[str], fetch_missing: bool
+) -> dict[str, float]:
+    """개별주 회전율(%). value_rank 우선, 오늘이면 없는 종목만 네이버로 보충."""
+    if not codes:
+        return {}
+    rows = (
+        await session.execute(
+            select(ValueRank.code, ValueRank.value, ValueRank.market_value_million).where(
+                ValueRank.date == date, ValueRank.code.in_(codes)
+            )
+        )
+    ).all()
+    out = {
+        code: round(value / mv * 100, 4)
+        for code, value, mv in rows
+        if value is not None and mv
+    }
+    if fetch_missing:
+        for code in sorted(codes - set(out)):
+            try:
+                mv = await asyncio.to_thread(_fetch_stock_market_value_blocking, code)
+            except Exception:
+                logger.warning("flow_rank: 종목 %s 회전율 조회 실패", code, exc_info=True)
+                continue
+            amount = mv.get("accumulated_trading_value_million")
+            market_value = mv.get("market_value_million")
+            if amount is not None and market_value:
+                out[code] = round(amount / market_value * 100, 4)
+    return out
+
+
+async def _etf_aum_map(session: AsyncSession, date: dt.date, codes: set[str]) -> dict[str, int]:
+    """etf_stats에서 date 이하 가장 최근 aum(백만 원)."""
+    if not codes:
+        return {}
+    rows = (
+        await session.execute(
+            select(EtfStat.code, EtfStat.aum)
+            .where(EtfStat.code.in_(codes), EtfStat.date <= date, EtfStat.aum.is_not(None))
+            .order_by(EtfStat.code, EtfStat.date.desc())
+            .distinct(EtfStat.code)
+        )
+    ).all()
+    return {code: aum for code, aum in rows if aum}
+
+
+# ---------------------------------------------------------------------------
+# 핵심: 한 날짜의 랭킹 계산 / 저장
+# ---------------------------------------------------------------------------
+
+
+async def compute_rankings(
+    session: AsyncSession,
+    date: dt.date,
+    etf_hist: dict[str, dict],
+    etf_names: dict[str, str | None],
+    etf_live_aum: dict[str, int],
+    today: dt.date | None = None,
+) -> dict[tuple[str, str], list[dict]]:
+    """저장하지 않고 날짜 D의 랭킹(+turnover)을 계산한다(비교 모드와 저장이 공용)."""
+    today = today or dt.date.today()
+    items = await _load_stock_items(session, date)
+    for code, hist in etf_hist.items():
+        day = hist.get(date)
+        if not day:
+            continue
+        items.append(
+            {
+                "code": code,
+                "name": etf_names.get(code),
+                "market": "kospi",
+                "is_etf": True,
+                "foreign": day.get("foreign"),
+                "institution": day.get("institution"),
+            }
+        )
+    ranks = build_rankings(items)
+
+    picked_stocks = {r["code"] for rows in ranks.values() for r in rows if not r["is_etf"]}
+    picked_etfs = {r["code"] for rows in ranks.values() for r in rows if r["is_etf"]}
+    is_today = date == today
+    stock_turn = await _stock_turnover_map(session, date, picked_stocks, fetch_missing=is_today)
+    aum = await _etf_aum_map(session, date, picked_etfs)
+    if is_today:
+        aum.update({c: v for c, v in etf_live_aum.items() if c in picked_etfs and v})
+    for rows in ranks.values():
+        for r in rows:
+            if r["is_etf"]:
+                value = (etf_hist.get(r["code"], {}).get(date) or {}).get("value")
+                a = aum.get(r["code"])
+                r["turnover"] = round(value / a * 100, 4) if value is not None and a else None
+            else:
+                r["turnover"] = stock_turn.get(r["code"])
+    return ranks
+
+
+async def save_rankings(
+    session: AsyncSession, date: dt.date, ranks: dict[tuple[str, str], list[dict]]
+) -> int:
+    """(date, investor, side) 기존 행을 지우고 새로 넣는다(재실행 시 잔여 rank 방지)."""
+    total = 0
+    for (investor, side), rows in ranks.items():
+        await session.execute(
+            delete(FlowRank).where(
+                FlowRank.date == date, FlowRank.investor == investor, FlowRank.side == side
+            )
+        )
+        if not rows:
+            continue
+        await session.execute(
+            pg_insert(FlowRank).values(
+                [
+                    {
+                        "date": date,
+                        "investor": investor,
+                        "side": side,
+                        "rank": i,
+                        "code": r["code"],
+                        "name": r["name"],
+                        "net_value": r["net_value"],
+                        "quantity": None,  # 소스가 금액만 제공(모듈 docstring)
+                        "turnover": r.get("turnover"),
+                        "is_etf": r["is_etf"],
+                        "market": r["market"],
+                    }
+                    for i, r in enumerate(rows, start=1)
+                ]
+            )
+        )
+        total += len(rows)
+    return total
+
+
+async def prepare_etf_data(
+    session: AsyncSession, end_date: dt.date, today: dt.date | None = None
+) -> tuple[dict[str, dict], dict[str, str | None], dict[str, int]]:
+    """ETF 유니버스 구성 + ka10059 이력 수집 -> (etf_hist, etf_names, live_aum)."""
+    today = today or dt.date.today()
+    names = await _load_etf_history_codes(session, today)
+    live_aum: dict[str, int] = {}
+    universe = set(names)
+    try:
+        etf_list = await asyncio.to_thread(_fetch_etf_list_blocking)
+    except Exception:
+        logger.warning("flow_rank: 네이버 ETF 목록 조회 실패 — 과거 등장 ETF만 사용", exc_info=True)
+        etf_list = []
+    top = sorted(
+        (it for it in etf_list if it.get("code")),
+        key=lambda it: it.get("amount_million") or 0,
+        reverse=True,
+    )[:ETF_TOP_N]
+    for it in top:
+        universe.add(it["code"])
+    for it in etf_list:
+        if it.get("code") in universe:
+            if it.get("name"):
+                names[it["code"]] = it["name"]
+            if it.get("aum_million"):
+                live_aum[it["code"]] = it["aum_million"]
+    hist = await _fetch_etf_histories(sorted(universe), end_date)
+    return hist, names, live_aum
+
+
+async def collect_flow_rank_dates(
+    session: AsyncSession, dates: list[dt.date], today: dt.date | None = None
+) -> tuple[int, list[str]]:
+    """dates를 완전성 검사 후 저장한다. (적재 행 수, 상태 메모 목록)."""
+    notes: list[str] = []
+    ok_dates: list[dt.date] = []
+    for d in sorted(dates):
+        ok, why = await check_complete(session, d)
+        if ok:
+            ok_dates.append(d)
+        else:
+            notes.append(f"건너뜀: {why}")
+    if not ok_dates:
+        return 0, notes
+    etf_hist, etf_names, live_aum = await prepare_etf_data(session, max(ok_dates), today)
+    total = 0
+    for d in ok_dates:
+        ranks = await compute_rankings(session, d, etf_hist, etf_names, live_aum, today)
+        n = await save_rankings(session, d, ranks)
+        total += n
+        notes.append(f"{d}: {n}행")
+    return total, notes
+
+
+async def _recoverable_dates(session: AsyncSession, target_date: dt.date) -> list[dt.date]:
+    """target_date + (stock_flow 기준 최근 RECOVER_DAYS거래일 중 flow_rank가 빈 날)."""
+    recent = (
+        (
+            await session.execute(
+                select(StockFlow.date)
+                .where(StockFlow.date <= target_date)
+                .distinct()
+                .order_by(StockFlow.date.desc())
+                .limit(RECOVER_DAYS)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    have = set(
+        (await session.execute(select(FlowRank.date).where(FlowRank.date.in_(recent)).distinct()))
+        .scalars()
+        .all()
+    )
+    dates = {d for d in recent if d not in have}
+    dates.add(target_date)
+    return sorted(dates)
 
 
 async def collect_flow_rank(session: AsyncSession, target_date: dt.date) -> tuple[int, str | None]:
-    """investor(foreign/institution) x side(buy/sell) x market(kospi/kosdaq) 상위
-    20종목을 코스피+코스닥 통합 후 |net_value| 내림차순으로 재정렬해 flow_rank에
-    적재한다. 회전율(turnover)도 함께 계산해 저장한다(§모듈독스트링 4번).
-
-    target_date는 소스가 날짜 쿼리를 지원하지 않아 실제로는 사용되지 않는다 — 소스가
-    반환하는 실제 날짜(들)를 그대로 적재하고, 그 날짜 목록을 message로 남긴다(§ 모듈
-    docstring 참고).
-    """
-    etf_items = await asyncio.to_thread(_fetch_etf_list_blocking)
-    etf_codes = {it["code"] for it in etf_items if it.get("code")}
-    etf_turnover = _etf_turnover_map(etf_items)
-
-    # (date, investor, side) -> 병합된 rows. 먼저 전부 모아서(1) 회전율이 필요한
-    # 개별주 코드를 한 번에 dedup하고 (2) 그 다음에야 upsert한다 — 같은 코드가 여러
-    # 그룹(예: buy에도 sell에도, foreign에도 institution에도)에 나타나면 turnover
-    # 조회를 코드당 1회로 줄이기 위함.
-    per_group: dict[tuple[dt.date, str, str], list[dict]] = {}
-    all_dates: set[dt.date] = set()
-
-    for side in SIDES:
-        for investor in INVESTORS:
-            by_date: dict[dt.date, list[dict]] = {}
-            for market in MARKETS:
-                blocks = await asyncio.to_thread(
-                    _fetch_deal_rank_blocking, market, investor, side
-                )
-                for block in blocks:
-                    # §4.6 3.6-1: 병합 전에 각 row가 어느 시장 페이지에서 왔는지
-                    # 태깅해 둔다 — 아래에서 코스피+코스닥을 하나로 합쳐 재정렬한
-                    # 뒤에도 market을 잃지 않기 위함(FlowRank.market 컬럼).
-                    for row in block["rows"]:
-                        row["market"] = market
-                    by_date.setdefault(block["date"], []).extend(block["rows"])
-
-            for date, rows in by_date.items():
-                rows.sort(key=lambda r: abs(r["net_value"]), reverse=True)
-                per_group[(date, investor, side)] = rows
-                all_dates.add(date)
-
-    non_etf_codes = {
-        row["code"]
-        for rows in per_group.values()
-        for row in rows
-        if row["code"] not in etf_codes
-    }
-    stock_turnover = await _fetch_stock_turnover_map(non_etf_codes)
-    turnover_map = {**stock_turnover, **etf_turnover}
-
-    total = 0
-    for (date, investor, side), rows in per_group.items():
-        total += await _upsert_rank_rows(
-            session, date, investor, side, rows, etf_codes, turnover_map
-        )
-
-    message = None
-    if all_dates:
-        dates_str = ", ".join(sorted(d.isoformat() for d in all_dates))
-        if target_date not in all_dates:
-            message = (
-                f"소스가 날짜 쿼리를 지원하지 않아 실제 적재된 날짜: {dates_str} "
-                f"(요청한 target_date={target_date.isoformat()}는 무시됨). "
-                f"회전율 조회 종목 {len(non_etf_codes)}개(개별주) + {len(etf_turnover)}개(ETF)"
-            )
-        else:
-            message = (
-                f"적재된 날짜: {dates_str}. "
-                f"회전율 조회 종목 {len(non_etf_codes)}개(개별주) + {len(etf_turnover)}개(ETF)"
-            )
-    else:
-        logger.warning("flow_rank: 소스에서 날짜 블록을 하나도 받지 못함")
-
-    return total, message
+    """target_date와 최근 5거래일 중 비어 있는 날의 flow_rank를 적재한다(모듈 docstring)."""
+    dates = await _recoverable_dates(session, target_date)
+    total, notes = await collect_flow_rank_dates(session, dates)
+    return total, "; ".join(notes) if notes else None
 
 
 REGISTRY["flow_rank"] = collect_flow_rank

@@ -130,7 +130,7 @@ def test_flow_rank_catchup_job_registered_with_generous_misfire_grace_time(fake_
     args = [a for a in fake_scheduler.calls if a[1].get("id") == "flow_rank_catchup"][0][0]
     trigger = args[1]
     fields = {f.name: str(f) for f in trigger.fields}
-    assert fields["hour"] == "19"
+    assert fields["hour"] == "21"
     assert fields["minute"] == "30"
     assert fields["day_of_week"] == "mon-fri"
     assert str(trigger.timezone) == "Asia/Seoul"
@@ -175,3 +175,12 @@ async def test_run_flow_rank_catchup_job_warns_and_skips_when_flow_rank_missing(
 
     assert calls == []
     assert any("flow_rank" in rec.message for rec in caplog.records)
+
+
+def test_premarket_jobs_catchup_schedule_and_grace(fake_scheduler):
+    """프리마켓 잡: 08:15 외 09:10·20:10 보충, NXT 봉·로그 잡 모두 수 시간 misfire 허용 + coalesce."""
+    for job_id in ("premarket_outlook_log_0815", "premarket_outlook_log_0910", "premarket_outlook_log_2010",
+                   "nxt_minute_bars_0812", "nxt_minute_bars_0855", "nxt_minute_bars_2005"):
+        kwargs = fake_scheduler._call_for_id(job_id)
+        assert kwargs["misfire_grace_time"] >= 3 * 3600
+        assert kwargs["coalesce"] is True

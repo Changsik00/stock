@@ -91,7 +91,10 @@ class NaverRankError(Exception):
 def fetch_deal_rank(
     market: str, investor: str, type_: str = "buy", timeout: int = 15
 ) -> list[dict]:
-    """market(kospi/kosdaq) x investor(foreign/institution)의 순매수 상위 20종목을
+    """**2026-09-17부터 소스가 HTTP 410을 돌려줘 미사용** (collectors/flow_rank.py는
+    stock_flow + 키움 ka10059로 교체됨).
+
+    market(kospi/kosdaq) x investor(foreign/institution)의 순매수 상위 20종목을
     네이버가 제공하는 최근 2거래일 분량 그대로 반환한다.
 
     Returns ``[{"date": dt.date, "rows": [{"code": str, "name": str, "net_value": int,

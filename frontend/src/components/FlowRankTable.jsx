@@ -69,6 +69,8 @@ export default function FlowRankTable({
   const latest = dates && dates.length > 0 ? dates[0] : null
   const amountColorClass = side === 'sell' ? 'down' : 'up'
   const amountHeaderLabel = side === 'sell' ? '순매도 금액' : '순매수 금액'
+  // 2026-09-16분부터 수량 소스가 없다(PLAN.md §5.108) — 값이 하나도 없으면 열을 숨긴다.
+  const hasQuantity = !!latest && latest.rows.some((r) => r.quantity !== null && r.quantity !== undefined)
 
   return (
     <div>
@@ -111,7 +113,7 @@ export default function FlowRankTable({
                   <th>순위</th>
                   <th>종목명</th>
                   <th className="num">{amountHeaderLabel}</th>
-                  <th className="num">수량(천주)</th>
+                  {hasQuantity && <th className="num">수량(천주)</th>}
                   <th className="num">회전율</th>
                 </tr>
               </thead>
@@ -135,7 +137,7 @@ export default function FlowRankTable({
                       </span>
                     </td>
                     <td className={`num ${amountColorClass}`}>{eokLabel(row.net_value)}</td>
-                    <td className="num">{qtyLabel(row.quantity)}</td>
+                    {hasQuantity && <td className="num">{qtyLabel(row.quantity)}</td>}
                     <td className="num flow-rank-turnover">{turnoverLabel(row.turnover)}</td>
                   </tr>
                 ))}

@@ -465,6 +465,43 @@ async def test_log_job_upsert_idempotent_and_skips_without_open(rb_session, monk
     # 실제 DB 커밋 없이 롤백될 것이므로 외부에서 별도 확인(fixture)
 
 
+async def test_catchup_fills_missing_days_only_and_is_idempotent(rb_session, monkeypatch):
+    """08:15 잡이 버려진 날(기록 없음)을 뒤 실행이 채운다. 이미 찬 날은 다시 쓰지 않는다."""
+    days, nq, closes, opens, xs = _synthetic(40, start=dt.date(2026, 9, 14))
+    bars = []
+    for d in days:
+        bars.append((_k(d.year, d.month, d.day, 15, 25), 100.0))
+        bars.append((_k(d.year, d.month, d.day, 7, 55), 100.0 * math.exp(xs[d])))
+
+    async def _db(session):
+        return bars
+
+    async def _live():
+        return None
+
+    monkeypatch.setattr(pol, "load_db_nq_bars", _db)
+    monkeypatch.setattr(pol, "fetch_live_nq_bars", _live)
+    monkeypatch.setattr(pol, "OUTLOOK_CODES", ("TSTA",))
+    await _seed(rb_session, "TSTA", days, closes, opens)
+    end = days[-1]
+    # 최근 7일 중 거래일 = 보충 대상. 그중 가장 오래된 날은 미리 기록해 둔다(건너뛰어야 함).
+    window = [d for d in (end - dt.timedelta(days=i) for i in range(6, -1, -1)) if not is_krx_closed(d)]
+    assert len(window) >= 3
+    await pol.collect_premarket_outlook_log(rb_session, window[0])
+
+    saved, msg = await pol.collect_premarket_outlook_catchup(rb_session, end)
+    assert saved == len(window) - 1
+    got = (await rb_session.execute(select(PremarketOutlookLog.date).where(PremarketOutlookLog.code == "TSTA"))).scalars().all()
+    assert sorted(got) == window
+    # 늦게 채운 값도 대상일 이전 표본으로만 적합(미래 참조 없음): n <= 대상일 이전 표본 수
+    rows = (await rb_session.execute(select(PremarketOutlookLog).where(PremarketOutlookLog.code == "TSTA"))).scalars().all()
+    for r in rows:
+        assert r.n <= days.index(r.date)
+    # 다시 돌리면 할 일 없음
+    saved2, msg2 = await pol.collect_premarket_outlook_catchup(rb_session, end)
+    assert saved2 == 0 and msg2 == "누락 없음"
+
+
 async def test_log_job_skips_holiday(rb_session):
     saved, msg = await pol.collect_premarket_outlook_log(rb_session, dt.date(2026, 11, 14))  # 토
     assert saved == 0 and "휴장" in msg

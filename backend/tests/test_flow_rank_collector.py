@@ -1,20 +1,7 @@
-"""Unit tests for app.collectors.flow_rank.collect_flow_rank.
+"""app.collectors.flow_rank 단위 테스트 (stock_flow + 키움 ka10059 소스).
 
-No real network/DB involved — naver fetch functions and the DB upsert helper are
-monkeypatched (same pattern as tests/test_ohlcv_collector.py). Pins down the design
-decisions documented in collectors/flow_rank.py's module docstring:
-
-1. target_date is not sent to the source (it doesn't support a date query) — whatever
-   dates the source returns get written, and target_date only affects the message text.
-2. kospi + kosdaq candidates are merged and re-ranked by |net_value| descending into a
-   single per-(investor, side) rank space (flow_rank has no market column).
-3. buy와 sell 양쪽 side를 모두 수집하고, sell의 소스 음수 값은 정렬에 절대값으로
-   쓰인다 (양수 정규화 자체는 _upsert_rank_rows 내부 — abs() 저장).
-4. 회전율: ETF는 fetch_etf_list의 벌크 값으로, 개별주만 종목당 1회
-   fetch_stock_market_value로 조회하며 그룹 간 중복 코드는 dedup된다.
+외부 호출(키움/네이버)과 DB 헬퍼는 전부 monkeypatch한다 — 실제 DB에 행을 남기지 않는다.
 """
-
-from __future__ import annotations
 
 import datetime as dt
 
@@ -22,217 +9,187 @@ import pytest
 
 from app.collectors import flow_rank
 
-DATE1 = dt.date(2026, 7, 15)
-DATE2 = dt.date(2026, 7, 16)
-
-ETF_ITEMS = [
-    # KODEX 200: 거래대금 1,938,809백만 / 시총 24,377,900백만 -> 회전율 7.9531%
-    {"code": "069500", "name": "KODEX 200", "amount_million": 1938809, "aum_million": 24377900},
-    # KODEX 레버리지: aum 없음 -> 회전율 스킵(NULL)
-    {"code": "122630", "name": "KODEX 레버리지", "amount_million": 500, "aum_million": None},
-]
+D = dt.date(2026, 11, 13)
 
 
-@pytest.fixture(autouse=True)
-def no_sleep(monkeypatch):
-    monkeypatch.setattr(flow_rank.time, "sleep", lambda _seconds: None)
+def test_build_rankings_splits_buy_sell_and_limits_top_n():
+    items = [
+        {"code": f"{i:06d}", "name": f"S{i}", "market": "kospi", "is_etf": False,
+         "foreign": (i + 1) * (1 if i % 2 == 0 else -1), "institution": None}
+        for i in range(100)
+    ]
+    r = flow_rank.build_rankings(items)
+    buy = r[("foreign", "buy")]
+    sell = r[("foreign", "sell")]
+    assert len(buy) == flow_rank.TOP_N and len(sell) == flow_rank.TOP_N
+    # buy는 양수만, 크기 내림차순 / sell은 음수의 절대값 내림차순
+    assert all(x["net_value"] > 0 for x in buy)
+    assert [x["net_value"] for x in buy] == sorted((x["net_value"] for x in buy), reverse=True)
+    assert buy[0]["code"] == "000098" and sell[0]["code"] == "000099"
+    assert sell[0]["net_value"] == 100  # 음수가 아니라 양수 크기로 저장
+    # 값이 None인 investor는 비어 있다
+    assert r[("institution", "buy")] == [] and r[("institution", "sell")] == []
 
 
-def _blocks_for(market: str, side: str) -> list[dict]:
-    # kospi has the bigger |net_value| rows so the merge/re-rank order is verifiable.
-    # sell rows carry the source's negative sign (clients/naver_rank.py docstring).
-    sign = -1 if side == "sell" else 1
-    if market == "kospi":
-        return [
-            {
-                "date": DATE1,
-                "rows": [
-                    {"code": "000660", "name": "SK하이닉스", "net_value": sign * 700, "quantity": sign * 3},
-                ],
-            },
-            {
-                "date": DATE2,
-                "rows": [
-                    {"code": "005930", "name": "삼성전자", "net_value": sign * 500, "quantity": sign * 2},
-                ],
-            },
+def test_build_rankings_ignores_zero_and_tiebreaks_by_code():
+    items = [
+        {"code": "B", "foreign": 10}, {"code": "A", "foreign": 10}, {"code": "Z", "foreign": 0},
+    ]
+    r = flow_rank.build_rankings(items)
+    assert [x["code"] for x in r[("foreign", "buy")]] == ["A", "B"]
+    assert r[("foreign", "sell")] == []
+
+
+def test_parse_etf_history_signed_and_value_abs():
+    data = {
+        "stk_invsr_orgn": [
+            {"dt": "20261113", "frgnr_invsr": "-24530", "orgn": "+12607", "acc_trde_prica": "1502698"},
+            {"dt": "20261112", "frgnr_invsr": "27996", "orgn": "12406", "acc_trde_prica": "1520104"},
+            {"dt": "", "frgnr_invsr": "1"},
         ]
-    return [
-        {
-            "date": DATE1,
-            "rows": [
-                {"code": "069500", "name": "KODEX 200", "net_value": sign * 900, "quantity": sign * 8},
-            ],
-        },
-        {
-            "date": DATE2,
-            "rows": [
-                {"code": "122630", "name": "KODEX 레버리지", "net_value": sign * 100, "quantity": sign * 1},
-            ],
-        },
+    }
+    h = flow_rank.parse_etf_history(data)
+    assert h[D] == {"foreign": -24530, "institution": 12607, "value": 1502698}
+    assert h[dt.date(2026, 11, 12)]["foreign"] == 27996
+    assert len(h) == 2
+
+
+@pytest.mark.asyncio
+async def test_compute_rankings_merges_stocks_and_etfs_with_turnover(monkeypatch):
+    async def fake_items(session, date):
+        return [
+            {"code": "005930", "name": "삼성전자", "market": "kospi", "is_etf": False,
+             "foreign": 500, "institution": -300},
+        ]
+
+    async def fake_turn(session, date, codes, fetch_missing):
+        return {"005930": 1.5}
+
+    async def fake_aum(session, date, codes):
+        return {"122630": 100000}
+
+    monkeypatch.setattr(flow_rank, "_load_stock_items", fake_items)
+    monkeypatch.setattr(flow_rank, "_stock_turnover_map", fake_turn)
+    monkeypatch.setattr(flow_rank, "_etf_aum_map", fake_aum)
+
+    etf_hist = {"122630": {D: {"foreign": -900, "institution": 200, "value": 5000}}}
+    r = await flow_rank.compute_rankings(
+        None, D, etf_hist, {"122630": "KODEX 레버리지"}, {}, today=dt.date(2026, 11, 20)
+    )
+    assert [x["code"] for x in r[("foreign", "buy")]] == ["005930"]
+    sell = r[("foreign", "sell")]
+    assert sell[0]["code"] == "122630" and sell[0]["is_etf"] is True
+    assert sell[0]["net_value"] == 900 and sell[0]["market"] == "kospi"
+    assert sell[0]["turnover"] == 5.0  # 5000 / 100000 * 100
+    assert r[("foreign", "buy")][0]["turnover"] == 1.5
+    assert r[("institution", "buy")][0]["code"] == "122630"
+
+
+@pytest.mark.asyncio
+async def test_collect_dates_skips_incomplete_and_saves_complete(monkeypatch):
+    bad = dt.date(2026, 11, 12)
+
+    async def fake_check(session, d):
+        return (False, f"{d} 부족") if d == bad else (True, "")
+
+    saved = []
+
+    async def fake_prepare(session, end, today=None):
+        return {}, {}, {}
+
+    async def fake_compute(session, d, hist, names, aum, today=None):
+        return {("foreign", "buy"): [{"code": "A"}] * 3}
+
+    async def fake_save(session, d, ranks):
+        saved.append(d)
+        return 3
+
+    monkeypatch.setattr(flow_rank, "check_complete", fake_check)
+    monkeypatch.setattr(flow_rank, "prepare_etf_data", fake_prepare)
+    monkeypatch.setattr(flow_rank, "compute_rankings", fake_compute)
+    monkeypatch.setattr(flow_rank, "save_rankings", fake_save)
+
+    total, notes = await flow_rank.collect_flow_rank_dates(None, [bad, D])
+    assert total == 3 and saved == [D]
+    assert any("건너뜀" in n for n in notes)
+
+
+@pytest.mark.asyncio
+async def test_collect_dates_all_incomplete_does_not_call_kiwoom(monkeypatch):
+    async def fake_check(session, d):
+        return False, "부족"
+
+    async def boom(*a, **k):
+        raise AssertionError("ETF 조회가 호출되면 안 된다")
+
+    monkeypatch.setattr(flow_rank, "check_complete", fake_check)
+    monkeypatch.setattr(flow_rank, "prepare_etf_data", boom)
+    total, notes = await flow_rank.collect_flow_rank_dates(None, [D])
+    assert total == 0 and notes
+
+
+@pytest.mark.asyncio
+async def test_collect_flow_rank_uses_recoverable_dates(monkeypatch):
+    seen = {}
+
+    async def fake_recover(session, target):
+        return [dt.date(2026, 11, 12), target]
+
+    async def fake_dates(session, dates, today=None):
+        seen["dates"] = dates
+        return 160, ["ok"]
+
+    monkeypatch.setattr(flow_rank, "_recoverable_dates", fake_recover)
+    monkeypatch.setattr(flow_rank, "collect_flow_rank_dates", fake_dates)
+    rows, msg = await flow_rank.collect_flow_rank(None, D)
+    assert rows == 160 and msg == "ok" and seen["dates"][-1] == D
+
+
+@pytest.mark.asyncio
+async def test_prepare_etf_data_universe_and_single_failure_tolerated(monkeypatch):
+    async def fake_history(session, today):
+        return {"OLD001": "과거ETF"}
+
+    etf_list = [
+        {"code": f"E{i:03d}", "name": f"ETF{i}", "amount_million": 1000 - i, "aum_million": 10_000}
+        for i in range(250)
     ]
+    monkeypatch.setattr(flow_rank, "_load_etf_history_codes", fake_history)
+    monkeypatch.setattr(flow_rank, "_fetch_etf_list_blocking", lambda: etf_list)
+
+    captured = {}
+
+    async def fake_hist(codes, end):
+        captured["codes"] = codes
+        return {c: {D: {"foreign": 1, "institution": 1, "value": 1}} for c in codes}
+
+    monkeypatch.setattr(flow_rank, "_fetch_etf_histories", fake_hist)
+    hist, names, aum = await flow_rank.prepare_etf_data(None, D, today=D)
+    assert len(captured["codes"]) == flow_rank.ETF_TOP_N + 1  # 상위 200 + 과거 등장 1
+    assert "OLD001" in captured["codes"] and "E000" in captured["codes"]
+    assert "E249" not in captured["codes"]
+    assert names["OLD001"] == "과거ETF" and aum["E000"] == 10_000
 
 
-def _patch_common(monkeypatch, upserted=None, mv_calls=None):
-    def fake_fetch_deal_rank(market, investor, side):
-        return _blocks_for(market, side)
+@pytest.mark.asyncio
+async def test_prepare_etf_data_survives_naver_list_failure(monkeypatch):
+    async def fake_history(session, today):
+        return {"OLD001": "과거ETF"}
 
-    def fake_fetch_etf_list():
-        return ETF_ITEMS
+    def boom():
+        raise RuntimeError("naver down")
 
-    def fake_fetch_market_value(code):
-        if mv_calls is not None:
-            mv_calls.append(code)
-        return {
-            "accumulated_trading_value_million": 100,
-            "market_value_million": 10000,  # -> turnover 1.0%
-        }
+    async def fake_hist(codes, end):
+        return {}
 
-    async def fake_upsert(session, date, investor, side, rows, etf_codes, turnover_map):
-        if upserted is not None:
-            upserted.append((date, investor, side, list(rows), etf_codes, dict(turnover_map)))
-        return len(rows)
-
-    monkeypatch.setattr(flow_rank, "_fetch_deal_rank_blocking", fake_fetch_deal_rank)
-    monkeypatch.setattr(flow_rank, "_fetch_etf_list_blocking", fake_fetch_etf_list)
-    monkeypatch.setattr(flow_rank, "_fetch_stock_market_value_blocking", fake_fetch_market_value)
-    monkeypatch.setattr(flow_rank, "_upsert_rank_rows", fake_upsert)
+    monkeypatch.setattr(flow_rank, "_load_etf_history_codes", fake_history)
+    monkeypatch.setattr(flow_rank, "_fetch_etf_list_blocking", boom)
+    monkeypatch.setattr(flow_rank, "_fetch_etf_histories", fake_hist)
+    hist, names, aum = await flow_rank.prepare_etf_data(None, D, today=D)
+    assert names == {"OLD001": "과거ETF"} and aum == {}
 
 
-async def test_collect_flow_rank_merges_markets_and_reranks_by_abs_net_value(monkeypatch):
-    upserted: list[tuple] = []
-    _patch_common(monkeypatch, upserted=upserted)
+def test_registered_in_registry():
+    from app.collectors.base import REGISTRY
 
-    total, message = await flow_rank.collect_flow_rank(session=None, target_date=DATE2)
-
-    # 2 investors x 2 sides x 2 dates = 8 upsert calls, 2 rows each => total 16.
-    assert total == 16
-    assert len(upserted) == 8
-
-    foreign_buy_d1 = next(u for u in upserted if u[1] == "foreign" and u[2] == "buy" and u[0] == DATE1)
-    # KODEX 200 (900) outranks SK하이닉스 (700) once kospi+kosdaq are merged.
-    assert [r["code"] for r in foreign_buy_d1[3]] == ["069500", "000660"]
-    assert foreign_buy_d1[4] == {"069500", "122630"}
-
-    # sell 쪽도 |net_value| 기준으로 같은 순서여야 한다 (-900이 -700보다 앞).
-    foreign_sell_d1 = next(
-        u for u in upserted if u[1] == "foreign" and u[2] == "sell" and u[0] == DATE1
-    )
-    assert [r["code"] for r in foreign_sell_d1[3]] == ["069500", "000660"]
-
-    # turnover_map: ETF는 벌크 계산(069500만 — 122630은 aum 없음), 개별주는 1.0%.
-    turnover_map = foreign_buy_d1[5]
-    assert turnover_map["069500"] == pytest.approx(7.9531, abs=1e-4)
-    assert "122630" not in turnover_map
-    assert turnover_map["000660"] == pytest.approx(1.0)
-    assert turnover_map["005930"] == pytest.approx(1.0)
-
-    # target_date (DATE2) is one of the dates actually returned -> no "ignored" note.
-    assert message is not None
-    assert "무시됨" not in message
-    assert DATE1.isoformat() in message
-    assert DATE2.isoformat() in message
-
-
-async def test_collect_flow_rank_tags_rows_with_source_market(monkeypatch):
-    """§4.6 3.6-1: 코스피+코스닥 병합 이후에도 각 row가 어느 시장에서 왔는지
-    (FlowRank.market) row dict에 남아 있어야 한다 — _upsert_rank_rows가 이 값을
-    그대로 저장한다."""
-    upserted: list[tuple] = []
-    _patch_common(monkeypatch, upserted=upserted)
-
-    await flow_rank.collect_flow_rank(session=None, target_date=DATE2)
-
-    foreign_buy_d1 = next(u for u in upserted if u[1] == "foreign" and u[2] == "buy" and u[0] == DATE1)
-    by_code = {r["code"]: r["market"] for r in foreign_buy_d1[3]}
-    assert by_code == {"069500": "kosdaq", "000660": "kospi"}
-
-
-async def test_upsert_rank_rows_persists_market_column():
-    """실제 _upsert_rank_rows(모킹하지 않은 버전)가 row별 market을 pg_insert
-    values에 그대로 실어 보내는지 — 세션 execute를 가로채 검증한다."""
-    captured_stmts = []
-
-    class FakeSession:
-        async def execute(self, stmt):
-            captured_stmts.append(stmt)
-
-    rows = [
-        {"code": "000660", "name": "SK하이닉스", "net_value": 700, "quantity": 3, "market": "kospi"},
-        {"code": "069500", "name": "KODEX 200", "net_value": 500, "quantity": 2, "market": "kosdaq"},
-    ]
-    session = FakeSession()
-
-    count = await flow_rank._upsert_rank_rows(
-        session, DATE1, "foreign", "buy", rows, etf_codes={"069500"}, turnover_map={}
-    )
-
-    assert count == 2
-    markets = [stmt.compile().params["market"] for stmt in captured_stmts]
-    assert markets == ["kospi", "kosdaq"]
-
-
-async def test_collect_flow_rank_notes_when_target_date_not_returned(monkeypatch):
-    _patch_common(monkeypatch)
-
-    other_date = dt.date(2099, 1, 1)
-    _total, message = await flow_rank.collect_flow_rank(session=None, target_date=other_date)
-
-    assert message is not None
-    assert "무시됨" in message
-    assert other_date.isoformat() in message
-
-
-async def test_collect_flow_rank_queries_both_markets_investors_and_sides(monkeypatch):
-    calls = []
-
-    def fake_fetch(market, investor, side):
-        calls.append((market, investor, side))
-        return _blocks_for(market, side)
-
-    _patch_common(monkeypatch)
-    monkeypatch.setattr(flow_rank, "_fetch_deal_rank_blocking", fake_fetch)
-
-    await flow_rank.collect_flow_rank(session=None, target_date=DATE2)
-
-    assert sorted(calls) == sorted(
-        (market, investor, side)
-        for side in ("buy", "sell")
-        for investor in ("foreign", "institution")
-        for market in ("kospi", "kosdaq")
-    )
-
-
-async def test_collect_flow_rank_dedups_turnover_lookups_across_groups(monkeypatch):
-    """같은 개별주가 buy/sell, foreign/institution 여러 그룹에 나타나도
-    fetch_stock_market_value는 코드당 1회만 불려야 하고, ETF 코드는 아예 불리지
-    않아야 한다."""
-    mv_calls: list[str] = []
-    _patch_common(monkeypatch, mv_calls=mv_calls)
-
-    await flow_rank.collect_flow_rank(session=None, target_date=DATE2)
-
-    # 개별주는 000660/005930 두 개뿐 — 그룹이 8개(2 investors x 2 sides x 2 dates)라도
-    # 각 1회씩만.
-    assert sorted(mv_calls) == ["000660", "005930"]
-
-
-async def test_collect_flow_rank_survives_turnover_fetch_failure(monkeypatch):
-    """개별주 하나의 회전율 조회가 실패해도 배치는 계속 진행되고, 그 코드만
-    turnover_map에서 빠진다."""
-    upserted: list[tuple] = []
-    _patch_common(monkeypatch, upserted=upserted)
-
-    def failing_fetch(code):
-        if code == "005930":
-            raise RuntimeError("boom")
-        return {"accumulated_trading_value_million": 100, "market_value_million": 10000}
-
-    monkeypatch.setattr(flow_rank, "_fetch_stock_market_value_blocking", failing_fetch)
-
-    total, _message = await flow_rank.collect_flow_rank(session=None, target_date=DATE2)
-
-    assert total == 16
-    turnover_map = upserted[0][5]
-    assert "005930" not in turnover_map
-    assert turnover_map["000660"] == pytest.approx(1.0)
+    assert REGISTRY["flow_rank"] is flow_rank.collect_flow_rank
