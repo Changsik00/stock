@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 평일 17:52(맥 로컬 시간 = KST 가정)부터 4시간 10분(22:02까지) 절전 방지 — PLAN.md §5.108.
+     18:00 본배치, 20:00 매집 스크리너(약 65분), 21:30 수급 상위가 도는 동안 맥이 잠들지 않게 한다.
+     2026-11-12 17:42 idle sleep으로 그날 배치가 통째로 빠진 사고의 재발 방지(과거 소급이 안 되는 소스가 있다).
+     launchd는 잠든 맥을 깨우지 못한다 — 깨우는 것은 `sudo pmset repeat wakeorpoweron MTWRF 17:50:00`이 맡는다.
+     해제: launchctl unload ~/Library/LaunchAgents/com.changsik.stock.keepawake.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.changsik.stock.keepawake</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string>
+    <string>-i</string>
+    <string>-s</string>
+    <string>-t</string>
+    <string>15000</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>52</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>52</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>52</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>52</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>52</integer></dict>
+  </array>
+</dict>
+</plist>

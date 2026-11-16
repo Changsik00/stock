@@ -4,6 +4,7 @@ import AutoTradePage from './pages/AutoTradePage'
 import DashboardPage from './pages/DashboardPage'
 import MarketPage from './pages/MarketPage'
 import NarrativePage from './pages/NarrativePage'
+import ScorecardPage from './pages/ScorecardPage'
 import PlaceholderPage from './pages/PlaceholderPage'
 
 // 대시보드가 기본 탭이다 (PLAN.md §6 3.7-1) — 핵심 숫자 요약 화면. 기존 '시장' 탭은
@@ -22,6 +23,7 @@ const PAGES = [
   { key: 'dashboard', label: '대시보드', component: DashboardPage },
   { key: 'market', label: '시장', component: MarketPage },
   ...(STATIC_DATA ? [] : [{ key: 'narrative', label: '내러티브', component: NarrativePage }]),
+  ...(STATIC_DATA ? [] : [{ key: 'scorecard', label: '성적표', component: ScorecardPage }]),
   { key: 'stock', label: '종목', component: null },
   { key: 'etf', label: 'ETF', component: null },
   ...(STATIC_DATA ? [] : [{ key: 'auto-trade', label: '자동매매', component: AutoTradePage }]),

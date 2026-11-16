@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # LLM 제안 생성은 건너뛴다(앱은 정상 동작).
     anthropic_api_key: str | None = None
     anthropic_model: str = "claude-sonnet-5-5"
+    # 2026-11-15(PLAN.md §5.108): API 키 경로는 기본 꺼짐 — 내러티브는 호스트의 Claude Code
+    # 구독 경로(scripts/narrative_claude.py)로 생성한다. .env에 키가 남아 있어도 이 값이
+    # true가 아니면 API를 호출하지 않는다(무효 키로 하루 3번 401이 나던 것을 막는다).
+    narrative_api_llm_enabled: bool = False
 
 
 @lru_cache

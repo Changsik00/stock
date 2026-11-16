@@ -285,6 +285,11 @@ export async function fetchPremarketOutlook() {
   return getJson('/api/markets/premarket-outlook')
 }
 
+// GET /api/markets/scorecard — 지표 성적표(신호별 적중률·기준선 대비 차이, 로컬 전용·표시 전용).
+export async function fetchScorecard() {
+  return getJson('/api/markets/scorecard')
+}
+
 // GET /api/groups?type=upjong|theme -> [{name, change_rate, value, market_sum}] —
 // 해당 group_type의 최신 날짜 스냅샷 (PLAN.md §4.6 3.6-3 트리맵).
 export async function fetchGroups(type = 'upjong') {

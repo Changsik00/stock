@@ -212,7 +212,10 @@ def get_model() -> str:
 
 def make_client():
     """AsyncAnthropic 클라이언트. 키가 없거나 SDK 미설치면 None(호출부가 '키 없음' 경로로 처리)."""
-    key = (get_settings().anthropic_api_key or "").strip()
+    settings = get_settings()
+    if not settings.narrative_api_llm_enabled:  # 기본 꺼짐 — config.py 주석 참고
+        return None
+    key = (settings.anthropic_api_key or "").strip()
     if not key:
         return None
     try:
