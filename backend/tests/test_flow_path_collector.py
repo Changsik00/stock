@@ -249,3 +249,47 @@ def test_etf_codes_param_excludes_pure_direct_net_etf_row():
     )
 
     assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# 오래된 순유입 대체 금지 (Phase 5.111)
+# ---------------------------------------------------------------------------
+
+
+def test_stale_inflow_beyond_gap_is_not_used():
+    """가장 가까운 etf_stats 날짜가 MAX_INFLOW_GAP_DAYS보다 멀면 쓰지 않는다 —
+    11일 전 유입액이 오늘 순위를 만들던 문제의 회귀 테스트."""
+    holdings = {"069500": [{"stock_code": "005930", "weight": 50.0}]}
+    stats_by_code = {"069500": [(dt.date(2026, 11, 6), 54_700)]}
+
+    result, meta = compute_flow_path(
+        dt.date(2026, 11, 16), holdings, dt.date(2026, 11, 16), stats_by_code, [], NAMES
+    )
+
+    assert "005930" not in result
+    assert meta["inflow"] == 0 and meta["skipped"] == 1
+
+
+def test_stale_inflow_falls_back_to_rank_basis():
+    """오래된 inflow는 버리고, flow_rank에 그 ETF가 있으면 rank 근사로 내려간다."""
+    holdings = {"069500": [{"stock_code": "005930", "weight": 50.0}]}
+    stats_by_code = {"069500": [(dt.date(2026, 11, 6), 54_700)]}
+    flow_rank_rows = [{"code": "069500", "name": "KODEX 200", "net_value": 1000, "investor": "foreign"}]
+    target = dt.date(2026, 11, 16)
+
+    result, _meta = compute_flow_path(target, holdings, target, stats_by_code, flow_rank_rows, NAMES)
+
+    assert result["005930"]["via_etf_net"] == 500
+    assert result["005930"]["top_etfs"][0]["basis"] == "rank"
+
+
+def test_inflow_within_gap_across_weekend_is_used():
+    """금요일 값은 월요일 계산에 그대로 쓴다(3일 차이, 허용 범위)."""
+    holdings = {"069500": [{"stock_code": "005930", "weight": 50.0}]}
+    stats_by_code = {"069500": [(dt.date(2026, 11, 13), 200)]}
+
+    result, _meta = compute_flow_path(
+        dt.date(2026, 11, 16), holdings, dt.date(2026, 11, 16), stats_by_code, [], NAMES
+    )
+
+    assert result["005930"]["via_etf_net"] == 100

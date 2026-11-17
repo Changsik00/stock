@@ -298,6 +298,11 @@ async def compute_rankings(
     """저장하지 않고 날짜 D의 랭킹(+turnover)을 계산한다(비교 모드와 저장이 공용)."""
     today = today or dt.date.today()
     items = await _load_stock_items(session, date)
+    # stock_flow에는 ETF 코드도 들어 있다(스윕 잡이 채움). 같은 ETF가 아래 ETF
+    # 유니버스로도 들어오면 한 랭킹에 두 번(연속 순위, 같은 금액) 올라가 상위 40개
+    # 자리를 잡아먹었다(Phase 5.111) — ETF 쪽 행(is_etf·회전율이 정확)만 남긴다.
+    etf_day_codes = {code for code, hist in etf_hist.items() if hist.get(date)}
+    items = [it for it in items if it["code"] not in etf_day_codes]
     for code, hist in etf_hist.items():
         day = hist.get(date)
         if not day:

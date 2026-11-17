@@ -199,11 +199,15 @@ export function scalpHitrateFootnote(hitrate) {
   const h = hitrate.horizons?.['15m']
   if (!h || !h.n) return null
   const sign = h.avg_change_rate > 0 ? '+' : ''
+  // Phase 5.111 문구 정정: change_rate_15m은 "포착 시점 대비 수익률"이 아니라 포착
+  // 15분 뒤에 찍은 그 종목의 전일 종가 대비 등락률이다(collectors/scalp_tracker.py).
+  // 후보는 이미 오른 종목 위주로 뽑히므로 이 값은 구조적으로 높게 나온다 — 예전
+  // "15분 후 상승 확률"은 뽑힌 뒤의 수익률처럼 읽혀 사실과 달랐다.
   return (
     `최근 ${hitrate.distinct_days}거래일(${hitrate.date_from}~${hitrate.date_to}, ` +
-    `15분 표본 ${h.n}건) 관찰: 15분 후 상승 확률 ${h.win_rate}%, 평균 변동 ` +
-    `${sign}${h.avg_change_rate.toFixed(1)}%(중앙값 ${h.median_change_rate > 0 ? '+' : ''}${h.median_change_rate.toFixed(1)}%) ` +
-    `— 표본이 작고 이례적 하락장 기간이라 일반화할 수 없음, 검증된 성과 아님`
+    `15분 표본 ${h.n}건) 관찰: 포착 15분 뒤 전일 종가 대비 플러스 비율 ${h.win_rate}%, ` +
+    `전일 대비 등락률 평균 ${sign}${h.avg_change_rate.toFixed(1)}%(중앙값 ${h.median_change_rate > 0 ? '+' : ''}${h.median_change_rate.toFixed(1)}%) ` +
+    `— 포착 이후 수익률이 아님(이미 오른 종목이 뽑힘), 검증된 성과 아님`
   )
 }
 

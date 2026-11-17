@@ -4,8 +4,9 @@
 
 1. **via_etf_net(S)** = Σ_E [ inflow(E) × weight(E,S)/100 ]. ETF E의 순유입 inflow(E)는
    우선순위로 구한다: (a) ``etf_stats.net_inflow`` — target_date에 정확히 있으면 그
-   값, 없으면 그 ETF에 대해 net_inflow가 non-null인 날짜 중 **가장 가까운 날짜**를
-   골라 쓴다(§4.5 "T-1 PDF 원칙", 날짜 어긋남 허용). (b) etf_stats에 그 ETF의
+   값, 없으면 그 ETF의 etf_stats 날짜 중 **가장 가까운 날짜**를 골라 쓴다(§4.5
+   "T-1 PDF 원칙"). 단 ``MAX_INFLOW_GAP_DAYS``(4일)보다 먼 날짜는 쓰지 않고, 순유입이
+   관측된 적 있는 ETF의 NULL 행은 0으로 읽는다(Phase 5.111 — 네이버 "-" = 순유입 0). (b) etf_stats에 그 ETF의
    non-null net_inflow가 전혀 없으면, target_date의 ``flow_rank``에서 그 ETF 코드의
    외인+기관 net_value 합을 2차 근사로 쓴다(ETF도 유통시장에서 매매되는 종목이라
    flow_rank에 직접 잡힐 수 있음 — 그 경우에만 해당). (c) 둘 다 없으면 그 ETF는
@@ -82,6 +83,12 @@ logger = logging.getLogger(__name__)
 TOP_ETFS_LIMIT = 5
 
 
+# etf_stats 순유입을 target_date에서 이만큼(달력일)까지만 떨어진 날짜로 대체한다.
+# etf_stats는 네이버 referenceDate 기준이라 보통 직전 거래일 값이 최신이다 —
+# 금→월(3일), 월요일 휴장을 낀 금→화(4일)까지 허용하고 그보다 오래된 값은 버린다.
+MAX_INFLOW_GAP_DAYS = 4
+
+
 def _nearest_date(available: list[dt.date], target: dt.date) -> dt.date | None:
     """available 중 target에 가장 가까운 날짜. 동률이면 더 이른(과거) 날짜 우선
     (§4.5 "T-1 PDF 원칙" — 미래 스냅샷보다 과거 스냅샷을 약하게 선호)."""
@@ -152,10 +159,14 @@ def compute_flow_path(
         if stats_rows:
             available_dates = [d for d, _ in stats_rows]
             nearest = _nearest_date(available_dates, target_date)
-            value = next(v for d, v in stats_rows if d == nearest)
-            inflow_info[etf_code] = {"value": value, "basis": "inflow", "date": nearest}
-            basis_counts["inflow"] += 1
-            continue
+            # 가장 가까운 날짜라도 MAX_INFLOW_GAP_DAYS보다 멀면 쓰지 않는다 — 몇 주
+            # 전 유입액이 오늘 순위를 만들던 문제(Phase 5.111). 이 경우 아래 rank
+            # 근사 → 미관측 순으로 내려간다.
+            if abs((nearest - target_date).days) <= MAX_INFLOW_GAP_DAYS:
+                value = next(v for d, v in stats_rows if d == nearest)
+                inflow_info[etf_code] = {"value": value, "basis": "inflow", "date": nearest}
+                basis_counts["inflow"] += 1
+                continue
 
         rank_value = direct_map.get(etf_code)
         if rank_value is not None:
@@ -309,13 +320,21 @@ async def _load_stats_by_code(
 ) -> dict[str, list[tuple[dt.date, int]]]:
     if not etf_codes:
         return {}
-    stmt = select(EtfStat).where(
-        EtfStat.code.in_(etf_codes), EtfStat.net_inflow.isnot(None)
-    )
+    """etf_code -> [(date, net_inflow), ...].
+
+    NULL 처리(Phase 5.111): 2026-11-17 이전 수집분은 네이버의 "-"(그날 순유입 0)를
+    NULL로 저장했다. 순유입이 한 번이라도 관측된 ETF는 통계가 제공되는 ETF이므로 그
+    ETF의 NULL 행은 0으로 읽는다. 전 기간 NULL인 ETF는 통계 자체가 없는 것으로 보고
+    제외한다(호출부가 rank 근사 → 미관측으로 처리).
+    """
+    stmt = select(EtfStat).where(EtfStat.code.in_(etf_codes))
     rows = (await session.execute(stmt)).scalars().all()
+    observed = {r.code for r in rows if r.net_inflow is not None}
     out: dict[str, list[tuple[dt.date, int]]] = {}
     for r in rows:
-        out.setdefault(r.code, []).append((r.date, r.net_inflow))
+        if r.code not in observed:
+            continue
+        out.setdefault(r.code, []).append((r.date, r.net_inflow or 0))
     return out
 
 

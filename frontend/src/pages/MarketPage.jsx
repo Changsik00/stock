@@ -11,7 +11,6 @@ import {
   fetchMarketIntraday,
   fetchMarketSeries,
   fetchSentiment,
-  fetchValueRank,
 } from '../api'
 import BreadthBadge from '../components/BreadthBadge'
 import CandleChart from '../components/CandleChart'
@@ -26,6 +25,7 @@ import SentimentGauge from '../components/SentimentGauge'
 import StockDetailModal from '../components/StockDetailModal'
 import StockHeatmap from '../components/StockHeatmap'
 import ValueRankTable from '../components/ValueRankTable'
+import useValueRankAuto from '../useValueRankAuto'
 import { INTRADAY_OPTIONS, MARKET_FUND_IDS, MARKETS } from '../constants'
 import { formatDate } from '../format'
 
@@ -131,10 +131,9 @@ export default function MarketPage() {
   const [groupError, setGroupError] = useState(null)
   const [groupLoading, setGroupLoading] = useState(false)
   const [valueRankMarket, setValueRankMarket] = useState('all')
-  const [valueRankDate, setValueRankDate] = useState(null)
-  const [valueRankRows, setValueRankRows] = useState([])
-  const [valueRankError, setValueRankError] = useState(null)
-  const [valueRankLoading, setValueRankLoading] = useState(false)
+  // 거래대금 상위 — 장중엔 라이브, 그 외엔 일별 스냅샷(PLAN.md Phase 5.110). 시장
+  // 필터(all/kospi/kosdaq) 변경과 7분 주기 갱신은 훅이 처리한다.
+  const valueRank = useValueRankAuto(valueRankMarket)
   // 종목 상세 모달(PLAN.md §6 3.7-2) — DashboardPage와 달리 MarketPage는 지금까지
   // 종목 상세 모달이 없었다(수급/거래대금/ETF경유 표는 순수 데이터 표시였다). 모든
   // 랭킹 행 클릭 → 종목 상세 모달 통일(사용자 요구) 작업으로 최소 상태만 이식한다 —
@@ -385,29 +384,6 @@ export default function MarketPage() {
     }
   }, [groupType])
 
-  // 거래대금 상위 — 시장 필터(all/kospi/kosdaq)에만 반응한다 (PLAN.md §4.6 3.6-1).
-  useEffect(() => {
-    let cancelled = false
-    setValueRankLoading(true)
-    setValueRankError(null)
-    fetchValueRank(valueRankMarket, FLOW_RANK_LOOKBACK_DAYS)
-      .then((body) => {
-        if (!cancelled) {
-          setValueRankDate(body.date)
-          setValueRankRows(body.rows || [])
-        }
-      })
-      .catch((e) => {
-        if (!cancelled) setValueRankError(e.message)
-      })
-      .finally(() => {
-        if (!cancelled) setValueRankLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [valueRankMarket])
-
   const latest = prices?.length ? prices[prices.length - 1] : null
   const hasFlows = Object.keys(flows || {}).length > 0
   const flowCapableMarket = market !== 'futures'
@@ -618,10 +594,12 @@ export default function MarketPage() {
         ))}
       </div>
       <ValueRankTable
-        rows={valueRankRows}
-        loading={valueRankLoading}
-        error={valueRankError}
-        date={valueRankDate}
+        rows={valueRank.rows}
+        loading={valueRank.loading}
+        error={valueRank.error}
+        date={valueRank.date}
+        live={valueRank.live}
+        cachedAt={valueRank.cachedAt}
         onRowClick={handleRowClick}
       />
 

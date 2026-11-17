@@ -193,3 +193,34 @@ def test_registered_in_registry():
     from app.collectors.base import REGISTRY
 
     assert REGISTRY["flow_rank"] is flow_rank.collect_flow_rank
+
+
+@pytest.mark.asyncio
+async def test_compute_rankings_drops_stock_row_for_code_also_in_etf_universe(monkeypatch):
+    """stock_flow에도 있고 ETF 유니버스에도 있는 ETF는 한 번만(ETF 행으로) 랭킹에
+    들어간다 — 같은 금액으로 연속 순위 두 번 올라가던 문제(Phase 5.111)."""
+    async def fake_items(session, date):
+        return [
+            {"code": "381180", "name": "TIGER 미국필라델피아반도체나스닥", "market": "kospi",
+             "is_etf": False, "foreign": 8761, "institution": None},
+            {"code": "005930", "name": "삼성전자", "market": "kospi", "is_etf": False,
+             "foreign": 500, "institution": None},
+        ]
+
+    async def fake_turn(session, date, codes, fetch_missing):
+        return {}
+
+    async def fake_aum(session, date, codes):
+        return {}
+
+    monkeypatch.setattr(flow_rank, "_load_stock_items", fake_items)
+    monkeypatch.setattr(flow_rank, "_stock_turnover_map", fake_turn)
+    monkeypatch.setattr(flow_rank, "_etf_aum_map", fake_aum)
+
+    etf_hist = {"381180": {D: {"foreign": 8761, "institution": 0, "value": 1000}}}
+    r = await flow_rank.compute_rankings(
+        None, D, etf_hist, {"381180": "TIGER 미국필라델피아반도체나스닥"}, {}, today=dt.date(2026, 11, 20)
+    )
+    buy = r[("foreign", "buy")]
+    assert [x["code"] for x in buy] == ["381180", "005930"]
+    assert buy[0]["is_etf"] is True

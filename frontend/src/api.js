@@ -347,6 +347,31 @@ export async function fetchValueRankLive() {
   return getJson('/api/markets/value-rank/live')
 }
 
+// 거래대금 상위 표(시장 페이지·대시보드 "전체 보기" 모달) 공용 조회 (PLAN.md Phase 5.110).
+// 장중이면 라이브(value-rank/live, 코스피+코스닥 각 100종목)를 쓰고, 장 마감·라이브
+// 실패·빈 응답이면 일별 스냅샷(fetchValueRank)으로 폴백한다. 라이브는 market 파라미터가
+// 없어 kospi/kosdaq 필터는 여기서 rows를 걸러 rank를 1..N으로 다시 매긴다(정적
+// 스냅샷 경로와 같은 방식). 반환값에 live(bool)·cached_at을 덧붙여 표가 "장중 잠정"
+// 여부와 갱신 시각을 표시할 수 있게 한다.
+export async function fetchValueRankAuto(market = 'all', days = 7) {
+  if (!STATIC_DATA) {
+    try {
+      const live = await fetchValueRankLive()
+      if (live && live.market_closed === false && live.rows && live.rows.length > 0) {
+        const rows =
+          market === 'all'
+            ? live.rows
+            : live.rows.filter((r) => r.market === market).map((r, i) => ({ ...r, rank: i + 1 }))
+        return { market, date: live.date, rows, live: true, cached_at: live.cached_at }
+      }
+    } catch {
+      // 라이브 실패는 조용히 넘기고 아래 스냅샷으로 폴백한다.
+    }
+  }
+  const snapshot = await fetchValueRank(market, days)
+  return { ...snapshot, live: false }
+}
+
 // GET /api/groups/top-stocks?type=upjong|theme&name=...&limit=10 -> { type, name,
 // rows: [{code, name, change_rate, value}], cached_at } (PLAN.md §5.12 "업종·테마
 // 트리맵 클릭 → 대장 종목 TOP10") — 트리맵 박스를 클릭했을 때 그 그룹 구성 종목 중

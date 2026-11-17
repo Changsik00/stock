@@ -43,11 +43,31 @@ function turnoverLabel(turnoverPercent) {
 
 // onRowClick(code, name) — FlowRankTable과 동일한 선택 prop(하위호환, 미지정 시
 // 기존처럼 클릭 불가). 종목 상세 모달 연결 통일(사용자 요구) 용도.
-export default function ValueRankTable({ rows, loading, error, date, onRowClick }) {
+// "HH:MM" (KST) — 라이브 응답의 cached_at(UTC ISO)을 갱신 시각으로 보여준다.
+const timeFmt = new Intl.DateTimeFormat('ko-KR', {
+  timeZone: 'Asia/Seoul',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+})
+
+// 기준 표기 — 장중 라이브면 "장중 잠정 · HH:MM 기준"(DESIGN.md 용어), 아니면 스냅샷
+// 날짜. 장중에 전일 스냅샷이 오늘 값처럼 읽히던 문제(Phase 5.110) 때문에 구분한다.
+function basisLabel(date, live, cachedAt) {
+  if (live) {
+    const t = cachedAt ? new Date(cachedAt) : null
+    const time = t && !Number.isNaN(t.getTime()) ? ` · ${timeFmt.format(t)} 기준` : ''
+    return `${formatDate(date)} 장중 잠정${time}`
+  }
+  return `${formatDate(date)} 기준`
+}
+
+// live/cachedAt — 선택 prop(미지정 시 기존처럼 "날짜 기준"만 표시).
+export default function ValueRankTable({ rows, loading, error, date, live, cachedAt, onRowClick }) {
   return (
     <div>
       <div className="toggle-row">
-        {date && <span className="toggle-hint">{formatDate(date)} 기준</span>}
+        {date && <span className="toggle-hint">{basisLabel(date, live, cachedAt)}</span>}
       </div>
 
       {loading && <div className="state">불러오는 중…</div>}

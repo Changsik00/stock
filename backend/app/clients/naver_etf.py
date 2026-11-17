@@ -62,8 +62,9 @@
 참고: net_inflow 백필은 이 클라이언트를 매일 재실행하며 쌓는 것 외에는 방법이
 없어, 최초 실행일 하루치만 적재된다).
 
-주의: ``cumulativeNetInflow1d``가 종목별로 종종 ``"-"``(데이터 없음)로 오기도
-한다(2026-07-18 표본: 30개 중 4개) — 이 경우 net_inflow는 NULL로 남긴다.
+주의: ``cumulativeNetInflow1d``가 종목별로 종종 ``"-"``로 온다. 다른 기간(1w/1m/…)에
+값이 있으면 "그날 순유입 0"이라 0으로 저장하고, 모든 기간이 ``"-"``일 때만
+"데이터 없음"으로 보아 NULL로 남긴다(Phase 5.111 — ``parse_net_inflow_snapshot``).
 """
 
 from __future__ import annotations
@@ -316,9 +317,23 @@ def parse_net_inflow_snapshot(analysis: dict) -> dict:
             ref_date = dt.datetime.strptime(ref_date_str, "%Y.%m.%d").date()
         except ValueError:
             ref_date = None
+    net_1d = parse_won_string_to_million(inflow.get("cumulativeNetInflow1d"))
+    if net_1d is None and str(inflow.get("cumulativeNetInflow1d") or "").strip() == "-":
+        # "-"는 두 가지 뜻으로 온다(Phase 5.111, 2026-11-17 실측): (1) 그날 설정·환매가
+        # 없어 순유입이 0 — 더 긴 기간(1w/1m/…)에는 값이 있다. (2) 순유입 통계 자체가
+        # 없는 ETF — 모든 기간이 "-". (1)을 NULL로 저장하면 flow_path가 "값 없음"으로
+        # 보고 며칠 전 유입액을 끌어다 써서 없는 유입을 만들어 냈다. 그래서 다른 기간에
+        # 값이 하나라도 있으면 0으로 확정하고, 전부 "-"일 때만 None(미관측)으로 둔다.
+        others = (
+            parse_won_string_to_million(v)
+            for k, v in inflow.items()
+            if k.startswith("cumulativeNetInflow") and k != "cumulativeNetInflow1d"
+        )
+        if any(v is not None for v in others):
+            net_1d = 0
     return {
         "reference_date": ref_date,
-        "net_inflow_1d_million": parse_won_string_to_million(inflow.get("cumulativeNetInflow1d")),
+        "net_inflow_1d_million": net_1d,
         "raw": inflow,
     }
 

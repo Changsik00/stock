@@ -368,8 +368,9 @@ def test_parse_net_inflow_snapshot_uses_1d_field_only():
 
 
 def test_parse_net_inflow_snapshot_handles_missing_1d_value():
+    # 1d는 "-"지만 1w 이상에 값이 있다 -> 그날 순유입 0 (Phase 5.111, 이전에는 None).
     snap = naver_etf.parse_net_inflow_snapshot(ETF_ANALYSIS_FOREIGN)
-    assert snap["net_inflow_1d_million"] is None
+    assert snap["net_inflow_1d_million"] == 0
     assert snap["reference_date"] == dt.date(2026, 7, 15)
 
 
@@ -479,3 +480,34 @@ def test_classify_derivative_full_universe_counts():
     assert sum(1 for m in results if m == -1) == 6
     assert sum(1 for m in results if m == -2) == 5
     assert all(m is not None for m in results)
+
+
+def test_parse_net_inflow_snapshot_dash_1d_with_other_periods_is_zero():
+    """1d만 "-"이고 다른 기간에 값이 있으면 '그날 순유입 0'이다(Phase 5.111 실측:
+    KODEX Top5PlusTR 2026-11-16) — NULL이 아니라 0으로 확정한다."""
+    snap = naver_etf.parse_net_inflow_snapshot(
+        {
+            "cumulativeNetInflowList": {
+                "referenceDate": "2026.11.16",
+                "cumulativeNetInflow1d": "-",
+                "cumulativeNetInflow1w": "-",
+                "cumulativeNetInflow1m": "-77.8억",
+            }
+        }
+    )
+    assert snap["net_inflow_1d_million"] == 0
+
+
+def test_parse_net_inflow_snapshot_all_dash_stays_none():
+    """모든 기간이 "-"면 순유입 통계 자체가 없는 ETF — 미관측(None)으로 둔다."""
+    snap = naver_etf.parse_net_inflow_snapshot(
+        {
+            "cumulativeNetInflowList": {
+                "referenceDate": "2026.11.16",
+                "cumulativeNetInflow1d": "-",
+                "cumulativeNetInflow1w": "-",
+                "cumulativeNetInflow1m": "-",
+            }
+        }
+    )
+    assert snap["net_inflow_1d_million"] is None

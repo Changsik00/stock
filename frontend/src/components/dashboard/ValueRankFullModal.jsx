@@ -1,36 +1,11 @@
-import { useEffect, useState } from 'react'
-import { fetchValueRank } from '../../api'
+import { useState } from 'react'
+import useValueRankAuto from '../../useValueRankAuto'
 import ValueRankTable from '../ValueRankTable'
-import { FLOW_RANK_LOOKBACK_DAYS, VALUE_RANK_MARKET_OPTIONS } from './shared'
+import { VALUE_RANK_MARKET_OPTIONS } from './shared'
 
 export default function ValueRankFullModal({ onRowClick }) {
   const [market, setMarket] = useState('all')
-  const [date, setDate] = useState(null)
-  const [rows, setRows] = useState([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState(null)
-
-  useEffect(() => {
-    let cancelled = false
-    setLoading(true)
-    setError(null)
-    fetchValueRank(market, FLOW_RANK_LOOKBACK_DAYS)
-      .then((body) => {
-        if (!cancelled) {
-          setDate(body.date)
-          setRows(body.rows || [])
-        }
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e.message)
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [market])
+  const { date, rows, live, cachedAt, loading, error } = useValueRankAuto(market)
 
   return (
     <div>
@@ -46,7 +21,7 @@ export default function ValueRankFullModal({ onRowClick }) {
           </button>
         ))}
       </div>
-      <ValueRankTable rows={rows} loading={loading} error={error} date={date} onRowClick={onRowClick} />
+      <ValueRankTable rows={rows} loading={loading} error={error} date={date} live={live} cachedAt={cachedAt} onRowClick={onRowClick} />
     </div>
   )
 }
