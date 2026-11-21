@@ -1883,6 +1883,12 @@ header h1 {
   font-size: 12px;
 }
 
+/* 타일 보조 텍스트의 경고 단계(주황) — VIX 25 이상 등. 방향색이 아니다. */
+.kpi-sub-warn {
+  color: var(--warn-text);
+  font-weight: 600;
+}
+
 .vol-regime-partial {
   color: var(--warn-text);
   font-weight: 600;
@@ -2341,3 +2347,12 @@ header h1 {
   .sc-insuff { grid-column: 1 / -1; text-align: left; }
   .sc-avg { grid-column: 1 / -1; }
 }
+
+/* 외인 매도 일관성 카드(PLAN.md Phase 5.113) — .vr-card/.vr-panels 골격 재사용, 라벨은 굵기로 강조, 일관 매도만 주의색 */
+.fc-label { font-size: var(--fs-label); font-weight: 700; color: var(--text-primary); border: 1px solid var(--border); border-radius: 999px; padding: 2px var(--sp-2); }
+.fc-label-sell { color: var(--warn-text); }
+.fc-strong { font-weight: 700; color: var(--text-primary); }
+.fc-list { margin: 0; width: 100%; display: flex; flex-direction: column; gap: var(--sp-1); font-size: 13px; font-variant-numeric: tabular-nums; }
+.fc-list > div { display: flex; justify-content: space-between; gap: var(--sp-3); }
+.fc-list dt { color: var(--text-secondary); }
+.fc-list dd { margin: 0; text-align: right; }

@@ -5543,6 +5543,55 @@ Phase 5.104의 연속. "외인 양손 · 현선물" 섹션의 외인 현물·베
 
 ---
 
+### Phase 5.112 — VIX 참고 타일 (2026-11-21 사용자 요청)
+
+**배경**: 사용자가 미국 VIX(공포 지수)를 대시보드에 넣어 달라고 요청했다. 먼저 쓸모를 평가한 뒤, 신호가 아니라 **참고용 표시**로만 추가했다. 신호·자동매매 로직에는 연결하지 않는다(`positioning_snapshot`·`auto_trade_rules` 등 미변경).
+
+**평가(2026-11-21, 코스피 812거래일 2023-07~2026-11, 각 코스피 거래일에 직전 미국장 VIX 종가를 짝지음)**
+- VIX 수준 vs 다음 날 코스피 시가→종가 상관 −0.02: 방향 정보 없음.
+- 코스피 갭 ≤ −2% 날: VIX ≥ 25면 시가 아래 마감 50%(n=12), VIX < 25면 66%(n=32). "VIX가 높으면 더 빠진다"는 근거 없음.
+- VIX 변화 vs 코스피 시가 갭 상관 −0.41이나 나스닥 등락이 더 잘 설명(0.52).
+- 장중 변동폭: 코스피가 시가 대비 −1.5% 이하를 터치한 날 비율 — VIX < 15: 8%(n=246), 15~25: 약 22%(n=524), ≥ 25: 약 31%(n=42). 유일하게 쓸 만한 부분(자동매매 −1.5% 손절과 관련되나 연결하지 않음).
+- 최근값: 11/16 22.91, 11/17 25.46, 11/18 24.56, 11/19 28.44, 11/20 35.89.
+
+**구현**
+- 백엔드: `clients/us_indices.py` `SYMBOLS`에 `us_vix`(yfinance `^VIX`, FRED `VIXCLS` 폴백) 추가, `collectors/macro.py` `US_INDEX_SERIES`에 포함(일 배치가 수집). `test_us_indices_client.py` 키 집합·VIXCLS 단언 갱신.
+- 백필: 2025-11-01~2026-11-20 267행을 `macro_series(series='us_vix')`에 upsert(일회성 스크립트, 저장소에 두지 않음). 최신 2026-11-20 = 35.89.
+- 프론트: `constants.js` `VIX_SERIES`(US_INDEX_SERIES와 분리 — 상승이 가격 상승이 아니라 방향색을 쓰지 않음), `DashboardPage.jsx` VIX 타일(`DiffArrow neutral` + 수준 단어 `<15 평온 / 15–25 보통 / 25–30 높음 / ≥30 공포`, 25 이상만 `--warn-text` 주황, 툴팁에 평가 요약), `index.css` `.kpi-sub-warn`, `MacroBriefingModal.jsx` VIX 행(등락률 무색), `MacroModal.jsx` VIX 라인차트 추가.
+
+**검증**: `test_us_indices_client.py` 8건 통과. API `/api/macro/series?ids=us_vix` 정상. `oxlint` 신규 오류 없음. 대시보드 타일 라이트/다크 × 390/1280px 스크린샷, 가로 오버플로 없음, 매크로 모달 VIX 차트·브리핑 모달 행 확인. worker 재시작함. 18:00 이후 정규 배치가 `us_vix`를 실제로 수집하는지는 아직 확인하지 못했다. 킬스위치 가드 자동매매 테스트는 실행하지 않았다.
+
+---
+
+### Phase 5.113 — 장중 외인 매도 일관성 (2026-11-21 사용자 요청)
+
+**배경(2026-11-21 분석)**: `intraday_sample`(`flow_{kospi|kosdaq}_{외국인|기관계}`, 장중 누적 순매수 백만원, 최근 7일 약 60초 간격·그 이전 15분 압축, 2026-07-23부터)로 "외인이 하루 종일 일정하게 파는 날"을 찾았다. 코스피 2026-07-23~11-20 82거래일 중 20일이 크기가 큰 일관 매도(final 하위 25%, 약 −2.4조 이하)였다. 그 20일 평균: 외국인 −3.60조, 비차익 프로그램 −2.56조(약 70%), 차익 ≈ 0, 외인 선물은 혼재(11일 매도/9일 매수), 개인 +3.12조, 공매도 비중 5.56%(비교 4.82%). 해석: 반대매매·공매도가 아니라 보유 주식을 같은 속도로 나눠 파는 바스켓(프로그램) 매도에 가깝다. 다음 코스피 거래일은 평균 −1.12%, 상승 40%(전체 −0.33%, 49%) — 표본이 작아 참고용. 장중 `futures_외국인` 시리즈는 공식 일별 선물 수급과 부호까지 어긋나 사용하지 않는다.
+
+**정의**: 10분 격자 리샘플(버킷 마지막 값), 선행 0 버킷 제거, 유효 버킷 6개 미만이면 판정 없음. `down_share` = 0이 아닌 변화 중 음수 비율, `rebound` = max(값 − 그때까지 최저). 일관 매도 = final < 0 and down_share ≥ 0.75 and rebound < 0.2·|final|, 일관 매수는 대칭(up_share ≥ 0.75, pullback < 0.2·final), 나머지 혼조.
+
+**구현**
+- `backend/app/quant/flow_consistency.py`(순수 함수): `analyze_curve`, `history_stats`(일관 매도일 수, final 하위 25% 경계, 큰 일관 매도일의 다음 거래일 평균·상승률, 전체 기준선), `percentile_rank`.
+- `GET /api/markets/flow/consistency`(`routers/markets.py`): 샘플이 있는 최신 거래일 곡선 분석 + 과거 전체 일별 통계(10분 메모리 캐시) + `program`(`macro_series` `prog_nonarb_*`/`prog_arb_*` 최신 값과 날짜, 일별 확정이라 하루 늦을 수 있음). 외부 호출 없음. 다음 거래일 등락은 `index_ohlcv` 종가 대비.
+- 프런트: `api.js` `fetchFlowConsistency`(정적 배포는 null), `components/dashboard/FlowConsistencyCard.jsx`, `DashboardPage.jsx`(기존 1분 티어 합류, 투자자별 수급 요약 아래), `index.css` `.fc-*`. 라벨은 굵기 강조, 일관 매도만 `--warn-text`, 금액 ▲▼만 방향색. 장 마감이면 "장 마감 · MM-DD 기준", 설명 토글에 정의·과거 통계·"참고용 — 매매 신호 아님".
+- 키움 `program_trading_by_date`(ka90010) 점검(코드·docstring만): 일자별 시계열(`cntr_tm` 시분초 항상 000000)이며 장중 당일 행이 잠정치로 오는지는 코드·문서 어디에도 기록돼 있지 않다. 지금은 18:00 배치가 확정치만 적재한다. 장중 시장 단위 차익/비차익 합계는 실호출로 확인해야 알 수 있어 이번에는 폴링을 추가하지 않았다.
+
+**검증(2026-11-21, 토요일 휴장)**: `test_flow_consistency.py` 10건·`test_flow_consistency_router.py` 1건(2099년 가짜 날짜 행으로 직선 매도 판정)·`test_intraday_accumulated_router.py` 통과. 11-20 응답이 분석 수치와 일치(코스피 큰 일관 매도 20일, 다음날 −1.12%·40%). 라이트/다크 × 390/1280 스크린샷, 가로 오버플로 없음. `oxlint` 신규 오류 없음.
+**미검증**: 장중 실시간 동작(분 단위로 라벨이 바뀌는 모습, 장 초반 0 구간)은 휴장일이라 확인하지 못했다.
+
+**한계**: 과거 7일 이전은 15분 압축 데이터라 10분 격자가 성기다. 큰 일관 매도 20일(코스닥은 6일)의 다음날 통계는 표본이 작아 우연과 구분되지 않는다. 장중엔 아직 하루가 끝나지 않아 라벨이 바뀔 수 있다.
+
+---
+
+### Phase 5.114 — 외국인 보유 비중 (2026-11-21 사용자 요청, 미완료: 소스 없음)
+
+**목표**: 코스피/코스닥 외국인 보유 비중(= Σ 보유수량×종가 / Σ 시가총액)과 최근 20거래일 외인 순매도의 보유액 대비 비율을 대시보드 타일로 보여준다.
+
+**결과: 구현하지 못했다.** pykrx(`get_exhaustion_rates_of_foreign_investment`, `get_market_cap`)는 `.env`에 `KRX_ID`/`KRX_PW`가 없어 로그인 세션 없이 호출돼 JSON 파싱 오류(KRX가 `LOGOUT` 응답)로 실패했다. data.krx.co.kr `getJsonData.cmd`를 `MDCSTAT03701`(외국인보유량)·`MDCSTAT01501`(시가총액)로 로그인 없이 직접 호출해도 Referer 2종 모두 HTTP 400 `LOGOUT`이었다(공매도 서브포털 `srtLoader`는 무로그인이지만 이 통계는 해당 없음). 숫자를 지어내지 않고 중단했다 — 컬렉터·테이블·타일·엔드포인트 필드를 추가하지 않았다.
+
+**재개 조건**: data.krx.co.kr 무료 회원 가입 후 `.env`에 `KRX_ID`/`KRX_PW` 추가(컨테이너 재생성 필요). 그러면 위 두 pykrx 호출로 구현 가능하다. `macro_series.series`가 VARCHAR(20)이라 계획했던 `foreign_hold_value_kospi`(24자) 등은 못 쓰고 `fhold_value_kospi`/`fhold_ratio_kospi`/`fhold_value_kosdaq`/`fhold_ratio_kosdaq`(17~18자)로 줄여야 한다. ETF/ETN·우선주 포함 여부는 분자·분모를 같은 범위로 맞춰야 하며 소스를 열어 본 뒤 확정한다.
+
+---
+
 ## 7. 리스크 / 미확정 사항
 
 | 항목 | 내용 | 대응 |

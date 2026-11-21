@@ -27,7 +27,8 @@ LOOKBACK_DAYS = 10
 OIL_SERIES = ("wti", "brent")
 
 # 전일 미국장 4대 지수(PLAN.md §5.8) — S&P500/나스닥/다우/필라델피아반도체(SOX).
-US_INDEX_SERIES = ("us_sp500", "us_nasdaq", "us_dow", "us_sox")
+# VIX(us_vix)는 Phase 5.112에서 참고용 표시 전용으로 함께 수집한다(신호 로직 미연결).
+US_INDEX_SERIES = ("us_sp500", "us_nasdaq", "us_dow", "us_sox", "us_vix")
 
 
 async def upsert_series_rows(session: AsyncSession, rows: list[dict], series: str) -> int:

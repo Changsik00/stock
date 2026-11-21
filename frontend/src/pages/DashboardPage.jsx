@@ -9,6 +9,7 @@ import {
   fetchBreadthLive,
   fetchDerivativeFlow,
   fetchEtfWeightChanges,
+  fetchFlowConsistency,
   fetchFlowLive,
   fetchFlowPath,
   fetchFlowRank,
@@ -36,6 +37,7 @@ import Modal from '../components/Modal'
 import RiskAlertBanner from '../components/RiskAlertBanner'
 import PremarketOutlookCard from '../components/dashboard/PremarketOutlookCard'
 import VolRegimeCard from '../components/dashboard/VolRegimeCard'
+import FlowConsistencyCard from '../components/dashboard/FlowConsistencyCard'
 import MetricTile, { heroEok } from '../components/dashboard/MetricTile'
 import StockDetailModal from '../components/StockDetailModal'
 import StockHeatmap from '../components/StockHeatmap'
@@ -47,6 +49,7 @@ import {
   MARKETS,
   MARKET_FUND_IDS,
   US_INDEX_SERIES,
+  VIX_SERIES,
 } from '../constants'
 import { formatDate, signedEokJoLabel } from '../format'
 import {
@@ -177,6 +180,14 @@ const SECTOR_ROTATION_MARKET_OPTIONS = [
 // EOD(FLOW_RANK_LOOKBACK_DAYS 기준) 그대로 유지.
 const EXTRA_LIVE_POLL_MS = 420_000
 
+// VIX 수준 단어(Phase 5.112, 참고용): <15 평온 / 15–25 보통 / 25–30 높음 / ≥30 공포
+function vixLevelWord(v) {
+  if (v < 15) return '평온'
+  if (v < 25) return '보통'
+  if (v < 30) return '높음'
+  return '공포'
+}
+
 export default function DashboardPage() {
   // 지수 3종(코스피/코스닥/선물) — 타일 표시용 + 캔들 모달 기본 데이터를 겸한다.
   const [marketData, setMarketData] = useState({})
@@ -195,6 +206,8 @@ export default function DashboardPage() {
   // 실패)이라 아래 투자자별 수급 요약 타일은 항상 기존 확정치(flowInvestorSummary)로
   // 폴백한다. 정적 배포(STATIC_DATA)에서는 이 state가 항상 null로 남아 기존 동작 그대로다.
   const [flowLive, setFlowLive] = useState(null)
+  // 장중 외인 매도 일관성(PLAN.md Phase 5.113) — 1분 티어에 합류, 실패 시 마지막 값 유지.
+  const [flowConsistency, setFlowConsistency] = useState(null)
 
   const [fundSeries, setFundSeries] = useState({})
   // 시장 전체 공매도(코스피/코스닥, PLAN.md §5.32) — KOFIA 대차잔고(fundSeries의
@@ -413,6 +426,14 @@ export default function DashboardPage() {
         })
     }
 
+    function loadFlowConsistency() {
+      return fetchFlowConsistency()
+        .then((body) => {
+          if (!cancelled) setFlowConsistency(body)
+        })
+        .catch(() => {}) // 실패 시 마지막 값 유지
+    }
+
     function loadAttentionTop() {
       return fetchAttention()
         .then((body) => {
@@ -530,6 +551,7 @@ export default function DashboardPage() {
       if (!STATIC_DATA) {
         tasks.push(
           loadFlowLive(),
+          loadFlowConsistency(),
           loadAttentionTop(),
           loadScalpCandidates(),
           loadIndexTilesLive(),
@@ -594,7 +616,7 @@ export default function DashboardPage() {
   useEffect(() => {
     let cancelled = false
     fetchMacroSeries(
-      [...MACRO_SERIES.map((s) => s.id), ...US_INDEX_SERIES.map((s) => s.id)],
+      [...MACRO_SERIES.map((s) => s.id), ...US_INDEX_SERIES.map((s) => s.id), VIX_SERIES.id],
       MACRO_TILE_DAYS
     )
       .then((body) => {
@@ -1386,6 +1408,9 @@ export default function DashboardPage() {
         })}
       </div>
 
+      {/* 2.2 외인 매도 일관성(PLAN.md Phase 5.113) — 참고용, 정적 배포에서는 숨김 */}
+      {!STATIC_DATA && <FlowConsistencyCard data={flowConsistency} loading={flowConsistency === null && marketLoading} />}
+
       {/* 2.5 외인 양손 · 현선물 (PLAN.md §4.5-5) — 중립적 상태 계기판, "함정" 단정 표현
           금지(§4.5 배경). 시그널 배지는 있을 때만 렌더되고, 클릭하면 전부 같은 상세
           모달(ForeignPositionModal — 현물/선물 시계열 + 베이시스 오버레이)을 연다. */}
@@ -1822,6 +1847,32 @@ export default function DashboardPage() {
             onClick={() => setModal({ type: 'macro', title: '환율 · 유가 · 전일 미국장' })}
           />
         ))}
+        {/* VIX(공포 지수, Phase 5.112) — 참고용. 상승이 가격 상승이 아니므로 neutral(방향색 없음),
+            25 이상일 때만 수준 단어를 경고색(주황)으로 표시한다. 신호·자동매매와 무관. */}
+        <KpiTile
+          label={VIX_SERIES.label}
+          value={macroLatest(VIX_SERIES.id) != null ? macroLatest(VIX_SERIES.id).toFixed(2) : '-'}
+          sub={
+            <>
+              <DiffArrow
+                current={macroLatest(VIX_SERIES.id)}
+                prev={macroPrev(VIX_SERIES.id)}
+                formatter={(v) => v.toFixed(2)}
+                neutral
+              />
+              {macroLatest(VIX_SERIES.id) != null && (
+                <span className={macroLatest(VIX_SERIES.id) >= 25 ? 'kpi-sub-warn' : undefined}>
+                  {vixLevelWord(macroLatest(VIX_SERIES.id))}
+                </span>
+              )}
+              <StaleDate date={macroDate(VIX_SERIES.id)} baseDate={baseDate} prefix=" · " />
+            </>
+          }
+          title={`S&P500 옵션 기반 30일 기대 변동성(전일 미국장 종가). 참고용 — 방향 신호 아님. 2023-07~2026-11 점검: 다음 날 코스피 방향과 무관, 25 이상이면 장중 시가 대비 −1.5% 이하 터치 비율 약 31%(15 미만 8%).${
+            macroDate(VIX_SERIES.id) ? ` (${formatDate(macroDate(VIX_SERIES.id))})` : ''
+          }`}
+          onClick={() => setModal({ type: 'macro', title: '환율 · 유가 · 전일 미국장' })}
+        />
       </div>
 
       {/* 4. 컴팩트 트리맵 */}

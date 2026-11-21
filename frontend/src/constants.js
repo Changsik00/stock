@@ -56,6 +56,10 @@ export const US_INDEX_SERIES = [
   { id: 'us_sox', label: 'SOX(필라델피아반도체)', unit: 'pt' },
 ]
 
+// VIX(공포 지수, Phase 5.112) — 참고용 전용. 상승이 "가격 상승(빨강)"이 아니므로
+// 방향색(--up/--down)을 쓰지 않아 US_INDEX_SERIES와 분리했다. macro_series 재사용.
+export const VIX_SERIES = { id: 'us_vix', label: 'VIX', unit: 'pt' }
+
 // 시장 자금·대차 보조 차트 (PLAN.md §3.5/§6 1.5-4) — kofia freesis 적재, macro_series
 // 재사용. 값은 전부 백만원 단위로 DB에 있어 화면에서는 조원으로 환산(§3.5: 1조원 =
 // 1,000,000백만원)해 표시한다. 신용융자는 코스피/코스닥 두 라인을 한 차트에 겹친다.

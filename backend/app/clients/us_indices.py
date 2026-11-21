@@ -13,6 +13,9 @@ yfinance 1차, 실패 시(429 등) FRED CSV로 자동 폴백한다 — ``commodi
 FRED 무료 대체 시리즈가 있는 건 S&P500(``SP500``)·나스닥(``NASDAQCOM``)뿐이고,
 다우·SOX는 FRED에 무료 시리즈가 없다(``SYMBOLS[...]["fred"] is None``) — 이
 경우 yfinance가 실패하면 폴백 없이 그대로 예외를 전파한다(§7 리스크 표 참고).
+
+**Phase 5.112**: VIX(``us_vix``, ``^VIX``/FRED ``VIXCLS``)를 참고용 표시 전용으로 추가했다.
+어떤 신호·자동매매 로직에도 연결하지 않는다.
 """
 
 from __future__ import annotations
@@ -29,6 +32,8 @@ SYMBOLS = {
     "us_nasdaq": {"yfinance": "^IXIC", "fred": "NASDAQCOM"},
     "us_dow": {"yfinance": "^DJI", "fred": None},
     "us_sox": {"yfinance": "^SOX", "fred": None},
+    # VIX(공포 지수) — 참고용 표시 전용(Phase 5.112). FRED VIXCLS 일별 종가로 폴백 가능.
+    "us_vix": {"yfinance": "^VIX", "fred": "VIXCLS"},
 }
 
 # 나스닥선물(NQ=F) 심볼 — 준실시간 인트라데이 전용(아래 fetch_nasdaq_futures_intraday).

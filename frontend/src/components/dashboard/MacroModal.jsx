@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { fetchMacroSeries } from '../../api'
 import MacroChart from '../MacroChart'
 import PeriodPicker from '../PeriodPicker'
-import { MACRO_SERIES, US_INDEX_SERIES } from '../../constants'
+import { MACRO_SERIES, US_INDEX_SERIES, VIX_SERIES } from '../../constants'
 
 // 매크로(환율/유가) 모달 차트 기본 기간 — 옛 MacroPage.jsx와 동일하게 1Y로 시작한다
 // (환율/유가는 자금 지표보다 변동 주기가 길어 1년 창이 자연스럽다는 기존 판단 유지).
@@ -19,7 +19,7 @@ export default function MacroModal() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
-  const allIds = [...MACRO_SERIES.map((s) => s.id), ...US_INDEX_SERIES.map((s) => s.id)]
+  const allIds = [...MACRO_SERIES.map((s) => s.id), ...US_INDEX_SERIES.map((s) => s.id), VIX_SERIES.id]
 
   useEffect(() => {
     let cancelled = false
@@ -60,6 +60,8 @@ export default function MacroModal() {
             {US_INDEX_SERIES.map((s) => (
               <MacroChart key={s.id} label={s.label} unit={s.unit} points={seriesMap[s.id] || []} />
             ))}
+            {/* VIX(Phase 5.112, 참고용) */}
+            <MacroChart label={VIX_SERIES.label} unit={VIX_SERIES.unit} points={seriesMap[VIX_SERIES.id] || []} />
           </div>
         </>
       )}

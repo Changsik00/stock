@@ -112,6 +112,7 @@ from ..market_hours import (
 from ..models import (
     IndexIntradayBar,
     IndexOhlcv,
+    IntradaySample,
     MacroSeries,
     MarketBreadth,
     MarketFlow,
@@ -122,6 +123,7 @@ from ..models import (
 )
 from ..quant import (
     flow_acceleration,
+    flow_consistency,
     positioning_backtest,
     regime_backtest,
     risk_alert,
@@ -1473,6 +1475,157 @@ async def flow_intraday_accumulated(
     아니라 호출 시점 기준으로 새로 계산한다.
     """
     return await intraday_snapshot.get_flow_series(session, days)
+
+
+# PLAN.md Phase 5.113 — 장중 외인 매도 일관성. 과거 일별 분석(곡선 전체 재계산)은
+# 무거우므로 10분 메모리 캐시, 오늘 곡선만 매 요청 새로 읽는다(DB 조회만, 외부 호출 없음).
+_CONSISTENCY_HISTORY_TTL_SECONDS = 600
+_consistency_history_cache: dict[str, object] = {"ts": 0.0, "date": None, "data": None}
+_CONSISTENCY_MARKETS = ("kospi", "kosdaq")
+_CONSISTENCY_INVESTORS = ("외국인", "기관계")
+
+
+def _consistency_series_keys() -> list[str]:
+    return [f"flow_{m}_{i}" for m in _CONSISTENCY_MARKETS for i in _CONSISTENCY_INVESTORS]
+
+
+def _group_curves(rows) -> dict[tuple[str, str], dict[dt.date, list[tuple[dt.datetime, float]]]]:
+    """(series_key, time, value) 행들 -> {(시장, 투자자): {KST 날짜: [(KST 시각, 값)]}}."""
+    out: dict[tuple[str, str], dict[dt.date, list[tuple[dt.datetime, float]]]] = {}
+    for series_key, time, value in rows:
+        market, investor = series_key[len("flow_") :].split("_", 1)
+        local = time.astimezone(KST)
+        out.setdefault((market, investor), {}).setdefault(local.date(), []).append((local, float(value)))
+    return out
+
+
+async def _consistency_history(session: AsyncSession, today: dt.date) -> dict:
+    """today 이전 모든 날의 일별 분석 + 일관 매도 통계(시장별). 10분 캐시."""
+    now = time.monotonic()
+    if (
+        _consistency_history_cache["data"] is not None
+        and _consistency_history_cache["date"] == today
+        and (now - _consistency_history_cache["ts"]) < _CONSISTENCY_HISTORY_TTL_SECONDS
+    ):
+        return _consistency_history_cache["data"]  # type: ignore[return-value]
+
+    day_start = dt.datetime.combine(today, dt.time.min, tzinfo=KST)
+    rows = (
+        await session.execute(
+            select(IntradaySample.series_key, IntradaySample.time, IntradaySample.value)
+            .where(IntradaySample.series_key.in_(_consistency_series_keys()), IntradaySample.time < day_start)
+            .order_by(IntradaySample.time)
+        )
+    ).all()
+    curves = _group_curves(rows)
+
+    analyses: dict[tuple[str, str], dict[dt.date, dict]] = {}
+    for key, by_day in curves.items():
+        per_day = {}
+        for day, pts in by_day.items():
+            a = flow_consistency.analyze_curve(pts)
+            if a is not None:
+                per_day[day] = a
+        analyses[key] = per_day
+
+    stats: dict[str, dict] = {}
+    for market in _CONSISTENCY_MARKETS:
+        closes = (
+            await session.execute(
+                select(IndexOhlcv.date, IndexOhlcv.close)
+                .where(IndexOhlcv.market == market, IndexOhlcv.close.is_not(None))
+                .order_by(IndexOhlcv.date)
+            )
+        ).all()
+        next_changes: dict[dt.date, float] = {}
+        for (d0, c0), (_d1, c1) in zip(closes, closes[1:]):
+            if c0:
+                next_changes[d0] = (float(c1) / float(c0) - 1) * 100
+        stats[market] = flow_consistency.history_stats(analyses.get((market, "외국인"), {}), next_changes)
+
+    data = {
+        "stats": stats,
+        # 오늘 값의 크기 백분위 계산용: 시장·투자자별 과거 final 목록
+        "finals": {key: [a["final"] for a in per_day.values()] for key, per_day in analyses.items()},
+    }
+    _consistency_history_cache.update({"ts": now, "date": today, "data": data})
+    return data
+
+
+@router.get("/api/markets/flow/consistency")
+async def flow_consistency_endpoint(session: AsyncSession = Depends(get_session)):
+    """장중 외국인·기관계 누적 순매수 곡선의 "일관성" 지표(PLAN.md Phase 5.113).
+
+    ``intraday_sample``(위 intraday-accumulated와 같은 소스, 새 외부 호출 없음)의
+    최신 거래일 곡선을 10분 격자로 분석해 ``일관 매도``/``혼조``/``일관 매수``로
+    분류한다(정의는 quant/flow_consistency.py). 외인이 하루 종일 일정한 속도로
+    파는 날(분할·바스켓 매도 성격)을 알아보기 위한 참고 지표이며 매매 신호가 아니다.
+
+    Returns ``{date, market_closed, as_of, markets: {kospi: {외국인: {...analysis,
+    size_percentile}, 기관계: {...}}, kosdaq}, history: {kospi: {...stats}, kosdaq},
+    program: {kospi: {date, non_arb, arb}, kosdaq}}``. 금액은 백만원. ``size_percentile``
+    은 오늘 final이 과거 final들 중 몇 % 이하인지(낮을수록 과거 대비 큰 순매도).
+    ``program``은 일별 확정(EOD) 값이라 하루 늦을 수 있어 자체 date를 갖는다.
+    샘플이 하나도 없으면 ``date``가 None이고 markets는 빈 dict.
+    """
+    keys = _consistency_series_keys()
+    latest = (
+        await session.execute(select(func.max(IntradaySample.time)).where(IntradaySample.series_key.in_(keys)))
+    ).scalar_one_or_none()
+    if latest is None:
+        return {"date": None, "market_closed": _market_closed_kst(kst_now()), "as_of": None,
+                "markets": {}, "history": {}, "program": {}}
+
+    latest_local = latest.astimezone(KST)
+    today = latest_local.date()
+    day_start = dt.datetime.combine(today, dt.time.min, tzinfo=KST)
+    rows = (
+        await session.execute(
+            select(IntradaySample.series_key, IntradaySample.time, IntradaySample.value)
+            .where(IntradaySample.series_key.in_(keys), IntradaySample.time >= day_start)
+            .order_by(IntradaySample.time)
+        )
+    ).all()
+    curves = _group_curves(rows)
+    history = await _consistency_history(session, today)
+
+    markets: dict[str, dict] = {}
+    for market in _CONSISTENCY_MARKETS:
+        markets[market] = {}
+        for investor in _CONSISTENCY_INVESTORS:
+            pts = curves.get((market, investor), {}).get(today, [])
+            analysis = flow_consistency.analyze_curve(pts)
+            if analysis is not None:
+                analysis["size_percentile"] = flow_consistency.percentile_rank(
+                    analysis["final"], history["finals"].get((market, investor), [])
+                )
+            markets[market][investor] = analysis
+
+    program: dict[str, dict] = {}
+    for market in _CONSISTENCY_MARKETS:
+        entry: dict[str, object] = {"date": None, "non_arb": None, "arb": None}
+        for field, series in (("non_arb", f"prog_nonarb_{market}"), ("arb", f"prog_arb_{market}")):
+            row = (
+                await session.execute(
+                    select(MacroSeries.date, MacroSeries.value)
+                    .where(MacroSeries.series == series, MacroSeries.value.is_not(None))
+                    .order_by(MacroSeries.date.desc())
+                    .limit(1)
+                )
+            ).first()
+            if row is not None:
+                entry[field] = float(row[1])
+                entry["date"] = row[0].isoformat() if entry["date"] is None else max(entry["date"], row[0].isoformat())
+        program[market] = entry
+
+    return {
+        "date": today.isoformat(),
+        "market_closed": _market_closed_kst(kst_now()),
+        "as_of": latest_local.strftime("%H:%M"),
+        "markets": markets,
+        "history": history["stats"],
+        "program": program,
+    }
 
 
 @router.get("/api/markets/foreign-position/intraday-accumulated")

@@ -98,7 +98,9 @@ def test_fetch_us_index_series_unknown_series_raises_value_error():
 
 
 def test_symbols_cover_expected_four_series():
-    assert set(us_indices.SYMBOLS) == {"us_sp500", "us_nasdaq", "us_dow", "us_sox"}
+    assert set(us_indices.SYMBOLS) == {"us_sp500", "us_nasdaq", "us_dow", "us_sox", "us_vix"}
+    assert us_indices.SYMBOLS["us_vix"]["yfinance"] == "^VIX"
+    assert us_indices.SYMBOLS["us_vix"]["fred"] == "VIXCLS"
     assert us_indices.SYMBOLS["us_dow"]["fred"] is None
     assert us_indices.SYMBOLS["us_sox"]["fred"] is None
     assert us_indices.SYMBOLS["us_sp500"]["fred"] == "SP500"

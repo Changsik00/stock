@@ -18,7 +18,7 @@ import { rateClass, rateLabel } from './shared'
 // 구획은 그대로 표시한다. **house rule(§5): 숫자만 관찰 서술하고
 // "강함/약함"·매매 판단은 이 컴포넌트의 어떤 텍스트에도 쓰지 않는다** —
 // 종합 판단은 사용자 몫.
-const MACRO_SERIES_IDS = ['usdkrw', 'wti', 'brent', 'us_sp500', 'us_nasdaq', 'us_dow', 'us_sox']
+const MACRO_SERIES_IDS = ['usdkrw', 'wti', 'brent', 'us_sp500', 'us_nasdaq', 'us_dow', 'us_sox', 'us_vix']
 
 const MACRO_ROWS = [
   { id: 'usdkrw', label: '원/달러 환율(USD/KRW)', unit: '원', fmt: (v) => v.toFixed(1) },
@@ -32,6 +32,9 @@ const US_INDEX_ROWS = [
   { id: 'us_dow', label: '다우존스', fmt: (v) => v.toFixed(2) },
   { id: 'us_sox', label: 'SOX(필라델피아반도체)', fmt: (v) => v.toFixed(2) },
 ]
+
+// VIX(Phase 5.112) — 참고용. 상승이 가격 상승이 아니라 등락률에 방향색을 쓰지 않는다.
+const VIX_ROW = { id: 'us_vix', label: 'VIX(공포 지수)', fmt: (v) => v.toFixed(2) }
 
 // macro_series 한 시리즈에서 최신값/전일값/등락률을 뽑는다(HynixPositioningModal.jsx의
 // SOX 계산부와 동일한 방식 — 여러 시리즈에 반복 적용하려고 헬퍼로 뺐다).
@@ -122,6 +125,16 @@ export default function MacroBriefingModal() {
               </div>
             )
           })}
+        {macroResult.status === 'fulfilled' &&
+          (() => {
+            const { latest, changeRate } = latestWithChange(seriesMap, VIX_ROW.id)
+            return (
+              <div style={{ marginTop: 4 }}>
+                {VIX_ROW.label}(전일 마감) {latest?.value != null ? VIX_ROW.fmt(latest.value) : '-'}
+                {changeRate != null && <span className="toggle-hint"> ({rateLabel(changeRate)})</span>}
+              </div>
+            )
+          })()}
         {nasdaqResult.status === 'rejected' && (
           <div className="state error" style={{ marginTop: 4 }}>
             {nasdaqResult.reason?.message || '나스닥선물을 불러오지 못했습니다.'}
