@@ -2356,3 +2356,8 @@ header h1 {
 .fc-list > div { display: flex; justify-content: space-between; gap: var(--sp-3); }
 .fc-list dt { color: var(--text-secondary); }
 .fc-list dd { margin: 0; text-align: right; }
+
+/* 코스피–나스닥 선물 동조도 카드(PLAN.md Phase 5.116) — .vr-card/.fc-list 골격 재사용, 라벨·상관은 중립 */
+.nc-card .vr-panel { width: 100%; }
+.nc-split { padding-top: var(--sp-2); border-top: 1px solid var(--border); }
+.nc-split dt { min-width: 0; }

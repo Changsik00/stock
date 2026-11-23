@@ -43,3 +43,25 @@ def test_closed_just_before_midnight_on_sunday_not_treated_as_open():
     # early-morning hours as open.
     sunday_early_morning = dt.datetime(2026, 7, 19, 1, 0, tzinfo=KST)
     assert is_market_closed(sunday_early_morning) is True
+
+
+def test_futures_session_window():
+    from app.market_hours import is_futures_session
+
+    d = dt.date(2026, 11, 23)  # 월요일
+    at = lambda h, m: dt.datetime(d.year, d.month, d.day, h, m, tzinfo=KST)  # noqa: E731
+    assert is_futures_session(at(8, 44)) is False
+    assert is_futures_session(at(8, 45)) is True
+    assert is_futures_session(at(15, 40)) is True  # 현물 마감 후에도 선물은 진행
+    assert is_futures_session(at(15, 46)) is True
+    assert is_futures_session(at(15, 47)) is False
+    assert is_market_closed(at(15, 40)) is True  # 기존 동작 불변
+
+
+def test_futures_session_weekend_and_holiday_closed():
+    from app.market_hours import is_futures_session
+
+    sat = dt.datetime(2026, 11, 21, 10, 0, tzinfo=KST)
+    newyear = dt.datetime(2026, 1, 1, 10, 0, tzinfo=KST)
+    assert is_futures_session(sat) is False
+    assert is_futures_session(newyear) is False

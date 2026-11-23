@@ -10,6 +10,7 @@ import {
   fetchDerivativeFlow,
   fetchEtfWeightChanges,
   fetchFlowConsistency,
+  fetchNqComovement,
   fetchFlowLive,
   fetchFlowPath,
   fetchFlowRank,
@@ -38,6 +39,7 @@ import RiskAlertBanner from '../components/RiskAlertBanner'
 import PremarketOutlookCard from '../components/dashboard/PremarketOutlookCard'
 import VolRegimeCard from '../components/dashboard/VolRegimeCard'
 import FlowConsistencyCard from '../components/dashboard/FlowConsistencyCard'
+import NqComovementCard from '../components/dashboard/NqComovementCard'
 import MetricTile, { heroEok } from '../components/dashboard/MetricTile'
 import StockDetailModal from '../components/StockDetailModal'
 import StockHeatmap from '../components/StockHeatmap'
@@ -208,6 +210,7 @@ export default function DashboardPage() {
   const [flowLive, setFlowLive] = useState(null)
   // 장중 외인 매도 일관성(PLAN.md Phase 5.113) — 1분 티어에 합류, 실패 시 마지막 값 유지.
   const [flowConsistency, setFlowConsistency] = useState(null)
+  const [nqComovement, setNqComovement] = useState(null)
 
   const [fundSeries, setFundSeries] = useState({})
   // 시장 전체 공매도(코스피/코스닥, PLAN.md §5.32) — KOFIA 대차잔고(fundSeries의
@@ -434,6 +437,14 @@ export default function DashboardPage() {
         .catch(() => {}) // 실패 시 마지막 값 유지
     }
 
+    function loadNqComovement() {
+      return fetchNqComovement()
+        .then((body) => {
+          if (!cancelled) setNqComovement(body)
+        })
+        .catch(() => {}) // 실패 시 마지막 값 유지
+    }
+
     function loadAttentionTop() {
       return fetchAttention()
         .then((body) => {
@@ -552,6 +563,7 @@ export default function DashboardPage() {
         tasks.push(
           loadFlowLive(),
           loadFlowConsistency(),
+          loadNqComovement(),
           loadAttentionTop(),
           loadScalpCandidates(),
           loadIndexTilesLive(),
@@ -1410,6 +1422,9 @@ export default function DashboardPage() {
 
       {/* 2.2 외인 매도 일관성(PLAN.md Phase 5.113) — 참고용, 정적 배포에서는 숨김 */}
       {!STATIC_DATA && <FlowConsistencyCard data={flowConsistency} loading={flowConsistency === null && marketLoading} />}
+
+      {/* 2.3 코스피–나스닥 선물 동조도(PLAN.md Phase 5.116) — 참고용, 정적 배포에서는 숨김 */}
+      {!STATIC_DATA && <NqComovementCard data={nqComovement} loading={nqComovement === null && marketLoading} />}
 
       {/* 2.5 외인 양손 · 현선물 (PLAN.md §4.5-5) — 중립적 상태 계기판, "함정" 단정 표현
           금지(§4.5 배경). 시그널 배지는 있을 때만 렌더되고, 클릭하면 전부 같은 상세
