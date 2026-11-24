@@ -5618,6 +5618,11 @@ Phase 5.104의 연속. "외인 양손 · 현선물" 섹션의 외인 현물·베
 - 테스트: market_hours/intraday_snapshot/futures_flow collector·live router 단위테스트 추가·수정. 관련 파일 116 passed, 실패 1(`test_basis_live_market_closed_no_cache_history_field_present`는 변경 전에도 실패하던 기존 건), 다중 파일 동시 실행 시 이벤트 루프 ERROR 1건(단독 실행은 통과).
 - **미검증**: 15:30~15:45 실제 적재(당일 장 종료 후 구현), 08:45~09:00 네이버 값 갱신 여부, 첫 reconcile 메시지 출력. 내일 장 후 확인 필요.
 
+**후속 (2026-11-24)**
+- 08:45~09:00 확인 결과: 네이버 `FUT/trend`가 09:04까지 계속 전부 0을 줬다(backend 로그 `all-zero response`). 그래서 첫 `futures_외국인` 샘플은 09:05:56이다. 우리 코드가 아니라 소스 한계다. 08:45~09:05 선물 수급은 이 소스로는 볼 수 없다.
+- 샘플링 창 끝을 15:47 → **16:15**로 늘렸다. 근거는 `market_hours.py` CLOSE_CONFIRM 주석의 실측이다: 마감 후 네이버 값이 15:47 → 15:55 → 16:05에 계단식으로 바뀌고 16:10쯤 굳는다. 15:47에 끊으면 마지막 변화를 놓친다. `test_market_hours`·`test_intraday_snapshot`·`test_futures_flow_live_router` 경계 시각 갱신, 62건 통과.
+- 같이 고친 별건 버그(`collectors/live_refresh._run_stock_flow_scan`): `stocks` 마스터에 없는 종목(신규 상장 등, 2026-11-24 로그에 8종목)이 `stock_flow` FK 위반을 냈다. 하나의 세션 트랜잭션이 aborted되면서 뒤 종목이 전부 `InFailedSQLTransactionError`로 실패했다(3시간 948건). 종목마다 SAVEPOINT(`session.begin_nested()`)를 두고, upsert 전에 랭킹 행의 이름/시장으로 `_ensure_stock_master_stub`을 호출하게 했다. 회귀 테스트 `test_scan_stubs_missing_master_and_db_error_does_not_poison_session` 추가, `test_stock_flow_scan.py` 4건 통과.
+
 ---
 
 ### Phase 5.116 — 코스피·나스닥 선물 장중 동조도 카드 (2026-11-23 사용자 요청)

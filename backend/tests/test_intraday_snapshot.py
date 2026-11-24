@@ -226,7 +226,7 @@ async def test_record_futures_flow_snapshot_after_spot_close_still_writes(monkey
 
 
 async def test_record_futures_flow_snapshot_outside_futures_window_writes_nothing(monkeypatch):
-    for hm in [(8, 44), (15, 47), (18, 0)]:
+    for hm in [(8, 44), (16, 15), (18, 0)]:
         monkeypatch.setattr(snap, "_now_kst", lambda hm=hm: _kst(*hm))
         async with async_session_factory() as session:
             await snap.record_futures_flow_snapshot(session, _futures_payload(456, market_closed=True))

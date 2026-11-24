@@ -1008,7 +1008,7 @@ async def _warm_futures_flow_live() -> dict:
         fetched_at = _futures_flow_live_cache.get("fetched_at")
         now_kst = kst_now()
         closed = _market_closed_kst(now_kst)
-        # Phase 5.115: 선물 거래창(08:45~15:47)엔 현물이 닫혀 있어도(15:30~15:47, 08:45~09:00)
+        # Phase 5.115: 선물 샘플링 창(08:45~16:15)엔 현물이 닫혀 있어도(15:30~16:15, 08:45~09:00)
         # 장중과 같이 60초 TTL로 재조회하고 18:05 확정 캐시 재사용도 건너뛴다. payload의
         # market_closed 의미(현물 정규장 기준)는 그대로 둔다.
         futures_live = _futures_session_kst(now_kst)

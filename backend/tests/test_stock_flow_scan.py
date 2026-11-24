@@ -216,3 +216,42 @@ async def test_scan_continues_after_one_code_fails(monkeypatch, seeded_stocks):
             await session.execute(select(StockFlow).where(StockFlow.code == TEST_CODE_A))
         ).scalars().all()
     assert rows_a == []
+
+
+async def test_scan_stubs_missing_master_and_db_error_does_not_poison_session(monkeypatch):
+    """2026-11-24 회귀: stocks에 없는 종목(신규 상장 등)이 FK 위반을 내 세션 트랜잭션 전체가
+    aborted되고 뒤 종목이 전부 InFailedSQLTransactionError로 실패하던 버그.
+    - 마스터에 없는 종목은 랭킹 행 힌트로 stub을 만들고 저장돼야 한다.
+    - 한 종목의 DB 오류는 그 종목 SAVEPOINT만 롤백하고 다음 종목은 저장돼야 한다."""
+    await _clear_test_rows()  # 두 종목 모두 stocks에 없는 상태로 시작
+    monkeypatch.setattr(live_refresh, "is_nxt_closed", lambda now_kst: False)
+    monkeypatch.setattr(flow_rank_router, "_warm_value_rank_live", _fake_warm_value_rank_live)
+    monkeypatch.setattr(kiwoom_module, "KiwoomClient", _FakeKiwoomClient)
+
+    from app.routers import stocks as stocks_router
+
+    real_upsert = stocks_router._upsert_flow_rows
+
+    async def _failing_for_a(session, code, rows):
+        if code == TEST_CODE_A:
+            from sqlalchemy import text
+
+            await session.execute(text("select 1/0"))  # 실제 DB 오류로 트랜잭션 오염 재현
+        return await real_upsert(session, code, rows)
+
+    monkeypatch.setattr(stocks_router, "_upsert_flow_rows", _failing_for_a)
+    try:
+        await live_refresh._run_stock_flow_scan()
+        async with async_session_factory() as session:
+            stub_b = await session.get(Stock, TEST_CODE_B)
+            rows_b = (
+                await session.execute(select(StockFlow).where(StockFlow.code == TEST_CODE_B))
+            ).scalars().all()
+            rows_a = (
+                await session.execute(select(StockFlow).where(StockFlow.code == TEST_CODE_A))
+            ).scalars().all()
+        assert stub_b is not None
+        assert len(rows_b) > 0
+        assert rows_a == []
+    finally:
+        await _clear_test_rows()

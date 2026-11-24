@@ -383,11 +383,14 @@ async def _run_stock_flow_scan() -> None:
     from ..routers import stocks as stocks_router
 
     value_payload = await flow_rank_router._warm_value_rank_live()
-    codes = [
-        row["code"]
+    # 2026-11-24 수정: 신규 상장 등 stocks 마스터에 아직 없는 종목은 stock_flow FK 위반이
+    # 나므로, 랭킹 행의 이름/시장을 힌트로 stub을 먼저 만든다(_ensure_stock_master_stub).
+    candidates = [
+        row
         for row in (value_payload.get("rows") or [])
         if row.get("code") and not row.get("is_etf")
     ]
+    codes = [row["code"] for row in candidates]
     if not codes:
         logger.debug("stock-flow-scan: 후보군이 비어 있어 건너뜀 (%s KST)", now_kst.isoformat())
         return
@@ -401,12 +404,20 @@ async def _run_stock_flow_scan() -> None:
     try:
         async with KiwoomClient() as client:
             async with async_session_factory() as session:
-                for code in codes:
+                for cand in candidates:
+                    code = cand["code"]
                     try:
                         data, _headers = await client.stock_investor_daily(code)
                         rows = stocks_router._parse_ka10059_rows(data)
                         rows = [r for r in rows if r["date"] >= cutoff]
-                        await stocks_router._upsert_flow_rows(session, code, rows)
+                        # 2026-11-24 수정: 종목마다 SAVEPOINT를 둔다. 예전엔 한 종목의 DB 오류(FK 위반)가
+                        # 세션 트랜잭션 전체를 aborted로 만들어 뒤 종목이 전부 InFailedSQLTransactionError로
+                        # 실패했다(3시간 948건 실측). 이제 실패한 종목만 롤백된다.
+                        async with session.begin_nested():
+                            await stocks_router._ensure_stock_master_stub(
+                                session, code, cand.get("name"), cand.get("market"), False
+                            )
+                            await stocks_router._upsert_flow_rows(session, code, rows)
                         success += 1
                     except Exception as e:  # noqa: BLE001 - 종목 하나 실패가 나머지를 막지 않도록
                         logger.warning("stock-flow-scan: %s 조회/upsert 실패: %s", code, e)

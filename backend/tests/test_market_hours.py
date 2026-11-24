@@ -53,8 +53,8 @@ def test_futures_session_window():
     assert is_futures_session(at(8, 44)) is False
     assert is_futures_session(at(8, 45)) is True
     assert is_futures_session(at(15, 40)) is True  # 현물 마감 후에도 선물은 진행
-    assert is_futures_session(at(15, 46)) is True
-    assert is_futures_session(at(15, 47)) is False
+    assert is_futures_session(at(16, 14)) is True
+    assert is_futures_session(at(16, 15)) is False
     assert is_market_closed(at(15, 40)) is True  # 기존 동작 불변
 
 
