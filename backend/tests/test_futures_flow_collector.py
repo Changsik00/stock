@@ -47,7 +47,9 @@ async def test_collect_upserts_3_investor_rows(monkeypatch):
     rows_written = await futures_flow.collect(session, DATE)
 
     assert rows_written == 3
-    assert len(session.executed) == 3
+    # 4번째는 Phase 5.115 대조용 select(FakeSession은 결과를 못 돌려줘 무시된다)
+    assert len([e for e in session.executed if hasattr(e, 'table')]) == 3
+    session.executed = session.executed[:3]
 
     params = [stmt.compile().params for stmt in session.executed]
     for p in params:
@@ -70,3 +72,24 @@ async def test_collect_returns_0_when_source_has_no_data(monkeypatch):
 
     assert rows_written == 0
     assert session.executed == []
+
+
+async def test_build_reconcile_message_compares_last_and_pre1530_samples():
+    kst = dt.timezone(dt.timedelta(hours=9))
+
+    class _Res:
+        def all(self):
+            d = DATE
+            return [
+                (dt.datetime(d.year, d.month, d.day, 15, 29, tzinfo=kst), -75_700),
+                (dt.datetime(d.year, d.month, d.day, 15, 44, tzinfo=kst), 500_000),
+            ]
+
+    class _S:
+        async def execute(self, stmt):
+            return _Res()
+
+    msg = await futures_flow.build_reconcile_message(_S(), DATE, 585_800)
+    assert "마지막샘플(15:44)=+500,000" in msg and "차이=+85,800" in msg
+    assert "15:29이전(15:29)=-75,700" in msg and "차이=+661,500" in msg
+    assert await futures_flow.build_reconcile_message(_S(), DATE, None) is None

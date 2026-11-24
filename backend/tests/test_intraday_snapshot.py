@@ -215,10 +215,21 @@ async def test_record_futures_flow_snapshot_writes_foreign_net_value(monkeypatch
     assert rows[0].time == _kst(10, 7)
 
 
-async def test_record_futures_flow_snapshot_market_closed_writes_nothing(monkeypatch):
-    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(10, 7))
+async def test_record_futures_flow_snapshot_after_spot_close_still_writes(monkeypatch):
+    # Phase 5.115 — 현물 마감(market_closed=True) 후 15:40이어도 선물 창 안이면 적재한다.
+    monkeypatch.setattr(snap, "_now_kst", lambda: _kst(15, 40))
     async with async_session_factory() as session:
         await snap.record_futures_flow_snapshot(session, _futures_payload(456, market_closed=True))
+
+    rows = await _all_rows()
+    assert len(rows) == 1 and rows[0].time == _kst(15, 40)
+
+
+async def test_record_futures_flow_snapshot_outside_futures_window_writes_nothing(monkeypatch):
+    for hm in [(8, 44), (16, 15), (18, 0)]:
+        monkeypatch.setattr(snap, "_now_kst", lambda hm=hm: _kst(*hm))
+        async with async_session_factory() as session:
+            await snap.record_futures_flow_snapshot(session, _futures_payload(456, market_closed=True))
 
     assert await _all_rows() == []
 

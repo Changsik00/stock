@@ -9,6 +9,7 @@ monkeypatched via markets._fetch_futures_flow_blocking.
 from __future__ import annotations
 
 import datetime as dt
+import time
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -131,7 +132,7 @@ async def _get():
 
 
 async def test_closed_no_cache_fetches_from_source(monkeypatch):
-    _go_closed(monkeypatch, _at(11, 15, 47))
+    _go_closed(monkeypatch, _at(11, 16, 20))
     calls = _counting_fetch(monkeypatch, NEW_RESULT)
     body = (await _get()).json()
     assert len(calls) == 1
@@ -140,7 +141,7 @@ async def test_closed_no_cache_fetches_from_source(monkeypatch):
 
 
 async def test_closed_cache_fetched_before_1550_is_refetched(monkeypatch):
-    _go_closed(monkeypatch, _at(11, 15, 47))
+    _go_closed(monkeypatch, _at(11, 16, 20))
     markets._futures_flow_live_cache.update(
         {
             "data": {"date": "2026-11-11", "investors": {"외국인": {"net_value": -73400}}, "market_closed": False, "cached_at": "x"},
@@ -187,7 +188,7 @@ async def test_next_morning_with_previous_evening_cache_skips_source(monkeypatch
 
 
 async def test_closed_refetch_failure_falls_back_to_cache_and_retries(monkeypatch):
-    _go_closed(monkeypatch, _at(11, 15, 47))
+    _go_closed(monkeypatch, _at(11, 16, 20))
     old_fetched = _at(11, 15, 28)
     markets._futures_flow_live_cache.update(
         {
@@ -218,7 +219,7 @@ async def test_closed_refetch_failure_falls_back_to_cache_and_retries(monkeypatc
 
 
 async def test_closed_refetch_failure_no_cache_returns_empty(monkeypatch):
-    _go_closed(monkeypatch, _at(11, 15, 47))
+    _go_closed(monkeypatch, _at(11, 16, 20))
 
     def _raise(target_date):
         raise RuntimeError("boom")
@@ -246,7 +247,7 @@ async def test_closed_none_result_recorded_as_done(monkeypatch):
 
 
 async def test_closed_none_result_keeps_same_day_nonempty_cache(monkeypatch):
-    _go_closed(monkeypatch, _at(11, 15, 47))
+    _go_closed(monkeypatch, _at(11, 16, 20))
     markets._futures_flow_live_cache.update(
         {
             "data": {"date": "2026-11-11", "investors": {"외국인": {"net_value": -73400}}, "market_closed": False, "cached_at": "x"},
@@ -281,3 +282,34 @@ def test_required_confirm_kst_boundaries():
     assert required_confirm_kst(_at(12, 8, 0)) == _at(11, 18, 5)
     assert required_confirm_kst(_at(11, 12, 0)) == _at(10, 18, 5)
     assert required_confirm_kst(_at(14, 15, 40)) == _at(13, 18, 5)  # 토요일 15:40
+
+
+# Phase 5.115 — 선물 창(15:30~16:15)엔 현물 마감이어도 60초 TTL로 재조회한다.
+async def test_futures_window_after_spot_close_uses_live_ttl(monkeypatch):
+    now = _at(23, 15, 35)
+    _go_closed(monkeypatch, now)
+    markets._futures_flow_live_cache.update(
+        {
+            "data": {"date": "2026-11-23", "investors": {"외국인": {"net_value": -75700}}, "market_closed": True, "cached_at": "x"},
+            "ts": time.monotonic() - 90,  # 60초 TTL은 지났고 마감 5분 TTL은 안 지남
+            "fetched_at": _at(23, 15, 34),
+        }
+    )
+    calls = _counting_fetch(monkeypatch, NEW_RESULT)
+    body = (await _get()).json()
+    assert len(calls) == 1
+    assert body["market_closed"] is True  # 의미(현물 기준) 불변
+
+
+async def test_after_futures_window_keeps_closed_ttl(monkeypatch):
+    _go_closed(monkeypatch, _at(23, 16, 20))
+    markets._futures_flow_live_cache.update(
+        {
+            "data": {"date": "2026-11-23", "investors": {"외국인": {"net_value": 1}}, "market_closed": True, "cached_at": "x"},
+            "ts": time.monotonic() - 90,
+            "fetched_at": _at(23, 16, 19),
+        }
+    )
+    calls = _counting_fetch(monkeypatch, NEW_RESULT)
+    await _get()
+    assert calls == []  # 5분 TTL 이내라 재조회 없음

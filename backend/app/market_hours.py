@@ -46,6 +46,14 @@ MARKET_CLOSE_TIME_KST = dt.time(15, 30)
 NXT_OPEN_TIME_KST = dt.time(8, 0)
 NXT_CLOSE_TIME_KST = dt.time(20, 0)
 
+# K200 선물 거래시간(2026-11-23, Phase 5.115) — 08:45~15:45. 마감 단일가 체결분이 네이버 값에
+# 반영되는 시간을 고려해 16:15까지 샘플링한다 — 아래 CLOSE_CONFIRM 주석 실측대로 네이버 값이
+# 15:47→15:55→16:05에 계단식으로 바뀌고 16:10쯤 굳는다(2026-11-24 연장, 원래 15:47).
+# 개장 쪽은 08:45로 두지만 네이버가 09:05 무렵까지 전부 0을 줘서(2026-11-24 실측) 실제 첫 샘플은 09:05경이다.
+# 현물(is_market_closed, 09:00~15:30)과 별개 창이라 외인 선물 장중 샘플에만 쓴다.
+FUTURES_OPEN_TIME_KST = dt.time(8, 45)
+FUTURES_SAMPLE_END_TIME_KST = dt.time(16, 15)
+
 # 마감 후 라이브 값 "확정 기준 시각"(2026-11-11, 이슈 #3) — 이 시각 이후에 조회한 값이어야
 # 그날 최종값으로 보고 다음 개장까지 재조회를 멈춘다. 일배치(18:00) 직후로 잡는다.
 # 근거(2026-11-11 1분 간격 실측, 네이버 K200 선물수급 외국인, 백만원): 15:28 -73,400 →
@@ -82,6 +90,15 @@ def is_market_closed(now_kst: dt.datetime) -> bool:
     if now_kst.weekday() >= 5:  # 토(5)/일(6)
         return True
     return not (MARKET_OPEN_TIME_KST <= now_kst.time() < MARKET_CLOSE_TIME_KST)
+
+
+def is_futures_session(now_kst: dt.datetime) -> bool:
+    """K200 선물 샘플링 창 — 평일(KRX 휴장일 제외) 08:45~16:15. ``is_market_closed``는 건드리지 않는다."""
+    from .krx_calendar import is_krx_closed  # 지연 임포트 — 순환/로딩 비용 회피
+
+    if is_krx_closed(now_kst.date()):
+        return False
+    return FUTURES_OPEN_TIME_KST <= now_kst.time() < FUTURES_SAMPLE_END_TIME_KST
 
 
 def is_nxt_closed(now_kst: dt.datetime) -> bool:

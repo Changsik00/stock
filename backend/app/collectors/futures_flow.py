@@ -20,11 +20,12 @@ import asyncio
 import datetime as dt
 import logging
 
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..clients import naver_futures_flow
-from ..models import MarketFlow
+from ..models import IntradaySample, MarketFlow
 from .base import REGISTRY
 
 logger = logging.getLogger(__name__)
@@ -40,12 +41,48 @@ def _fetch_blocking(target_date: dt.date) -> dict | None:
     return naver_futures_flow.fetch_futures_flow(target_date)
 
 
-async def collect(session: AsyncSession, target_date: dt.date) -> int:
+_KST = dt.timezone(dt.timedelta(hours=9))
+_SAMPLE_KEY = "futures_외국인"  # collectors/intraday_snapshot.FUTURES_SERIES_KEY와 동일(순환 임포트 회피용 복제)
+
+
+async def build_reconcile_message(session: AsyncSession, target_date: dt.date, confirmed: int | None) -> str | None:
+    """Phase 5.115 — 그날 ``futures_외국인`` 장중 샘플과 일별 확정값(백만원)을 대조한 요약.
+
+    마지막 샘플(시각 포함), 15:29 이전 마지막 샘플, 확정값, 두 차이를 한 줄로 만든다.
+    새 테이블 없이 collect_log.message에만 남긴다(집계 SQL은 PLAN.md 5.115 참고).
+    샘플이 없으면 None."""
+    start = dt.datetime.combine(target_date, dt.time.min, tzinfo=_KST)
+    rows = (
+        await session.execute(
+            select(IntradaySample.time, IntradaySample.value)
+            .where(
+                IntradaySample.series_key == _SAMPLE_KEY,
+                IntradaySample.time >= start,
+                IntradaySample.time < start + dt.timedelta(days=1),
+            )
+            .order_by(IntradaySample.time)
+        )
+    ).all()
+    if not rows or confirmed is None:
+        return None
+    last_t, last_v = rows[-1]
+    cut = dt.time(15, 29, 59)
+    before = [r for r in rows if r[0].astimezone(_KST).time() <= cut]
+    last_t = last_t.astimezone(_KST)
+    msg = f"reconcile 확정={confirmed:+,.0f} 마지막샘플({last_t:%H:%M})={float(last_v):+,.0f} 차이={confirmed - float(last_v):+,.0f}"
+    if before:
+        bt, bv = before[-1]
+        msg += f" | 15:29이전({bt.astimezone(_KST):%H:%M})={float(bv):+,.0f} 차이={confirmed - float(bv):+,.0f}"
+    return msg + f" (샘플 {len(rows)}개, 백만원)"
+
+
+async def collect(session: AsyncSession, target_date: dt.date) -> int | tuple[int, str | None]:
     """target_date의 K200 선물 투자자별 순매수 3행(개인/외국인/기관계)을
     market_flow(market='k200_futures')에 upsert.
 
     Returns:
-        적재(upsert)한 행 수 (휴장일이거나 소스가 데이터를 주지 않으면 0).
+        적재(upsert)한 행 수 (휴장일이거나 소스가 데이터를 주지 않으면 0). 장중 샘플이 있으면
+        ``(rows, reconcile 메시지)`` — base.run_job이 collect_log.message에 남긴다.
     """
     result = await asyncio.to_thread(_fetch_blocking, target_date)
     if result is None:
@@ -73,6 +110,15 @@ async def collect(session: AsyncSession, target_date: dt.date) -> int:
         await session.execute(stmt)
         rows_written += 1
 
+    confirmed = next((f["net_value"] for f in result["flows"] if f["investor"] == "외국인"), None)
+    try:
+        message = await build_reconcile_message(session, target_date, confirmed)
+    except Exception as e:  # noqa: BLE001 — 대조는 부가 기능, 적재 성공을 막지 않는다
+        logger.warning("futures_flow: reconcile 실패: %s", e)
+        message = None
+    if message:
+        logger.info("futures_flow: %s", message)
+        return rows_written, message
     return rows_written
 
 

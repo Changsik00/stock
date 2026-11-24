@@ -104,6 +104,7 @@ from ..db import get_session
 from ..market_hours import (
     CLOSED_REFETCH_TTL_SECONDS,
     KST,
+    is_futures_session as _futures_session_kst,
     is_market_closed as _market_closed_kst,
     is_nxt_closed,
     kst_now,
@@ -1007,14 +1008,24 @@ async def _warm_futures_flow_live() -> dict:
         fetched_at = _futures_flow_live_cache.get("fetched_at")
         now_kst = kst_now()
         closed = _market_closed_kst(now_kst)
-        if closed and cached is not None and fetched_at is not None and fetched_at >= required_confirm_kst(now_kst):
+        # Phase 5.115: 선물 샘플링 창(08:45~16:15)엔 현물이 닫혀 있어도(15:30~16:15, 08:45~09:00)
+        # 장중과 같이 60초 TTL로 재조회하고 18:05 확정 캐시 재사용도 건너뛴다. payload의
+        # market_closed 의미(현물 정규장 기준)는 그대로 둔다.
+        futures_live = _futures_session_kst(now_kst)
+        if (
+            closed
+            and not futures_live
+            and cached is not None
+            and fetched_at is not None
+            and fetched_at >= required_confirm_kst(now_kst)
+        ):
             # 확정 기준 시각 이후에 조회된 값 — 네이버 재호출 없이 재사용.
             if not cached.get("market_closed"):
                 cached = {**cached, "market_closed": True}
                 _futures_flow_live_cache["data"] = cached
             return cached
         # 마감 후 확정 전 구간은 장중(60초)보다 느린 간격으로 재조회한다.
-        ttl = CLOSED_REFETCH_TTL_SECONDS if closed else _FUTURES_FLOW_LIVE_TTL_SECONDS
+        ttl = CLOSED_REFETCH_TTL_SECONDS if (closed and not futures_live) else _FUTURES_FLOW_LIVE_TTL_SECONDS
         if cached is not None and (now - _futures_flow_live_cache["ts"]) < ttl:
             if closed and not cached.get("market_closed"):
                 cached = {**cached, "market_closed": True}  # 장중에 만든 캐시가 마감 직후 TTL 내 재사용되는 경우

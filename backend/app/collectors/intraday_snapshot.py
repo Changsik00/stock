@@ -49,7 +49,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..market_hours import KST, is_market_closed
+from ..market_hours import KST, is_futures_session, is_market_closed
 from ..models import IntradaySample
 
 # flow/live에서 다루는 투자자 3종 x 시장 2종(PLAN.md §5.10 — 코스피/코스닥 분리).
@@ -160,9 +160,11 @@ async def record_flow_snapshot(session: AsyncSession, payload: dict) -> None:
 async def record_futures_flow_snapshot(session: AsyncSession, payload: dict) -> None:
     """`routers.markets._warm_futures_flow_live`가 이미 반환한 값을 받아
     ``futures_외국인`` series_key에 외국인 투자자의 순매수대금(net_value, 백만원)을
-    INSERT한다. `record_flow_snapshot`과 동일하게 새 외부 호출은 없고,
-    ``market_closed``면 스킵한다."""
-    if payload.get("market_closed"):
+    INSERT한다. 새 외부 호출은 없다. Phase 5.115(2026-11-23): 현물 ``market_closed``가
+    아니라 선물 샘플링 창(``is_futures_session``, 08:45~16:15)으로 게이트한다 — 15:30~15:45
+    선물 구간을 기록하기 위해서다. 개장 전(08:45~09:00)엔 소스가 전부 0이면 investors가 빈 dict라(None 처리) 자연히 스킵된다."""
+    now = _now_kst()
+    if not is_futures_session(now):
         return
 
     investors = payload.get("investors") or {}
@@ -171,7 +173,6 @@ async def record_futures_flow_snapshot(session: AsyncSession, payload: dict) -> 
     if net_value is None:
         return
 
-    now = _now_kst()
     await _insert_points(
         session,
         [{"series_key": FUTURES_SERIES_KEY, "time": now, "value": net_value, "resolution_seconds": 0}],
