@@ -11,6 +11,7 @@ import {
   fetchEtfWeightChanges,
   fetchFlowConsistency,
   fetchNqComovement,
+  fetchFlowAnomaly,
   fetchFlowLive,
   fetchFlowPath,
   fetchFlowRank,
@@ -40,6 +41,7 @@ import PremarketOutlookCard from '../components/dashboard/PremarketOutlookCard'
 import VolRegimeCard from '../components/dashboard/VolRegimeCard'
 import FlowConsistencyCard from '../components/dashboard/FlowConsistencyCard'
 import NqComovementCard from '../components/dashboard/NqComovementCard'
+import FlowAnomalyCard from '../components/dashboard/FlowAnomalyCard'
 import MetricTile, { heroEok } from '../components/dashboard/MetricTile'
 import StockDetailModal from '../components/StockDetailModal'
 import StockHeatmap from '../components/StockHeatmap'
@@ -159,6 +161,16 @@ const PROGRAM_NONARB_IDS = ['prog_nonarb_kospi', 'prog_nonarb_kosdaq']
 // 만기 임박 시그널 배지 기준(D-n 이내, PLAN.md §4.5-5 "만기 D-3 이내").
 const EXPIRY_SOON_D_DAY = 3
 
+// 수급 상위 카드 토글(PLAN.md 5.117) — API investor/side 값과 같다.
+const FLOW_RANK_INVESTOR_OPTIONS = [
+  { key: 'foreign', label: '외국인' },
+  { key: 'institution', label: '기관' },
+]
+const FLOW_RANK_SIDE_OPTIONS = [
+  { key: 'buy', label: '순매수' },
+  { key: 'sell', label: '순매도' },
+]
+
 const GROUP_TYPE_OPTIONS = [
   { key: 'upjong', label: '업종' },
   { key: 'theme', label: '테마' },
@@ -211,6 +223,10 @@ export default function DashboardPage() {
   // 장중 외인 매도 일관성(PLAN.md Phase 5.113) — 1분 티어에 합류, 실패 시 마지막 값 유지.
   const [flowConsistency, setFlowConsistency] = useState(null)
   const [nqComovement, setNqComovement] = useState(null)
+  const [flowAnomaly, setFlowAnomaly] = useState(null)
+  // 수급 상위 카드 선택(PLAN.md 5.117) — 기본 외국인·순매수
+  const [flowRankInvestor, setFlowRankInvestor] = useState('foreign')
+  const [flowRankSide, setFlowRankSide] = useState('buy')
 
   const [fundSeries, setFundSeries] = useState({})
   // 시장 전체 공매도(코스피/코스닥, PLAN.md §5.32) — KOFIA 대차잔고(fundSeries의
@@ -445,6 +461,14 @@ export default function DashboardPage() {
         .catch(() => {}) // 실패 시 마지막 값 유지
     }
 
+    function loadFlowAnomaly() {
+      return fetchFlowAnomaly()
+        .then((body) => {
+          if (!cancelled) setFlowAnomaly(body)
+        })
+        .catch(() => {}) // 실패 시 마지막 값 유지
+    }
+
     function loadAttentionTop() {
       return fetchAttention()
         .then((body) => {
@@ -564,6 +588,7 @@ export default function DashboardPage() {
           loadFlowLive(),
           loadFlowConsistency(),
           loadNqComovement(),
+          loadFlowAnomaly(),
           loadAttentionTop(),
           loadScalpCandidates(),
           loadIndexTilesLive(),
@@ -720,7 +745,8 @@ export default function DashboardPage() {
 
   useEffect(() => {
     let cancelled = false
-    fetchFlowRank('foreign', 'buy', FLOW_RANK_LOOKBACK_DAYS)
+    setFlowRankTop(null)
+    fetchFlowRank(flowRankInvestor, flowRankSide, FLOW_RANK_LOOKBACK_DAYS)
       .then((body) => {
         if (!cancelled) setFlowRankTop((body.dates && body.dates[0]) || null)
       })
@@ -728,7 +754,7 @@ export default function DashboardPage() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [flowRankInvestor, flowRankSide])
 
   useEffect(() => {
     let cancelled = false
@@ -2007,10 +2033,36 @@ export default function DashboardPage() {
         <Top5Card
           title="수급 상위"
           hint={
-            <span title="소스가 최근 확정된 거래일까지만 제공 — 당일 장마감 전에는 전날 데이터가 최신입니다.">
-              외국인 순매수
-              <StaleDate date={flowRankTop?.date} baseDate={baseDate} prefix=" · 확정 " />
-            </span>
+            <>
+              <span className="fr-toggle">
+                {FLOW_RANK_INVESTOR_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.key}
+                    type="button"
+                    className={`toggle-chip ${flowRankInvestor === opt.key ? 'active' : ''}`}
+                    aria-pressed={flowRankInvestor === opt.key}
+                    onClick={() => setFlowRankInvestor(opt.key)}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+                {FLOW_RANK_SIDE_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.key}
+                    type="button"
+                    className={`toggle-chip ${flowRankSide === opt.key ? 'active' : ''}`}
+                    aria-pressed={flowRankSide === opt.key}
+                    onClick={() => setFlowRankSide(opt.key)}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </span>
+              <span title="소스가 최근 확정된 거래일까지만 제공 — 당일 장마감 전에는 전날 데이터가 최신입니다.">
+                {flowRankInvestor === 'foreign' ? '외국인' : '기관'} {flowRankSide === 'sell' ? '순매도' : '순매수'}
+                <StaleDate date={flowRankTop?.date} baseDate={baseDate} prefix=" · 확정 " />
+              </span>
+            </>
           }
           hoverDate={flowRankTop?.date ? formatDate(flowRankTop.date) : undefined}
           rows={flowRankTop?.rows}
@@ -2028,7 +2080,11 @@ export default function DashboardPage() {
                 {row.market && <Badge kind={row.market} />}
                 {row.is_etf && <Badge kind="etf" />}
               </span>
-              <span className="top5-row-value up">{eokLabel(row.net_value)}</span>
+              {/* net_value는 항상 양수 크기 — 방향은 선택한 side로 표현(순매도는 ▼ + 파랑) */}
+              <span className={`top5-row-value ${flowRankSide === 'sell' ? 'down' : 'up'}`}>
+                {flowRankSide === 'sell' ? '▼ ' : '▲ '}
+                {eokLabel(row.net_value)}
+              </span>
             </Top5RowTile>
           )}
         />
@@ -2219,6 +2275,14 @@ export default function DashboardPage() {
           )}
         />
       </div>
+
+      {!STATIC_DATA && (
+        <FlowAnomalyCard
+          data={flowAnomaly}
+          loading={flowAnomaly === null && marketLoading}
+          onRowClick={(row) => openStockModal(row.code, row.name, { market: row.market })}
+        />
+      )}
 
       <Modal open={Boolean(modal)} onClose={closeModal} title={modal?.title}>
         {modal?.type === 'candle' && <CandleModal market={modal.market} />}

@@ -2361,3 +2361,22 @@ header h1 {
 .nc-card .vr-panel { width: 100%; }
 .nc-split { padding-top: var(--sp-2); border-top: 1px solid var(--border); }
 .nc-split dt { min-width: 0; }
+
+/* 수급 상위 카드 투자자·방향 토글(PLAN.md Phase 5.117) — 기존 .toggle-chip 재사용, 카드 안이라 하단 여백만 조정 */
+.fr-toggle { display: flex; flex-wrap: wrap; gap: var(--sp-1); margin-bottom: var(--sp-1); }
+
+/* 이상 거래 카드(PLAN.md Phase 5.117) — .vr-card 골격, 행은 한 덩어리 리스트(1px 구분선), 칩은 중립 */
+.fa-tabs { display: flex; gap: var(--sp-2); margin-bottom: var(--sp-3); }
+.fa-list { display: flex; flex-direction: column; }
+.fa-row { display: flex; flex-direction: column; gap: var(--sp-1); width: 100%; padding: var(--sp-3) 0; background: transparent; border: 0; border-top: 1px solid var(--border); font: inherit; color: inherit; text-align: left; }
+.fa-row:first-child { border-top: 0; }
+button.fa-row { cursor: pointer; }
+button.fa-row:hover { background: var(--chip-bg); }
+.fa-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); min-width: 0; }
+.fa-name { display: inline-flex; align-items: center; gap: var(--sp-1); min-width: 0; font-size: var(--fs-body); font-weight: 600; color: var(--text-primary); }
+.fa-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fa-amount { font-size: var(--fs-body); font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.fa-meta { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); font-size: var(--fs-label); color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.fa-chips { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+.fa-chip { font-size: var(--fs-label); color: var(--text-primary); border: 1px solid var(--border); border-radius: 999px; padding: 1px var(--sp-2); }
+.fa-chip-off { color: var(--text-secondary); }

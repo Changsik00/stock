@@ -288,6 +288,13 @@ export async function fetchNqComovement() {
   return getJson('/api/markets/nq-comovement')
 }
 
+// GET /api/markets/flow-anomaly — 이상 거래 후보(PLAN.md Phase 5.117, 표시 전용, 60초 서버 캐시).
+// 로컬 전용 라이브 지표라 정적 배포(STATIC_DATA)에서는 호출하지 않고 null을 돌려준다.
+export async function fetchFlowAnomaly() {
+  if (STATIC_DATA) return null
+  return getJson('/api/markets/flow-anomaly')
+}
+
 // GET /api/markets/vol-regime — 오늘 변동성 레짐(PLAN.md §5.95, 표시 전용, 60초 서버 캐시).
 // regime과 같은 이유로 로컬 전용(정적 배포 대상 아님).
 export async function fetchVolRegime() {
