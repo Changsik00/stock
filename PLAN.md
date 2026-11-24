@@ -5622,6 +5622,9 @@ Phase 5.104의 연속. "외인 양손 · 현선물" 섹션의 외인 현물·베
 - 08:45~09:00 확인 결과: 네이버 `FUT/trend`가 09:04까지 계속 전부 0을 줬다(backend 로그 `all-zero response`). 그래서 첫 `futures_외국인` 샘플은 09:05:56이다. 우리 코드가 아니라 소스 한계다. 08:45~09:05 선물 수급은 이 소스로는 볼 수 없다.
 - 샘플링 창 끝을 15:47 → **16:15**로 늘렸다. 근거는 `market_hours.py` CLOSE_CONFIRM 주석의 실측이다: 마감 후 네이버 값이 15:47 → 15:55 → 16:05에 계단식으로 바뀌고 16:10쯤 굳는다. 15:47에 끊으면 마지막 변화를 놓친다. `test_market_hours`·`test_intraday_snapshot`·`test_futures_flow_live_router` 경계 시각 갱신, 62건 통과.
 - 같이 고친 별건 버그(`collectors/live_refresh._run_stock_flow_scan`): `stocks` 마스터에 없는 종목(신규 상장 등, 2026-11-24 로그에 8종목)이 `stock_flow` FK 위반을 냈다. 하나의 세션 트랜잭션이 aborted되면서 뒤 종목이 전부 `InFailedSQLTransactionError`로 실패했다(3시간 948건). 종목마다 SAVEPOINT(`session.begin_nested()`)를 두고, upsert 전에 랭킹 행의 이름/시장으로 `_ensure_stock_master_stub`을 호출하게 했다. 회귀 테스트 `test_scan_stubs_missing_master_and_db_error_does_not_poison_session` 추가, `test_stock_flow_scan.py` 4건 통과.
+- 수급 상위(`flow_rank`)가 11-19에서 멈춘 원인(2026-11-24 확인): 전 종목 `stock_flow`를 채우는 20:00 `accumulation_screener`가 두 번 빠졌다. 11-20은 Mac이 17:38에 idle sleep(절전 방지 시작 17:52보다 먼저 잠듦)에 들어가 18:00 본배치와 20:00 스크리너가 모두 누락됐다. 11-23은 이번 작업의 worker 재시작(21:02)이 진행 중이던 스크리너(2500/3917)를 끊었다. 그래서 11-20·11-23의 stock_flow가 200여 종목뿐이고, flow_rank의 80% 부분 적재 방지 규칙이 그 날들을 건너뛰었다. 11-24 20:00 스크리너가 ka10059 다일치 응답으로 11-20~11-24를 다시 채우고, 21:30 flow_rank가 최근 5거래일의 빈 날을 채운다(코드 변경 없음). `accumulation_pick` 11-20·11-23분은 복구하지 않는다(스크리너는 최신일만 판정).
+- 장중 절전도 확인: 11-24 11:04(9분)·13:20(5분)·15:36(17분) idle sleep. 그래서 절전 방지(`scripts/launchd/com.changsik.stock.keepawake.plist`)를 평일 **07:50~22:05**로 넓혔다(원래 17:52~22:02). 잠든 Mac을 깨우는 `sudo pmset repeat wakeorpoweron MTWRF 07:45:00`은 관리자 암호가 필요해 사용자가 직접 실행해야 한다(아직 미설정 — `pmset -g sched`에 repeat 없음).
+- 운영 주의: 20:00~21:30에는 worker를 재시작하지 않는다(스크리너 → flow_rank 순서가 끊긴다).
 
 ---
 

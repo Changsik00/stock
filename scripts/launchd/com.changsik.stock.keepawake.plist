@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- 평일 17:52(맥 로컬 시간 = KST 가정)부터 4시간 10분(22:02까지) 절전 방지 — PLAN.md §5.108.
+<!-- 평일 07:50(맥 로컬 시간 = KST 가정)부터 14시간 15분(22:05까지) 절전 방지 — PLAN.md §5.108.
+     2026-11-24 확대(원래 17:52~22:02): 11-20 17:38 idle sleep으로 18:00 배치·20:00 스크리너 누락, 11-24 장중 11:04/13:20/15:36(17분) 절전으로 장중 샘플 공백.
      18:00 본배치, 20:00 매집 스크리너(약 65분), 21:30 수급 상위가 도는 동안 맥이 잠들지 않게 한다.
      2026-11-12 17:42 idle sleep으로 그날 배치가 통째로 빠진 사고의 재발 방지(과거 소급이 안 되는 소스가 있다).
      launchd는 잠든 맥을 깨우지 못한다 — 깨우는 것은 `sudo pmset repeat wakeorpoweron MTWRF 17:50:00`이 맡는다.
@@ -15,15 +16,15 @@
     <string>-i</string>
     <string>-s</string>
     <string>-t</string>
-    <string>15000</string>
+    <string>51300</string>
   </array>
   <key>StartCalendarInterval</key>
   <array>
-    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>52</integer></dict>
-    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>52</integer></dict>
-    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>52</integer></dict>
-    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>52</integer></dict>
-    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>52</integer></dict>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>50</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>50</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>50</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>50</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>50</integer></dict>
   </array>
 </dict>
 </plist>
