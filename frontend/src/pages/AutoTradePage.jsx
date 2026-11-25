@@ -10,7 +10,10 @@ import {
   manualSellAutoTrade,
   syncAutoTradeState,
   toggleAutoTrade,
+  updateManualExitRules,
 } from '../api'
+import ManualTradePanel from '../components/ManualTradePanel'
+import SectionHeader from '../components/SectionHeader'
 
 const numFmt = new Intl.NumberFormat('ko-KR')
 
@@ -59,6 +62,9 @@ const EVENT_TYPE_LABEL = {
   // PLAN.md §5.56(2026-08-11) — 자동 감지 엔진 위에 얹는 수동 매수/매도 버튼.
   manual_entry: '수동 매수',
   exit_manual: '수동 매도',
+  // Phase 5.118 — 수동 매수 시 고른 사용자 조건으로 엔진이 낸 청산 / 보유 중 조건 수정 기록.
+  exit_manual_rule: '수동 조건 청산',
+  manual_rules_update: '수동 조건 수정',
   // PLAN.md §5.71(2026-08-19) — 주문은 접수됐지만 체결 미확인(취소 시도함).
   buy_unconfirmed: '매수 체결 미확인',
   sell_unconfirmed: '매도 체결 미확인',
@@ -74,7 +80,7 @@ const buildStrategyRules = (target) => [
   },
   { label: '진입 조건', value: 'ma_cross.state == "golden" AND volume_spike.is_spike == true' },
   {
-    label: '청산(트레일링 스탑)',
+    label: '청산(자동 진입 · 트레일링 스탑)',
     value: '진입가 대비 +1% 도달 시 트레일 모드 전환 → 이후 고점(peak) 대비 -0.5% 이상 반납 시 매도 (§5.83, ratchet 방식)',
   },
   { label: '손절', value: '상태 무관, 진입가 대비 -1.5% 이하 도달 시 즉시 매도(리스크 경보 활성 중엔 -0.8%로 임시 축소)' },
@@ -97,7 +103,7 @@ const buildStrategyRules = (target) => [
   },
 ]
 
-// 현재 자동매매 대상 + 관찰만 하는 쌍(주문 없음) 배너. 값은 전부 /state 응답에서 읽는다.
+// 엔진 대상 종목 + 관찰만 하는 쌍(주문 없음). 값은 전부 /state 응답에서 읽는다.
 function TargetBanner({ state }) {
   const target = state?.target
   const status = state?.status || 'idle'
@@ -105,192 +111,138 @@ function TargetBanner({ state }) {
   const observing = state?.observing || []
   const multLabel = (m) => (m > 0 ? `롱 +${m}X` : `숏 ${m}X`)
   return (
-    <section
-      style={{
-        border: '2px solid var(--accent, var(--border, #333))',
-        borderRadius: 12,
-        padding: 16,
-        marginBottom: 16,
-      }}
-    >
-      <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4 }}>자동매매 대상</div>
-      <div style={{ fontSize: 22, fontWeight: 700 }}>
-        {target ? `현재 대상: ${target.name} (${target.code}) · ${target.qty}주` : '현재 대상: -'}
+    <div className="at-block">
+      <div className="at-k">엔진 대상 종목</div>
+      <div className="at-target">
+        {target ? `${target.name} (${target.code}) · ${target.qty}주` : '-'}
       </div>
-      {state && (
-        <div style={{ fontSize: 14, marginTop: 4, color: 'var(--text-muted)' }}>
-          {holding ? `보유 중 (${status})` : '대기 중 (idle)'}
-        </div>
-      )}
+      {state && <div className="at-sub">{holding ? `보유 중 (${status})` : '대기 중 (idle)'}</div>}
       {target && target.db_code && target.db_code !== target.code && (
-        <div style={{ fontSize: 13, marginTop: 4, color: 'var(--down, #256abf)' }}>
+        <div className="at-sub at-warn-text">
           주의: DB 상태 행의 종목코드({target.db_code})가 엔진 대상({target.code})과 다릅니다.
         </div>
       )}
       {observing.length > 0 && (
-        <div style={{ fontSize: 12, marginTop: 8, color: 'var(--text-muted)' }}>
-          관찰 중(주문 없음):{' '}
-          {observing.map((o) => `${o.name} (${o.code}) ${multLabel(o.multiple)}`).join(' · ')}
+        <div className="at-sub">
+          관찰 중(주문 없음): {observing.map((o) => `${o.name} (${o.code}) ${multLabel(o.multiple)}`).join(' · ')}
           {' — '}관찰만 하며 자동으로 주문하지 않습니다.
         </div>
       )}
-    </section>
+    </div>
   )
 }
 
 function KillSwitch({ state, onToggle, busy }) {
   const enabled = !!state?.enabled
   return (
-    <section
-      style={{
-        border: `2px solid ${enabled ? 'var(--down, #d9364a)' : 'var(--border, #333)'}`,
-        borderRadius: 12,
-        padding: 16,
-        marginBottom: 16,
-        background: enabled ? 'color-mix(in srgb, var(--down, #d9364a) 8%, transparent)' : 'transparent',
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+    <div className={`at-block at-ks ${enabled ? 'is-on' : ''}`}>
+      <div className="at-row">
         <div>
-          <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4 }}>킬스위치</div>
-          <div style={{ fontSize: 22, fontWeight: 700, color: enabled ? 'var(--down, #d9364a)' : 'var(--text-muted)' }}>
-            {enabled ? '켜짐 (ON)' : '꺼짐 (OFF)'}
-          </div>
+          <div className="at-k">킬스위치</div>
+          <div className={`at-ks-state ${enabled ? 'at-warn-text' : ''}`}>{enabled ? '켜짐 (ON)' : '꺼짐 (OFF)'}</div>
         </div>
         <button
           type="button"
+          className={`btn ${enabled ? 'btn-secondary' : 'btn-primary'}`}
           disabled={busy}
           onClick={() => onToggle(!enabled)}
-          style={{
-            padding: '12px 28px',
-            fontSize: 16,
-            fontWeight: 700,
-            borderRadius: 999,
-            border: 'none',
-            cursor: busy ? 'default' : 'pointer',
-            color: '#fff',
-            background: enabled ? 'var(--down, #d9364a)' : 'var(--up, #1a7f37)',
-            opacity: busy ? 0.6 : 1,
-          }}
         >
           {enabled ? '지금 끄기' : '지금 켜기'}
         </button>
       </div>
       {enabled ? (
-        <p style={{ marginTop: 12, marginBottom: 0, fontWeight: 600, color: 'var(--down, #d9364a)' }}>
-          ⚠ 실제 주문이 자동으로 나갑니다 — 이 계좌는 실전 계좌(모의 아님)이며, 진입/청산 조건이
-          충족되면 사람의 추가 확인 없이 즉시 매수/매도 주문이 제출됩니다.
+        <p className="at-note at-warn-text">
+          실제 주문이 자동으로 나갑니다 — 실전 계좌(모의 아님)이며, 진입/청산 조건이 충족되면 추가 확인 없이 즉시
+          매수/매도 주문이 제출됩니다.
         </p>
       ) : (
-        <p style={{ marginTop: 12, marginBottom: 0, color: 'var(--text-muted)' }}>
-          꺼져 있는 동안은 신호 평가 자체를 하지 않습니다 — 어떤 조건이 충족돼도 주문이 나가지
-          않습니다.
-        </p>
+        <p className="at-note">꺼져 있는 동안은 신호 평가 자체를 하지 않습니다 — 어떤 조건이 충족돼도 주문이 나가지 않습니다.</p>
       )}
-    </section>
+    </div>
   )
 }
 
 function StatusPanel({ state }) {
   const status = state?.status || 'idle'
   const holding = status === 'holding' || status === 'trailing'
+  const pnlText =
+    state?.unrealized_pnl === null || state?.unrealized_pnl === undefined
+      ? '-'
+      : `${numFmt.format(state.unrealized_pnl)}원 (${rateLabel(state.unrealized_pnl_pct)})`
+  const fromPeak =
+    status === 'trailing' && state.peak_price != null && state.current_price != null
+      ? ((state.current_price - state.peak_price) / state.peak_price) * 100
+      : null
   return (
-    <section style={{ border: '1px solid var(--border, #333)', borderRadius: 12, padding: 16, marginBottom: 16 }}>
-      <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 8 }}>현재 상태</div>
-      <div style={{ fontSize: 20, fontWeight: 700, marginBottom: holding ? 12 : 0 }}>
-        {STATUS_LABEL[status] || status}
-      </div>
+    <div className="at-block">
+      <div className="at-k">현재 상태</div>
+      <div className="at-status">{STATUS_LABEL[status] || status}</div>
       {holding && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12 }}>
-          <div>
-            <div className="stat-label">진입가</div>
-            <div className="stat-value">{priceLabel(state.entry_price)}</div>
-          </div>
-          <div>
-            <div className="stat-label">진입시각</div>
-            <div className="stat-value" style={{ fontSize: 14 }}>
-              {formatDateTime(state.entry_at)}
-            </div>
-          </div>
-          <div>
-            <div className="stat-label">현재가</div>
-            <div className="stat-value">{priceLabel(state.current_price)}</div>
-          </div>
-          <div>
-            <div className="stat-label">평가손익</div>
-            <div className={`stat-value ${rateClass(state.unrealized_pnl_pct)}`}>
-              {state.unrealized_pnl === null || state.unrealized_pnl === undefined
-                ? '-'
-                : `${numFmt.format(state.unrealized_pnl)}원 (${rateLabel(state.unrealized_pnl_pct)})`}
-            </div>
-          </div>
-          {status === 'trailing' && (
+        <>
+          <div className="at-pnl-label">평가손익</div>
+          <div className={`at-pnl ${rateClass(state.unrealized_pnl_pct)}`}>{pnlText}</div>
+          <div className="at-grid">
             <div>
-              <div className="stat-label">신고가(peak)</div>
-              <div className="stat-value">{priceLabel(state.peak_price)}</div>
+              <div className="at-k">진입가</div>
+              <div className="at-v">{priceLabel(state.entry_price)}</div>
             </div>
-          )}
-          {/* PLAN.md §5.83 — 트레일 청산이 고점 기준 반납폭(ratchet)으로
-              바뀌어, 이제 이 값이 실제 청산 트리거를 그대로 보여준다(-0.5%
-              이하 도달 시 매도). */}
-          {status === 'trailing' && state.peak_price != null && state.current_price != null && (
             <div>
-              <div className="stat-label">고점 대비</div>
-              <div
-                className={`stat-value ${rateClass(
-                  ((state.current_price - state.peak_price) / state.peak_price) * 100
-                )}`}
-              >
-                {rateLabel(((state.current_price - state.peak_price) / state.peak_price) * 100)}
+              <div className="at-k">현재가</div>
+              <div className="at-v">{priceLabel(state.current_price)}</div>
+            </div>
+            {status === 'trailing' && (
+              <div>
+                <div className="at-k">신고가(peak)</div>
+                <div className="at-v">{priceLabel(state.peak_price)}</div>
+              </div>
+            )}
+            {/* PLAN.md §5.83 — 고점 기준 반납폭(ratchet): -0.5% 이하 도달 시 매도. */}
+            {fromPeak !== null && (
+              <div>
+                <div className="at-k">고점 대비</div>
+                <div className={`at-v ${rateClass(fromPeak)}`}>{rateLabel(fromPeak)}</div>
+              </div>
+            )}
+            <div>
+              <div className="at-k">진입시각</div>
+              <div className="at-v at-v-sm">{formatDateTime(state.entry_at)}</div>
+            </div>
+            <div>
+              <div className="at-k">진입 방식</div>
+              <div className="at-v at-v-sm">{state.entry_source === 'manual' ? '수동 매수 (사용자 조건)' : '자동 진입 (엔진 규칙)'}</div>
+            </div>
+            <div>
+              <div className="at-k">주문번호</div>
+              <div className="at-v at-v-sm">{state.entry_order_no || '-'}</div>
+            </div>
+            <div>
+              {/* PLAN.md §5.55-4 — 진입 시점 외인 현물 수급 부호. 반전되면 조기청산되는 근거값. */}
+              <div className="at-k">진입 시점 외인 현물 수급</div>
+              <div className="at-v at-v-sm">
+                {state.entry_foreign_flow_sign === 'positive'
+                  ? '순매수'
+                  : state.entry_foreign_flow_sign === 'negative'
+                    ? '순매도'
+                    : '-'}
               </div>
             </div>
-          )}
-          <div>
-            <div className="stat-label">주문번호</div>
-            <div className="stat-value" style={{ fontSize: 14 }}>
-              {state.entry_order_no || '-'}
-            </div>
           </div>
-          <div>
-            {/* PLAN.md §5.55-4 — 진입 시점 외인 현물 수급 부호. 반전되면 조기청산되는 근거값. */}
-            <div className="stat-label">진입 시점 외인 현물 수급</div>
-            <div className="stat-value" style={{ fontSize: 14 }}>
-              {state.entry_foreign_flow_sign === 'positive'
-                ? '순매수'
-                : state.entry_foreign_flow_sign === 'negative'
-                  ? '순매도'
-                  : '-'}
-            </div>
-          </div>
-        </div>
+        </>
       )}
-    </section>
+    </div>
   )
 }
 
 function multipleBadge(multiple) {
   // 한국 관행: 레버리지(상승 베팅)=빨강, 인버스(하락 베팅)=파랑
-  if (multiple > 1) return { label: `레버리지${multiple}X`, color: 'var(--up, #d03b3b)' }
-  if (multiple < 0) return { label: '인버스', color: 'var(--down, #3b6fd0)' }
-  return { label: '1배', color: 'var(--text-muted)' }
+  if (multiple > 1) return { label: `레버리지${multiple}X`, cls: 'up' }
+  if (multiple < 0) return { label: '인버스', cls: 'down' }
+  return { label: '1배', cls: '' }
 }
 
 function MultipleBadge({ multiple }) {
   const b = multipleBadge(multiple)
-  return (
-    <span
-      style={{
-        fontSize: 12,
-        fontWeight: 700,
-        color: b.color,
-        border: `1px solid ${b.color}`,
-        borderRadius: 6,
-        padding: '1px 6px',
-      }}
-    >
-      {b.label}
-    </span>
-  )
+  return <span className={`at-mult ${b.cls}`}>{b.label}</span>
 }
 
 // 수동 매수 종목 후보 관리 (PLAN.md §5.89-1) — 추천(읽기전용) / 후보(사용자 고정, 추가·삭제).
@@ -338,135 +290,55 @@ function CandidatePanel() {
     }
   }
 
-  const rowStyle = { display: 'flex', gap: 8, alignItems: 'center', padding: '4px 0', flexWrap: 'wrap' }
-
   return (
-    <section style={{ border: '1px solid var(--border, #333)', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+    <div className="at-block">
       {error && <div className="state">후보 처리 실패: {error}</div>}
-      <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4 }}>추천 종목 (시스템 시나리오, 읽기 전용)</div>
+      <div className="at-k">추천 종목 (시스템 시나리오, 읽기 전용)</div>
       {data.recommended.length === 0 ? (
-        <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 12 }}>오늘 추천 없음</div>
+        <div className="at-sub">오늘 추천 없음</div>
       ) : (
-        <div style={{ marginBottom: 12 }}>
+        <div className="at-list">
           {data.recommended.map((r) => (
-            <div key={r.id} style={rowStyle}>
+            <div key={r.id} className="at-item">
               <strong>{r.name}</strong>
-              <span style={{ color: 'var(--text-muted)' }}>{r.code}</span>
+              <span className="at-sub-inline">{r.code}</span>
               <MultipleBadge multiple={r.multiple} />
-              {r.scenario && <span style={{ fontSize: 13 }}>{r.scenario}</span>}
-              {r.reason && <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{r.reason}</span>}
+              {r.scenario && <span>{r.scenario}</span>}
+              {r.reason && <span className="at-sub-inline">{r.reason}</span>}
             </div>
           ))}
         </div>
       )}
 
-      <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4 }}>후보 종목 (직접 관리)</div>
-      <form onSubmit={handleAdd} style={{ ...rowStyle, marginBottom: 4 }}>
+      <div className="at-k at-k-gap">후보 종목 (직접 관리)</div>
+      <form onSubmit={handleAdd} className="at-item">
         <input
+          className="er-input"
           value={code}
           onChange={(e) => setCode(e.target.value)}
           placeholder="종목코드 (예: 233740)"
+          aria-label="후보 종목코드"
           maxLength={6}
-          style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border, #333)' }}
         />
-        <button type="submit" disabled={busy || !code.trim()}>
+        <button type="submit" className="btn btn-secondary btn-sm" disabled={busy || !code.trim()}>
           {busy ? '추가 중…' : '추가'}
         </button>
       </form>
       {data.manual.length === 0 ? (
-        <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>등록된 후보 없음</div>
+        <div className="at-sub">등록된 후보 없음</div>
       ) : (
         data.manual.map((r) => (
-          <div key={r.id} style={rowStyle}>
+          <div key={r.id} className="at-item">
             <strong>{r.name}</strong>
-            <span style={{ color: 'var(--text-muted)' }}>{r.code}</span>
+            <span className="at-sub-inline">{r.code}</span>
             <MultipleBadge multiple={r.multiple} />
-            <button type="button" onClick={() => handleDelete(r.id)}>
+            <button type="button" className="btn btn-danger btn-sm" onClick={() => handleDelete(r.id)}>
               삭제
             </button>
           </div>
         ))
       )}
-    </section>
-  )
-}
-
-// 자동 감지 엔진(run_auto_trade/watch_stop_loss) 위에 얹는 수동 개입 버튼
-// (PLAN.md §5.56) — 자동 감지를 대체하지 않는다. 매수는 킬스위치가 켜져
-// 있고 status가 idle일 때만 활성화(그 외엔 이유를 짧게 표시), 매도는
-// status가 holding/trailing일 때만 활성화(킬스위치 상태와 무관 — 매도는
-// 항상 허용). 둘 다 실거래 경고가 담긴 확인 대화상자를 거친 뒤에만 호출된다.
-function ManualTradeButtons({ state, onBuy, onSell, buyBusy, sellBusy }) {
-  const enabled = !!state?.enabled
-  const status = state?.status || 'idle'
-  const canBuy = enabled && status === 'idle'
-  const canSell = status === 'holding' || status === 'trailing'
-
-  const buyDisabledReason = !enabled ? '킬스위치 꺼짐' : status !== 'idle' ? '이미 보유 중' : ''
-  const sellDisabledReason = !canSell ? '보유 중이 아님' : ''
-
-  const handleBuyClick = () => {
-    if (!window.confirm('실제 계좌로 1주 매수 주문이 나갑니다. 계속할까요?')) return
-    onBuy()
-  }
-
-  const handleSellClick = () => {
-    if (!window.confirm('실제 계좌로 보유 포지션을 매도합니다. 계속할까요?')) return
-    onSell()
-  }
-
-  return (
-    <section style={{ border: '1px solid var(--border, #333)', borderRadius: 12, padding: 16, marginBottom: 16 }}>
-      <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 8 }}>
-        수동 매수/매도 (자동 감지 엔진과 별개로 지금 이 순간 직접 실행 — 대상 종목/수량은
-        전략 규칙과 동일하게 1주 고정)
-      </div>
-      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
-        <button
-          type="button"
-          disabled={!canBuy || buyBusy}
-          onClick={handleBuyClick}
-          style={{
-            padding: '10px 20px',
-            fontSize: 15,
-            fontWeight: 700,
-            borderRadius: 8,
-            border: 'none',
-            cursor: !canBuy || buyBusy ? 'default' : 'pointer',
-            color: '#fff',
-            // 한국 증시 관행(상승/매수=빨강 --up, 하락/매도=파랑 --down, memory
-            // chart-color-korean-convention) 그대로 매수 버튼에 --up(빨강) 적용.
-            background: 'var(--up, #d03b3b)',
-            opacity: !canBuy || buyBusy ? 0.5 : 1,
-          }}
-        >
-          {buyBusy ? '매수 처리 중…' : '수동 매수'}
-        </button>
-        {!canBuy && <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>{buyDisabledReason}</span>}
-
-        <button
-          type="button"
-          disabled={!canSell || sellBusy}
-          onClick={handleSellClick}
-          style={{
-            padding: '10px 20px',
-            fontSize: 15,
-            fontWeight: 700,
-            borderRadius: 8,
-            border: 'none',
-            cursor: !canSell || sellBusy ? 'default' : 'pointer',
-            color: '#fff',
-            // 매도 버튼에 --down(파랑) 적용 — 위 매수 버튼과 동일한 한국 증시
-            // 관행 근거.
-            background: 'var(--down, #256abf)',
-            opacity: !canSell || sellBusy ? 0.5 : 1,
-          }}
-        >
-          {sellBusy ? '매도 처리 중…' : '수동 매도'}
-        </button>
-        {!canSell && <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>{sellDisabledReason}</span>}
-      </div>
-    </section>
+    </div>
   )
 }
 
@@ -479,72 +351,45 @@ function ManualTradeButtons({ state, onBuy, onSell, buyBusy, sellBusy }) {
 // 새 주문이 아니다).
 function SyncButton({ onSync, busy, result, error }) {
   return (
-    <section style={{ border: '1px solid var(--border, #333)', borderRadius: 12, padding: 16, marginBottom: 16 }}>
-      <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 8 }}>
-        동기화 — 화면 상태(위 보유 현황)가 실제 계좌와 다른 것 같으면 눌러서 바로 확인·정정합니다
-        (실계좌 잔고를 직접 조회해 비교, 새 주문은 내지 않습니다).
-      </div>
-      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={onSync}
-          style={{
-            padding: '10px 20px',
-            fontSize: 15,
-            fontWeight: 700,
-            borderRadius: 8,
-            border: '1px solid var(--border, #333)',
-            cursor: busy ? 'default' : 'pointer',
-            background: 'transparent',
-            color: 'var(--text)',
-            opacity: busy ? 0.5 : 1,
-          }}
-        >
+    <div className="at-block">
+      <div className="at-k">실계좌 동기화 — 위 보유 현황이 실제 계좌와 다른 것 같을 때 (잔고만 조회·정정, 새 주문 없음)</div>
+      <div className="at-row at-row-start">
+        <button type="button" className="btn btn-secondary" disabled={busy} onClick={onSync}>
           {busy ? '확인 중…' : '동기화'}
         </button>
-        {error && <span style={{ fontSize: 13, color: 'var(--down, #256abf)' }}>정정 실패: {error}</span>}
+        {error && <span className="at-sub-inline at-warn-text">정정 실패: {error}</span>}
         {!error && result && (
-          <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+          <span className="at-sub-inline">
             {result.corrected
               ? `정정함 — ${result.detail}`
               : `일치 확인 — 실보유 ${result.actual_qty}주, 변경 없음`}
           </span>
         )}
       </div>
-    </section>
+    </div>
   )
 }
 
+// 엔진 전략 상세 — 청산 요약은 위 수동 매매 블록에 있으므로 여기는 접어 둔다.
 function StrategyPanel({ target }) {
   const rules = buildStrategyRules(target)
   return (
-    <section style={{ border: '1px solid var(--border, #333)', borderRadius: 12, padding: 16, marginBottom: 16 }}>
-      <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 8 }}>
-        전략 규칙 요약 (사용자가 직접 확정한 값 — 아래는 지금 설정된 규칙 그대로이며, 매매 판단
-        문구가 아닙니다)
+    <details className="at-block at-details">
+      <summary>전략 규칙 상세 (진입 조건·시간 제한·리스크 연동 포함)</summary>
+      <p className="at-note">사용자가 직접 확정한 값입니다. 지금 설정된 규칙 그대로이며 매매 판단 문구가 아닙니다.</p>
+      <div className="at-scroll">
+        <table className="at-table at-table-rules">
+          <tbody>
+            {rules.map((r) => (
+              <tr key={r.label}>
+                <th scope="row">{r.label}</th>
+                <td>{r.value}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-        <tbody>
-          {rules.map((r) => (
-            <tr key={r.label}>
-              <td
-                style={{
-                  padding: '6px 8px',
-                  whiteSpace: 'nowrap',
-                  color: 'var(--text-muted)',
-                  verticalAlign: 'top',
-                  borderBottom: '1px solid var(--border, #333)',
-                }}
-              >
-                {r.label}
-              </td>
-              <td style={{ padding: '6px 8px', borderBottom: '1px solid var(--border, #333)' }}>{r.value}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </section>
+    </details>
   )
 }
 
@@ -555,64 +400,45 @@ const ENTRY_SOURCE_LABEL = { auto: '자동 진입', manual: '수동 진입' }
 // 않는다(숫자만 표시, 종합 판단은 사용자 몫).
 function PerformancePanel({ data, loading, error }) {
   return (
-    <section style={{ border: '1px solid var(--border, #333)', borderRadius: 12, padding: 16, marginBottom: 16 }}>
-      <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 8 }}>
-        진입 방식별 성과 — 완결된 거래만 집계합니다(진입만 있고 아직 청산 안 된 보유 중 포지션은 제외).
-      </div>
+    <div className="at-block">
+      <div className="at-k">진입 방식별 성과 — 완결된 거래만 집계합니다(청산 안 된 보유 중 포지션은 제외).</div>
       {loading && <div className="state">불러오는 중…</div>}
       {error && <div className="state">불러오기 실패: {error}</div>}
       {!loading && !error && data && (
-        <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-            <thead>
-              <tr>
-                {['진입 방식', '거래 수', '승률', '평균 수익률', '누적 수익률'].map((h) => (
-                  <th
-                    key={h}
-                    style={{
-                      textAlign: 'left',
-                      padding: '4px 8px',
-                      borderBottom: '1px solid var(--border, #333)',
-                      whiteSpace: 'nowrap',
-                      fontWeight: 600,
-                    }}
-                  >
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {['auto', 'manual'].map((source) => {
-                const g = data.by_source[source]
-                return (
-                  <tr key={source}>
-                    <td style={{ padding: '4px 8px', borderBottom: '1px solid var(--border, #333)', whiteSpace: 'nowrap' }}>
-                      {ENTRY_SOURCE_LABEL[source]}
-                    </td>
-                    <td style={{ padding: '4px 8px', borderBottom: '1px solid var(--border, #333)' }}>{g.n}건</td>
-                    <td style={{ padding: '4px 8px', borderBottom: '1px solid var(--border, #333)' }}>
-                      {g.win_rate_pct === null ? '-' : `${g.win_rate_pct.toFixed(1)}%`}
-                    </td>
-                    <td className={rateClass(g.avg_return_pct)} style={{ padding: '4px 8px', borderBottom: '1px solid var(--border, #333)' }}>
-                      {rateLabel(g.avg_return_pct)}
-                    </td>
-                    <td className={rateClass(g.cumulative_return_pct)} style={{ padding: '4px 8px', borderBottom: '1px solid var(--border, #333)' }}>
-                      {rateLabel(g.cumulative_return_pct)}
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
+        <>
+          <div className="at-scroll">
+            <table className="at-table">
+              <thead>
+                <tr>
+                  {['진입 방식', '거래 수', '승률', '평균 수익률', '누적 수익률'].map((h) => (
+                    <th key={h}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {['auto', 'manual'].map((source) => {
+                  const g = data.by_source[source]
+                  return (
+                    <tr key={source}>
+                      <td className="nowrap">{ENTRY_SOURCE_LABEL[source]}</td>
+                      <td>{g.n}건</td>
+                      <td>{g.win_rate_pct === null ? '-' : `${g.win_rate_pct.toFixed(1)}%`}</td>
+                      <td className={rateClass(g.avg_return_pct)}>{rateLabel(g.avg_return_pct)}</td>
+                      <td className={rateClass(g.cumulative_return_pct)}>{rateLabel(g.cumulative_return_pct)}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
           {data.anomalies.length > 0 && (
-            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 8 }}>
+            <div className="at-sub">
               집계에서 제외된 이상 항목 {data.anomalies.length}건이 있습니다(진입·청산 짝을 찾지 못함).
             </div>
           )}
-        </div>
+        </>
       )}
-    </section>
+    </div>
   )
 }
 
@@ -637,19 +463,12 @@ function LogPanel({
   const rangeStart = total === 0 ? 0 : offset + 1
   const rangeEnd = offset + rows.length
   return (
-    <section style={{ border: '1px solid var(--border, #333)', borderRadius: 12, padding: 16 }}>
-      <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 8 }}>
-        매매일지 (감사 로그, 최신이 위) — 실행뿐 아니라 판단 근거(신호값)까지 그대로 기록합니다.
-      </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
-        <label style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
+    <div className="at-block">
+      <div className="at-k">매매일지 (감사 로그, 최신이 위) — 실행뿐 아니라 판단 근거(신호값)까지 그대로 기록합니다.</div>
+      <div className="at-row at-row-start at-log-bar">
+        <label className="at-date">
           날짜
-          <input
-            type="date"
-            value={date}
-            onChange={(e) => onDateChange(e.target.value)}
-            style={{ padding: '4px 6px', fontSize: 13 }}
-          />
+          <input className="er-input" type="date" value={date} onChange={(e) => onDateChange(e.target.value)} />
         </label>
         {date && (
           <button type="button" className="toggle-chip" onClick={() => onDateChange('')}>
@@ -663,14 +482,13 @@ function LogPanel({
         <button
           type="button"
           className={`toggle-chip ${showAll ? 'active' : ''}`}
+          aria-pressed={showAll}
           onClick={() => onShowAllChange(!showAll)}
         >
           차단·오류 포함
         </button>
-        <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-          {total === 0 ? '0건' : `${rangeStart}–${rangeEnd} / 총 ${total}건`}
-        </span>
-        <div style={{ display: 'flex', gap: 6 }}>
+        <span className="at-sub-inline">{total === 0 ? '0건' : `${rangeStart}–${rangeEnd} / 총 ${total}건`}</span>
+        <div className="at-row at-row-start">
           <button type="button" className="toggle-chip" disabled={!hasPrev} onClick={onPrevPage}>
             이전
           </button>
@@ -688,48 +506,33 @@ function LogPanel({
         </div>
       )}
       {!loading && !error && rows.length > 0 && (
-        <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+        <div className="at-scroll">
+          <table className="at-table at-table-log">
             <thead>
               <tr>
                 {['시각', '이벤트', '가격', '판단 근거'].map((h) => (
-                  <th
-                    key={h}
-                    style={{
-                      textAlign: 'left',
-                      padding: '4px 8px',
-                      borderBottom: '1px solid var(--border, #333)',
-                      whiteSpace: 'nowrap',
-                      fontWeight: 600,
-                    }}
-                  >
-                    {h}
-                  </th>
+                  <th key={h}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {rows.map((r) => (
                 <tr key={r.id}>
-                  <td style={{ padding: '4px 8px', borderBottom: '1px solid var(--border, #333)', whiteSpace: 'nowrap' }}>
-                    {formatDateTime(r.ts)}
-                  </td>
-                  <td style={{ padding: '4px 8px', borderBottom: '1px solid var(--border, #333)', whiteSpace: 'nowrap' }}>
+                  <td className="nowrap">{formatDateTime(r.ts)}</td>
+                  <td className="nowrap">
                     <span className={`badge ${r.event_type === 'error' ? 'badge-warn' : 'badge-info'}`}>
                       {EVENT_TYPE_LABEL[r.event_type] || r.event_type}
                     </span>
                   </td>
-                  <td style={{ padding: '4px 8px', borderBottom: '1px solid var(--border, #333)', whiteSpace: 'nowrap' }}>
-                    {priceLabel(r.price)}
-                  </td>
-                  <td style={{ padding: '4px 8px', borderBottom: '1px solid var(--border, #333)' }}>{r.reason}</td>
+                  <td className="nowrap">{priceLabel(r.price)}</td>
+                  <td className="at-reason">{r.reason}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       )}
-    </section>
+    </div>
   )
 }
 
@@ -762,6 +565,7 @@ export default function AutoTradePage() {
   // PLAN.md §5.56 — 자동 감지 엔진 위에 얹는 수동 매수/매도 버튼 상태.
   const [manualBuyBusy, setManualBuyBusy] = useState(false)
   const [manualBuyError, setManualBuyError] = useState(null)
+  const [manualBuyNotice, setManualBuyNotice] = useState(null)
   const [manualSellBusy, setManualSellBusy] = useState(false)
   const [manualSellError, setManualSellError] = useState(null)
 
@@ -853,11 +657,18 @@ export default function AutoTradePage() {
     }
   }
 
-  const handleManualBuy = async () => {
+  const handleManualBuy = async (rules, acknowledged = false) => {
     setManualBuyError(null)
+    setManualBuyNotice(null)
     setManualBuyBusy(true)
     try {
-      await manualBuyAutoTrade()
+      const next = await manualBuyAutoTrade(rules, acknowledged)
+      const applied = next?.manual_exit_rules
+      setManualBuyNotice(
+        `수동 매수 완료 — 진입가 ${priceLabel(next?.entry_price)}. 적용 조건: ${
+          applied ? applied.summary : '엔진 고정 규칙'
+        }${applied && !applied.has_stop ? ' (손절 조건 없음)' : ''} + 장마감 강제청산·외인 수급 반전.`,
+      )
       await Promise.all([loadState(), loadLog(), loadPerformance()])
     } catch (err) {
       setManualBuyError(err.message)
@@ -866,8 +677,14 @@ export default function AutoTradePage() {
     }
   }
 
+  const handleUpdateRules = async (rules, acknowledged = false) => {
+    await updateManualExitRules(rules, acknowledged)
+    await Promise.all([loadState(), loadLog()])
+  }
+
   const handleManualSell = async () => {
     setManualSellError(null)
+    setManualBuyNotice(null)
     setManualSellBusy(true)
     try {
       await manualSellAutoTrade()
@@ -895,10 +712,9 @@ export default function AutoTradePage() {
   }
 
   return (
-    <div>
-      <div className="toggle-hint" style={{ marginBottom: 16 }}>
-        이 탭은 이 프로젝트 최초의 완전자동매매 실행 엔진입니다 — 실제 증권 계좌(실전)에
-        연결되어 있으며, 킬스위치가 켜져 있으면 사람의 추가 확인 없이 실제 주문이 나갑니다.
+    <div className="at-page">
+      <div className="at-banner" role="note">
+        실전 계좌에 연결된 탭입니다. 실제 주문이 나가는 곳은 &lsquo;자동매매 엔진&rsquo; 영역뿐이며, 수동 매수 때 고른 청산 조건도 이 엔진이 실제 매도 주문으로 실행합니다.
       </div>
 
       {stateError && <div className="state">상태 조회 실패: {stateError}</div>}
@@ -906,33 +722,52 @@ export default function AutoTradePage() {
       {manualBuyError && <div className="state">수동 매수 실패: {manualBuyError}</div>}
       {manualSellError && <div className="state">수동 매도 실패: {manualSellError}</div>}
 
-      <TargetBanner state={state} />
-      <KillSwitch state={state} onToggle={handleToggle} busy={toggleBusy} />
-      <StatusPanel state={state} />
-      <ManualTradeButtons
-        state={state}
-        onBuy={handleManualBuy}
-        onSell={handleManualSell}
-        buyBusy={manualBuyBusy}
-        sellBusy={manualSellBusy}
-      />
-      <CandidatePanel />
-      <SyncButton onSync={handleSync} busy={syncBusy} result={syncResult} error={syncError} />
-      <StrategyPanel target={state?.target} />
-      <PerformancePanel data={perfData} loading={perfLoading} error={perfError} />
-      <LogPanel
-        rows={logRows}
-        loading={logLoading}
-        error={logError}
-        date={logDate}
-        onDateChange={handleLogDateChange}
-        offset={logOffset}
-        total={logTotal}
-        onPrevPage={handleLogPrevPage}
-        onNextPage={handleLogNextPage}
-        showAll={logShowAll}
-        onShowAllChange={handleLogShowAllChange}
-      />
+      <section className="at-area" aria-label="자동매매 엔진 (실주문)">
+        <SectionHeader
+          title="자동매매 엔진"
+          desc="대상 종목 1주를 신호에 따라 매수하고 고정 규칙으로 청산합니다. 수동 매수는 직접 고른 청산 조건으로 관리됩니다."
+          badge="실주문"
+          tone="warn"
+        />
+        <TargetBanner state={state} />
+        <KillSwitch state={state} onToggle={handleToggle} busy={toggleBusy} />
+        <StatusPanel state={state} />
+        <ManualTradePanel
+          state={state}
+          onBuy={handleManualBuy}
+          onSell={handleManualSell}
+          onUpdateRules={handleUpdateRules}
+          buyBusy={manualBuyBusy}
+          sellBusy={manualSellBusy}
+          buyNotice={manualBuyNotice}
+        />
+        <SyncButton onSync={handleSync} busy={syncBusy} result={syncResult} error={syncError} />
+      </section>
+
+      <section className="at-area" aria-label="후보·기록">
+        <SectionHeader
+          title="후보·기록"
+          desc="매수 후보 관리, 엔진 전략 상세, 성과와 매매일지입니다. 이 영역에서는 주문이 나가지 않습니다."
+          badge="기록"
+          tone="neutral"
+        />
+        <CandidatePanel />
+        <StrategyPanel target={state?.target} />
+        <PerformancePanel data={perfData} loading={perfLoading} error={perfError} />
+        <LogPanel
+          rows={logRows}
+          loading={logLoading}
+          error={logError}
+          date={logDate}
+          onDateChange={handleLogDateChange}
+          offset={logOffset}
+          total={logTotal}
+          onPrevPage={handleLogPrevPage}
+          onNextPage={handleLogNextPage}
+          showAll={logShowAll}
+          onShowAllChange={handleLogShowAllChange}
+        />
+      </section>
     </div>
   )
 }

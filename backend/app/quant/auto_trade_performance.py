@@ -37,7 +37,14 @@ KNOWN_BAD_LOG_IDS = frozenset({1920})
 
 ENTRY_EVENT_TYPES = frozenset({"entry", "manual_entry"})
 EXIT_EVENT_TYPES = frozenset(
-    {"exit_stop_loss", "exit_trail", "exit_eod_forced", "exit_flow_reversal", "exit_manual"}
+    {
+        "exit_stop_loss",
+        "exit_trail",
+        "exit_eod_forced",
+        "exit_flow_reversal",
+        "exit_manual",
+        "exit_manual_rule",  # Phase 5.118 — 수동 매수 사용자 조건 청산
+    }
 )
 
 _EMPTY_GROUP: dict[str, Any] = {

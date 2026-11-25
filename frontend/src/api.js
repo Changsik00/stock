@@ -12,6 +12,23 @@ async function getJson(url) {
 // 프로젝트 대부분의 엔드포인트는 조회 전용이라 지금까지 getJson만으로 충분했다).
 // POST는 응답 바디가 있는 라우터(생성/청산 기록)에, DELETE는 204(바디 없음)에 맞춰
 // 응답이 비어 있으면 파싱하지 않는다.
+// 오류 응답 -> Error. detail이 {message, errors?, warnings?, needs_acknowledge?}이면(Phase 5.118 청산 조건 검증)
+// message를 본문으로 쓰고 목록은 속성으로 붙인다.
+function apiError(status, parsed) {
+  const d = parsed?.detail
+  const err = new Error(
+    (typeof d === 'string' ? d : d?.message) || (d ? JSON.stringify(d) : `요청 실패 (${status})`),
+  )
+  err.status = status
+  if (d && typeof d === 'object') {
+    err.errors = d.errors || null
+    err.warnings = d.warnings || null
+    err.infos = d.infos || null
+    err.needsAcknowledge = !!d.needs_acknowledge
+  }
+  return err
+}
+
 async function postJson(url, body) {
   const res = await fetch(url, {
     method: 'POST',
@@ -21,8 +38,7 @@ async function postJson(url, body) {
   const text = await res.text()
   const parsed = text ? JSON.parse(text) : null
   if (!res.ok) {
-    const detail = typeof parsed?.detail === 'string' ? parsed.detail : JSON.stringify(parsed?.detail)
-    throw new Error(detail || `요청 실패 (${res.status})`)
+    throw apiError(res.status, parsed)
   }
   return parsed
 }
@@ -693,8 +709,11 @@ export async function fetchAutoTradeLog({ date, limit = 30, offset = 0, tradesOn
 // 서버가 킬스위치/status/예산 가드를 전부 다시 검증하므로(우회 경로 없음)
 // 이 함수는 그냥 호출만 한다. 실패 시(킬스위치 꺼짐/이미 보유중/예산 초과/
 // 주문 실패 등) throw된 Error의 message에 서버 detail 문구가 그대로 담긴다.
-export async function manualBuyAutoTrade() {
-  return postJson('/api/auto-trade/manual-buy', {})
+export async function manualBuyAutoTrade(rules, acknowledgeWarnings = false) {
+  return postJson(
+    '/api/auto-trade/manual-buy',
+    rules ? { rules, acknowledge_warnings: acknowledgeWarnings } : {},
+  )
 }
 
 // 수동 매수 종목 후보 (PLAN.md §5.89-1). GET -> { recommended: [...], manual: [...] }.
@@ -713,8 +732,7 @@ export async function deleteTradeCandidate(id) {
   const text = await res.text()
   const parsed = text ? JSON.parse(text) : null
   if (!res.ok) {
-    const detail = typeof parsed?.detail === 'string' ? parsed.detail : JSON.stringify(parsed?.detail)
-    throw new Error(detail || `요청 실패 (${res.status})`)
+    throw apiError(res.status, parsed)
   }
   return parsed
 }
@@ -759,8 +777,7 @@ async function sendJson(method, url, body) {
   const text = await res.text()
   const parsed = text ? JSON.parse(text) : null
   if (!res.ok) {
-    const detail = typeof parsed?.detail === 'string' ? parsed.detail : JSON.stringify(parsed?.detail)
-    throw new Error(detail || `요청 실패 (${res.status})`)
+    throw apiError(res.status, parsed)
   }
   return parsed
 }
@@ -782,3 +799,18 @@ export const hideNarrativeIssue = (id) => sendJson('POST', `/api/narratives/issu
 export const unhideNarrativeIssue = (id) => sendJson('POST', `/api/narratives/issues/${id}/unhide`)
 export const refreshNarratives = () => sendJson('POST', '/api/narratives/refresh')
 export const getNarrativeNews = (limit = 50) => getJson(`/api/narratives/news?limit=${limit}`)
+
+// -- 수동 매수 청산 조건 (Phase 5.118) ---------------------------------------------
+// rules: [{ kind, value, activate_pct? }] — null/undefined면 엔진 고정 규칙(기존 동작).
+export const updateManualExitRules = (rules, acknowledgeWarnings = false) =>
+  sendJson('PUT', '/api/auto-trade/manual-exit-rules', { rules, acknowledge_warnings: acknowledgeWarnings })
+// 순수 분석(주문·상태 변경 없음) -> { errors, warnings, infos, scenarios, reference_price, entry_price }
+export const analyzeExitRules = (rules, { entryPrice, peak } = {}) =>
+  sendJson('POST', '/api/auto-trade/manual-exit-rules/analyze', {
+    rules,
+    ...(entryPrice != null ? { entry_price: entryPrice } : {}),
+    ...(peak != null ? { peak } : {}),
+  })
+export const fetchExitPresets = () => getJson('/api/auto-trade/exit-presets')
+export const addExitPreset = (name, rules) => sendJson('POST', '/api/auto-trade/exit-presets', { name, rules })
+export const deleteExitPreset = (id) => sendJson('DELETE', `/api/auto-trade/exit-presets/${id}`)
