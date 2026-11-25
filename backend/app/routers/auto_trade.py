@@ -22,6 +22,7 @@ docstring 참고.
 from __future__ import annotations
 
 import datetime as dt
+import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -45,7 +46,7 @@ from ..collectors.auto_trader import (
 )
 from ..db import get_session
 from ..market_hours import KST
-from ..models import AutoTradeLog, AutoTradeState, StockIntradayBar, StockOhlcv
+from ..models import AutoTradeLog, AutoTradeState, ExitPreset, StockIntradayBar, StockOhlcv
 from ..quant.auto_trade_backtest import run_backtest
 from ..quant.auto_trade_intraday_backtest import run_intraday_backtest
 from ..quant.auto_trade_performance import (
@@ -53,6 +54,8 @@ from ..quant.auto_trade_performance import (
     EXIT_EVENT_TYPES,
     summarize_by_entry_source,
 )
+from ..quant import auto_trade_rules as _engine_rules
+from ..quant import exit_rules as exit_rules_mod
 from ..quant.auto_trade_rules import TARGET_NAME, check_entry_budget, foreign_flow_sign
 from ..quant.etf_pair_metrics import PAIR_ETF_NAMES, PAIR_ETFS
 from .stocks import _warm_stock_intraday
@@ -64,7 +67,165 @@ class AutoTradeToggle(BaseModel):
     enabled: bool
 
 
-def _serialize_state(row: AutoTradeState, current_price: float | None) -> dict:
+class ExitRuleIn(BaseModel):
+    """수동 매수 청산 조건 1개(Phase 5.118). 검증은 `quant/exit_rules.validate_rules`."""
+
+    kind: str
+    value: float
+    activate_pct: float | None = None
+
+
+class ManualBuyBody(BaseModel):
+    """`rules`를 생략(None)하면 엔진 고정 규칙으로 관리(기존 동작). 목록을 주면(빈 목록 포함)
+    이 포지션은 수동 진입으로 표시되고 사용자 조건 + 장마감·외인반전으로 청산된다."""
+
+    rules: list[ExitRuleIn] | None = None
+    # 주의(warnings)가 있으면 409로 돌려주고, 사용자가 확인한 뒤 true로 재요청해야 진행한다.
+    acknowledge_warnings: bool = False
+
+
+class ManualRulesBody(BaseModel):
+    rules: list[ExitRuleIn]
+    acknowledge_warnings: bool = False
+
+
+class AnalyzeBody(BaseModel):
+    rules: list[ExitRuleIn]
+    entry_price: float | None = None
+    peak: float | None = None
+
+
+class PresetIn(BaseModel):
+    name: str
+    rules: list[ExitRuleIn]
+
+
+def _rules_payload(rules: list[ExitRuleIn] | None) -> list[dict]:
+    return [r.model_dump(exclude_none=True) for r in (rules or [])]
+
+
+async def _recent_range_stats(session: AsyncSession, code: str, days: int = 20) -> dict | None:
+    """최근 일봉으로 일중 변동 통계(평균 고저폭 %, 최대 상승폭 %)를 구한다. 5일 미만이면 None."""
+    try:
+        rows = (
+            await session.execute(
+                select(StockOhlcv.open, StockOhlcv.high, StockOhlcv.low)
+                .where(StockOhlcv.code == code)
+                .order_by(StockOhlcv.date.desc())
+                .limit(days)
+            )
+        ).all()
+    except Exception:  # noqa: BLE001 - 통계는 보조 정보라 실패해도 분석은 계속한다
+        return None
+    ranges, ups = [], []
+    for o, h, lo in rows:
+        if o and h and lo and o > 0:
+            ranges.append((h - lo) / o * 100)
+            ups.append((h / o - 1) * 100)
+    if len(ranges) < 5:
+        return None
+    return {"avg_range_pct": sum(ranges) / len(ranges), "max_up_pct": max(ups), "days": len(ranges)}
+
+
+async def _reference_price(code: str) -> float | None:
+    """/state의 reference_price와 같은 소스 — 최근 1분봉 종가."""
+    try:
+        intraday = await _warm_stock_intraday(code, 1)
+    except Exception:  # noqa: BLE001
+        return None
+    bars = intraday.get("bars") if intraday else None
+    return bars[-1]["close"] if bars else None
+
+
+def _gate_analysis(analysis: dict, acknowledge: bool) -> list[dict]:
+    """errors -> 400(메시지 목록), 미확인 warnings -> 409(warnings 반환). 통과하면 정규화 조건."""
+    if analysis["errors"]:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": " / ".join(analysis["errors"]), "errors": analysis["errors"]},
+        )
+    if analysis["warnings"] and not acknowledge:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "확인이 필요한 주의 사항이 있습니다.",
+                "needs_acknowledge": True,
+                "warnings": analysis["warnings"],
+                "infos": analysis["infos"],
+            },
+        )
+    return analysis["rules"]
+
+
+def _load_manual_blob(row: AutoTradeState) -> dict | None:
+    """수동 진입이면 저장된 {"rules","original","modified_at"}를, 아니면(또는 깨졌으면) None."""
+    if row.entry_source != "manual":
+        return None
+    try:
+        data = json.loads(row.manual_exit_rules or "")
+        if isinstance(data.get("rules"), list):
+            return data
+    except Exception:  # noqa: BLE001 - 깨진 JSON은 None(엔진 고정 규칙 폴백, collectors와 동일)
+        pass
+    return None
+
+
+def _decorate_rules(rules: list[dict], entry_price: float | None, peak: float | None) -> list[dict]:
+    """조건별 라벨·발동가(원)·트레일 활성 여부를 붙인다(표시용)."""
+    out = []
+    for r in rules:
+        item = dict(r)
+        item["label"] = exit_rules_mod.describe_rule(r)
+        item["kind_label"] = exit_rules_mod.KIND_LABEL[r["kind"]]
+        if entry_price:
+            item["trigger_price"] = exit_rules_mod.trigger_price(r, entry_price, peak)
+            if r["kind"] == "trail_pct":
+                item["active"] = exit_rules_mod.trail_active(r, entry_price, peak)
+                if r.get("activate_pct") is not None:
+                    item["activate_price"] = exit_rules_mod.trigger_price(
+                        {"kind": "take_profit_pct", "value": r["activate_pct"]}, entry_price, None
+                    )
+        out.append(item)
+    return out
+
+
+def _engine_rule_constants() -> dict:
+    """엔진 고정 규칙 값(표시용) — auto_trade_rules 상수를 그대로 노출한다(읽기 전용)."""
+    return {
+        "stop_loss_pct": abs(_engine_rules.STOP_LOSS_PCT),
+        "stop_loss_pct_risk_alert": abs(_engine_rules.STOP_LOSS_PCT_RISK_ALERT),
+        "trail_activate_pct": _engine_rules.TRAIL_ACTIVATE_PCT,
+        "trail_giveback_pct": _engine_rules.TRAIL_GIVEBACK_PCT,
+        "eod_forced_exit_start": _engine_rules.EOD_FORCED_EXIT_START.strftime("%H:%M"),
+        "eod_forced_exit_end": _engine_rules.EOD_FORCED_EXIT_END.strftime("%H:%M"),
+    }
+
+
+def _entry_source_label(row: AutoTradeState) -> str | None:
+    if row.status not in ("holding", "trailing"):
+        return None
+    return "manual" if _load_manual_blob(row) is not None else "auto"
+
+
+def _serialize_manual(row: AutoTradeState) -> dict | None:
+    blob = _load_manual_blob(row)
+    if blob is None or row.status not in ("holding", "trailing"):
+        return None
+    entry = float(row.entry_price) if row.entry_price is not None else None
+    peak = float(row.peak_price) if row.peak_price is not None else None
+    original = blob.get("original") or blob["rules"]
+    return {
+        "rules": _decorate_rules(blob["rules"], entry, peak),
+        "original": _decorate_rules(original, entry, None),
+        "modified_at": blob.get("modified_at"),
+        "has_stop": exit_rules_mod.has_stop(blob["rules"]),
+        "summary": exit_rules_mod.describe_rules(blob["rules"]),
+    }
+
+
+def _serialize_state(
+    row: AutoTradeState, current_price: float | None, reference_price: float | None = None
+) -> dict:
     unrealized_pnl = unrealized_pnl_pct = None
     if current_price is not None and row.entry_price is not None and row.entry_qty:
         entry_price = float(row.entry_price)
@@ -86,6 +247,8 @@ def _serialize_state(row: AutoTradeState, current_price: float | None) -> dict:
         # 대시보드에서도 참고할 수 있게 그대로 노출한다.
         "entry_foreign_flow_sign": row.entry_foreign_flow_sign,
         "current_price": current_price,
+        # Phase 5.118 — 대기 중 수동 매수 조건 미리보기용 기준가(최근 1분봉 종가, 주문가 아님).
+        "reference_price": reference_price,
         "unrealized_pnl": unrealized_pnl,
         "unrealized_pnl_pct": unrealized_pnl_pct,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
@@ -97,6 +260,10 @@ def _serialize_state(row: AutoTradeState, current_price: float | None) -> dict:
             "qty": TARGET_QTY,
             "db_code": row.code,
         },
+        # Phase 5.118 — 진입 방식('manual'|'auto'|None=포지션 없음)과 수동 진입의 사용자 청산 조건.
+        "entry_source": _entry_source_label(row),
+        "manual_exit_rules": _serialize_manual(row),
+        "engine_rules": _engine_rule_constants(),
         # 관찰만 하는(주문 안 나감) 쌍 ETF.
         "observing": [
             {"code": c, "name": PAIR_ETF_NAMES.get(c, c), "multiple": m}
@@ -135,15 +302,19 @@ async def get_auto_trade_state(session: AsyncSession = Depends(get_session)) -> 
     row = await _get_or_create_state(session)
 
     current_price = None
+    reference_price = None
+    try:
+        intraday = await _warm_stock_intraday(row.code, 1)
+    except Exception:  # noqa: BLE001 - 상태 조회 자체가 크래시하지 않도록
+        intraday = None
+    bars = intraday.get("bars") if intraday else None
+    last_close = bars[-1]["close"] if bars else None
     if row.status in ("holding", "trailing"):
-        try:
-            intraday = await _warm_stock_intraday(row.code, 1)
-        except Exception:  # noqa: BLE001 - 상태 조회 자체가 크래시하지 않도록
-            intraday = None
-        bars = intraday.get("bars") if intraday else None
-        current_price = bars[-1]["close"] if bars else None
+        current_price = last_close
+    else:
+        reference_price = last_close  # 대기 중엔 수동 매수 조건 미리보기 기준가로만 쓴다
 
-    return _serialize_state(row, current_price)
+    return _serialize_state(row, current_price, reference_price)
 
 
 @router.post("/toggle")
@@ -161,7 +332,9 @@ async def toggle_auto_trade(body: AutoTradeToggle, session: AsyncSession = Depen
 
 
 @router.post("/manual-buy")
-async def manual_buy_auto_trade(session: AsyncSession = Depends(get_session)) -> dict:
+async def manual_buy_auto_trade(
+    body: ManualBuyBody | None = None, session: AsyncSession = Depends(get_session)
+) -> dict:
     """사용자가 대시보드에서 직접 매수 버튼을 눌러 실행하는 수동 진입
     (PLAN.md §5.54 위에 얹는 수동 개입 — 자동 감지 엔진 `run_auto_trade`/
     `watch_stop_loss` 자체는 건드리지 않는다). 자동 진입 경로(`_handle_idle`)와
@@ -186,6 +359,13 @@ async def manual_buy_auto_trade(session: AsyncSession = Depends(get_session)) ->
     (status="holding", entry_price/entry_qty/entry_at/entry_order_no,
     entry_foreign_flow_sign까지). `AutoTradeLog`에 `event_type="manual_entry"`로
     기록한다.
+
+    **Phase 5.118 — 사용자 청산 조건**: body의 `rules`(익절/손절/고점 대비 하락/목표가/손절가)를
+    주면 이 포지션은 `entry_source='manual'`로 표시되고, 엔진이 그 조건 + 장마감 강제청산·외인
+    수급 반전으로 실제 매도 주문을 낸다(기본 손절 -1.5%/경보 -0.8%는 적용하지 않음). 검증(주문
+    전): `exit_rules.analyze_rules`의 errors(범위·중복·모순·즉시발동 등)면 400, warnings가 있는데
+    `acknowledge_warnings`가 아니면 409(warnings 반환, 주문 안 나감). `rules`를
+    생략하면 기존처럼 엔진 고정 규칙으로 관리된다. 빈 목록은 허용(손절 조건 없음 — UI가 경고).
 
     Returns 갱신된 state(`GET /state`와 동일한 직렬화 형태)."""
     async with _position_lock:
@@ -218,6 +398,14 @@ async def manual_buy_auto_trade(session: AsyncSession = Depends(get_session)) ->
             raise HTTPException(status_code=502, detail="현재가 데이터 없음(장 마감 등) — 수동 매수 불가")
 
         current_price = bars[-1]["close"]
+
+        # Phase 5.118 — 사용자 청산 조건 검증(주문 전). None이면 엔진 고정 규칙(기존 동작).
+        manual_rules: list[dict] | None = None
+        if body is not None and body.rules is not None:
+            stats = await _recent_range_stats(session, state.code or TARGET_CODE)
+            analysis = exit_rules_mod.analyze_rules(_rules_payload(body.rules), current_price, stats=stats)
+            manual_rules = _gate_analysis(analysis, body.acknowledge_warnings)
+
         notional = TARGET_QTY * current_price
         if not check_entry_budget(state.status, notional, AUTO_TRADE_TOTAL_BUDGET_KRW, MAX_ORDER_NOTIONAL_KRW):
             raise HTTPException(
@@ -278,6 +466,14 @@ async def manual_buy_auto_trade(session: AsyncSession = Depends(get_session)) ->
         state.entry_at = now
         state.entry_order_no = str(order_response.get("ord_no")) if order_response.get("ord_no") else None
         state.peak_price = None
+        if manual_rules is not None:
+            state.entry_source = "manual"
+            state.manual_exit_rules = json.dumps(
+                {"rules": manual_rules, "original": manual_rules, "modified_at": None}, ensure_ascii=False
+            )
+        else:
+            state.entry_source = None
+            state.manual_exit_rules = None
 
         # `_handle_idle`과 동일 — 진입 시점 외인 현물 누적 순매수 부호를 기록해
         # 둔다(이후 반전 감지용). 조회 실패해도 진입 자체는 이미 체결됐으니 막지 않는다.
@@ -300,12 +496,134 @@ async def manual_buy_auto_trade(session: AsyncSession = Depends(get_session)) ->
             reason=(
                 f"사용자가 대시보드에서 수동으로 매수 주문을 실행함(지정가 {order_price}원, "
                 f"{TARGET_QTY}주), 진입 시점 외인 현물 수급 부호={state.entry_foreign_flow_sign!r}"
+                + (
+                    f" / 청산 조건: {exit_rules_mod.describe_rules(manual_rules)}"
+                    + ("" if exit_rules_mod.has_stop(manual_rules) else " (손절 조건 없음)")
+                    + " + 장마감 강제청산·외인 수급 반전"
+                    if manual_rules is not None
+                    else " / 청산: 엔진 고정 규칙"
+                )
             ),
-            signal_snapshot={"current_price": current_price, "source": "manual"},
+            signal_snapshot={
+                "current_price": current_price,
+                "source": "manual",
+                **({"exit_rules": manual_rules} if manual_rules is not None else {}),
+            },
             order_response=order_response,
         )
 
         return _serialize_state(state, current_price=order_price)
+
+
+@router.put("/manual-exit-rules")
+async def update_manual_exit_rules(
+    body: ManualRulesBody, session: AsyncSession = Depends(get_session)
+) -> dict:
+    """보유 중인 **수동 진입** 포지션의 청산 조건 수정(Phase 5.118). 주문은 내지 않는다.
+    수동 진입이 아니거나(자동 진입/보유 아님) 하면 409 — 엔진 고정 규칙은 어떤 경로로도
+    바꿀 수 없다. 원래 조건(`original`)은 보존하고 `modified_at`을 남기며 매매일지에
+    `manual_rules_update` 로그를 쓴다. 검증은 매수 시와 동일(현재가 기준 목표가/손절가)."""
+    async with _position_lock:
+        state = await _get_or_create_state(session)
+        blob = _load_manual_blob(state)
+        if state.status not in ("holding", "trailing") or blob is None:
+            raise HTTPException(
+                status_code=409,
+                detail="수동 매수로 진입해 보유 중인 포지션에서만 청산 조건을 수정할 수 있습니다.",
+            )
+        code = state.code or TARGET_CODE
+        try:
+            intraday = await _warm_stock_intraday(code, 1)
+            bars = intraday.get("bars") if intraday else None
+            current_price = bars[-1]["close"] if bars else None
+        except Exception:  # noqa: BLE001 - 현재가를 모르면 가격 대소 비교만 건너뛴다
+            current_price = None
+        entry = float(state.entry_price) if state.entry_price is not None else None
+        peak = float(state.peak_price) if state.peak_price is not None else None
+        stats = await _recent_range_stats(session, code)
+        analysis = exit_rules_mod.analyze_rules(
+            _rules_payload(body.rules), current_price, entry_price=entry, peak=peak, stats=stats
+        )
+        rules = _gate_analysis(analysis, body.acknowledge_warnings)
+
+        before = exit_rules_mod.describe_rules(blob["rules"])
+        now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+        state.manual_exit_rules = json.dumps(
+            {
+                "rules": rules,
+                "original": blob.get("original") or blob["rules"],
+                "modified_at": now_iso,
+            },
+            ensure_ascii=False,
+        )
+        await session.commit()
+        await session.refresh(state)
+        await _log(
+            session,
+            event_type="manual_rules_update",
+            code=code,
+            price=current_price,
+            reason=(
+                f"수동 매수 청산 조건 수정: [{before}] -> [{exit_rules_mod.describe_rules(rules)}]"
+                + ("" if exit_rules_mod.has_stop(rules) else " (손절 조건 없음)")
+            ),
+            signal_snapshot={"source": "manual", "before": blob["rules"], "after": rules},
+        )
+        return _serialize_state(state, current_price=current_price)
+
+
+@router.post("/manual-exit-rules/analyze")
+async def analyze_manual_exit_rules(body: AnalyzeBody, session: AsyncSession = Depends(get_session)) -> dict:
+    """청산 조건 분석(errors/warnings/infos/scenarios) — 순수 분석, 주문·상태 변경 없음.
+    기준가는 `/state`의 reference_price와 같은 소스(최근 1분봉 종가). 보유 중이면 body에
+    entry_price/peak가 없을 때 현재 포지션의 값을 쓴다."""
+    state = await _get_or_create_state(session)
+    code = state.code or TARGET_CODE
+    ref = await _reference_price(code)
+    entry, peak = body.entry_price, body.peak
+    if entry is None and state.status in ("holding", "trailing") and state.entry_price is not None:
+        entry = float(state.entry_price)
+        if peak is None and state.peak_price is not None:
+            peak = float(state.peak_price)
+    stats = await _recent_range_stats(session, code)
+    res = exit_rules_mod.analyze_rules(_rules_payload(body.rules), ref, entry_price=entry, peak=peak, stats=stats)
+    res["reference_price"] = ref
+    res["entry_price"] = entry
+    return res
+
+
+@router.get("/exit-presets")
+async def list_exit_presets(session: AsyncSession = Depends(get_session)) -> list[dict]:
+    rows = (await session.execute(select(ExitPreset).order_by(ExitPreset.id))).scalars().all()
+    return [{"id": r.id, "name": r.name, "rules": r.rules} for r in rows]
+
+
+@router.post("/exit-presets")
+async def add_exit_preset(body: PresetIn, session: AsyncSession = Depends(get_session)) -> dict:
+    name = body.name.strip()[:60]
+    if not name:
+        raise HTTPException(status_code=400, detail="프리셋 이름을 입력하세요.")
+    # 저장은 errors만 막는다(warnings는 사용 시점에 다시 확인). 기준가 없이 % 위주로 검사.
+    rules, errs = exit_rules_mod.validate_rules(_rules_payload(body.rules), None)
+    if errs:
+        raise HTTPException(status_code=400, detail={"message": " / ".join(errs), "errors": errs})
+    if not rules:
+        raise HTTPException(status_code=400, detail="저장할 조건이 없습니다.")
+    row = ExitPreset(name=name, rules=rules)
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+    return {"id": row.id, "name": row.name, "rules": row.rules}
+
+
+@router.delete("/exit-presets/{preset_id}")
+async def delete_exit_preset(preset_id: int, session: AsyncSession = Depends(get_session)) -> dict:
+    row = await session.get(ExitPreset, preset_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="프리셋을 찾을 수 없습니다.")
+    await session.delete(row)
+    await session.commit()
+    return {"deleted": preset_id}
 
 
 @router.post("/manual-sell")
@@ -444,6 +762,8 @@ async def sync_auto_trade_state(session: AsyncSession = Depends(get_session)) ->
             state.entry_order_no = None
             state.peak_price = None
             state.entry_foreign_flow_sign = None
+            state.entry_source = None
+            state.manual_exit_rules = None
             await session.commit()
             await session.refresh(state)
             return {
@@ -511,6 +831,9 @@ async def sync_auto_trade_state(session: AsyncSession = Depends(get_session)) ->
         state.entry_order_no = None
         state.peak_price = None
         state.entry_foreign_flow_sign = None
+        # 백필 포지션은 사용자 조건을 알 수 없으므로 엔진 고정 규칙(안전 측)으로 관리한다.
+        state.entry_source = None
+        state.manual_exit_rules = None
         await session.commit()
         await session.refresh(state)
         return {

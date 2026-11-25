@@ -794,6 +794,12 @@ class AutoTradeState(Base):
     # 무관하게 조기 청산한다. idle로 돌아갈 때(손절/청산/강제청산 전부) 다른
     # entry_* 필드와 함께 None으로 리셋된다.
     entry_foreign_flow_sign: Mapped[str | None] = mapped_column(String(10))
+    # Phase 5.118 — 수동 매수 진입 포지션의 청산 조건. entry_source가 None/'auto'면 엔진
+    # 고정 규칙(기존 경로 그대로), 'manual'이면 manual_exit_rules(JSON 텍스트:
+    # {"rules":[...], "original":[...], "modified_at": ISO|null})로 청산 판정한다.
+    # idle로 돌아갈 때 다른 entry_* 필드와 함께 None으로 리셋된다.
+    entry_source: Mapped[str | None] = mapped_column(String(10))
+    manual_exit_rules: Mapped[str | None] = mapped_column(Text)
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
@@ -954,4 +960,17 @@ class NarrativeProposal(Base):
     decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     approved_narrative_id: Mapped[int | None] = mapped_column(
         ForeignKey("market_narrative.id", ondelete="SET NULL"), nullable=True
+    )
+
+
+class ExitPreset(Base):
+    """수동 매수 청산 조건 조합 프리셋 (Phase 5.118). ``rules``=[{"kind","value"[,"activate_pct"]}]."""
+
+    __tablename__ = "exit_preset"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(60), nullable=False)
+    rules: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )

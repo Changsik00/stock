@@ -178,6 +178,7 @@ from ..quant.auto_trade_rules import (
     foreign_flow_sign,
     is_entry_blocked_by_time,
 )
+from ..quant.exit_rules import decide_manual_exit
 from ..quant.nq_shadow import merge_nq_shadow
 from ..quant.signals import moving_average_cross, volume_spike
 from ..routers.markets import _warm_index_tiles_live, _warm_regime
@@ -208,6 +209,7 @@ TRADE_EVENT_TYPES = frozenset(
         "exit_eod_forced",
         "exit_flow_reversal",
         "exit_manual",
+        "exit_manual_rule",
     }
 )
 
@@ -773,6 +775,8 @@ async def _execute_sell(
     state.entry_order_no = None
     state.peak_price = None
     state.entry_foreign_flow_sign = None
+    state.entry_source = None  # Phase 5.118 — 수동 진입 표식·조건도 함께 리셋
+    state.manual_exit_rules = None
     await session.commit()
 
     await _log(
@@ -865,6 +869,102 @@ async def _check_forced_exits(
     return result
 
 
+def _manual_rules_of(state: AutoTradeState) -> list[dict] | None:
+    """수동 진입 포지션이면 사용자 조건 목록을, 아니면 None(= 엔진 고정 규칙 경로).
+    표식이 manual인데 조건 JSON이 깨졌으면 안전 측으로 None(고정 손절 규칙 적용)을 돌려준다."""
+    if getattr(state, "entry_source", None) != "manual":
+        return None
+    try:
+        data = json.loads(state.manual_exit_rules or "")
+        rules = data["rules"]
+        if not isinstance(rules, list):
+            raise ValueError("rules가 목록이 아님")
+        return rules
+    except Exception as e:  # noqa: BLE001 - 깨진 조건은 고정 규칙으로 폴백(손절 없는 포지션 방지)
+        logger.warning("auto-trade: 수동 청산 조건 JSON 해석 실패, 엔진 고정 규칙으로 폴백: %s", e)
+        return None
+
+
+async def _handle_manual_position(
+    session: AsyncSession,
+    state: AutoTradeState,
+    code: str,
+    current_price: float,
+    signal_snapshot: dict,
+    result: dict,
+    now_kst: dt.time,
+    risk_alert_active: bool,
+    rules: list[dict],
+) -> dict:
+    """Phase 5.118 — 수동 진입 포지션(60초 경로). 사용자 조건에 닿으면 `_execute_sell`로 매도하고,
+    아니면 고점만 갱신한 뒤 장마감 강제청산·외인 수급 반전(`_check_forced_exits`)은 그대로 적용한다.
+    기본 손절(-1.5%)·위험경보 손절(-0.8%)은 적용하지 않는다(사용자 조건이 대신함)."""
+    decision = decide_manual_exit(
+        rules,
+        float(state.entry_price),
+        float(state.peak_price) if state.peak_price is not None else None,
+        current_price,
+    )
+    result["action"] = decision["action"]
+    if decision["action"] == "exit":
+        result["action"] = "exit_manual_rule"
+        return await _execute_sell(
+            session, state, code, current_price, "exit_manual_rule",
+            "수동 매수 사용자 조건 청산 — " + decision["reason"], signal_snapshot, result,
+        )
+    if decision["action"] == "peak_update":
+        state.peak_price = decision["new_peak_price"]
+        await session.commit()
+    return await _check_forced_exits(
+        session, state, code, current_price, signal_snapshot, result, now_kst, risk_alert_active
+    )
+
+
+async def _watch_manual_position(
+    session: AsyncSession,
+    state: AutoTradeState,
+    code: str,
+    entry_price: float,
+    rules: list[dict],
+    result: dict,
+) -> dict:
+    """Phase 5.118 — 수동 진입 포지션의 30초 실시간 호가 감시(`watch_stop_loss`가 호출, 락 보유 중).
+    실시간 매수1호가로 사용자 조건을 판정하고 닿으면 `_execute_sell`로 매도한다. 강제청산·외인반전은
+    이 30초 잡 범위 밖이라 60초 경로가 맡는다(자동 진입과 동일 분업)."""
+    try:
+        async with KiwoomClient() as client:
+            live_price = await _best_fill_price(client, code, "sell")
+    except Exception as e:  # noqa: BLE001 - 호가 조회 실패는 다음 폴링에서 재시도
+        logger.warning("auto-trade(fast watch, manual): 호가 조회 실패, 이번 폴링 건너뜀: %s", e)
+        result["action"] = "error"
+        result["error"] = str(e)[:300]
+        return result
+    if live_price is None:
+        return result
+
+    decision = decide_manual_exit(
+        rules, entry_price, float(state.peak_price) if state.peak_price is not None else None, live_price
+    )
+    if decision["action"] == "exit":
+        pct = round((live_price - entry_price) / entry_price * 100, 4) if entry_price else None
+        snapshot = {
+            "live_price": live_price,
+            "entry_price": entry_price,
+            "pct": pct,
+            "source": "realtime_quote_fast_watch_manual",
+            "rules": rules,
+        }
+        result["action"] = "exit_manual_rule"
+        return await _execute_sell(
+            session, state, code, live_price, "exit_manual_rule",
+            "[실시간 호가 감시(30초)] 수동 매수 사용자 조건 청산 — " + decision["reason"], snapshot, result,
+        )
+    if decision["action"] == "peak_update":
+        state.peak_price = decision["new_peak_price"]
+        await session.commit()
+    return result
+
+
 async def _handle_position(
     session: AsyncSession,
     state: AutoTradeState,
@@ -875,6 +975,15 @@ async def _handle_position(
     now_kst: dt.time,
     risk_alert_active: bool,
 ) -> dict:
+    # Phase 5.118 — 수동 매수로 진입한 포지션은 사용자가 고른 조건으로 청산 판정한다
+    # (고정 손절/트레일 대신). 자동 진입(entry_source가 None/'auto')은 아래 기존 경로 그대로.
+    manual_rules = _manual_rules_of(state)
+    if manual_rules is not None:
+        return await _handle_manual_position(
+            session, state, code, current_price, signal_snapshot, result, now_kst, risk_alert_active,
+            manual_rules,
+        )
+
     # PLAN.md §5.83(2026-09-09) — 트레일 청산이 ratchet 방식(고점 대비 반납폭)
     # 으로 바뀌면서 ma_cross가 더 이상 필요 없다(quant/auto_trade_rules.py
     # 모듈 docstring 참고) — 이 호출에서 ma_cross를 넘기지 않는다. 호출부
@@ -992,6 +1101,11 @@ async def watch_stop_loss(session: AsyncSession) -> dict:
 
         code = state.code or TARGET_CODE
 
+        # Phase 5.118 — 수동 진입 포지션은 고정 손절/리스크 경보 손절 대신 사용자 조건으로 감시.
+        manual_rules = _manual_rules_of(state)
+        if manual_rules is not None:
+            return await _watch_manual_position(session, state, code, entry_price, manual_rules, result)
+
         # PLAN.md §5.55-3 — 리스크 경보 활성 중이면 손절선을 타이트하게(위
         # 모듈 docstring 참고). 조회 실패는 `_get_risk_alert_active` 내부에서
         # 이미 위험 없음(False)으로 폴백한다.
@@ -1074,6 +1188,8 @@ async def watch_stop_loss(session: AsyncSession) -> dict:
         state.entry_order_no = None
         state.peak_price = None
         state.entry_foreign_flow_sign = None
+        state.entry_source = None  # Phase 5.118 — 수동 진입 표식·조건도 함께 리셋
+        state.manual_exit_rules = None
         await session.commit()
 
         await _log(

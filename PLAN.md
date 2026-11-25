@@ -5626,6 +5626,13 @@ Phase 5.104의 연속. "외인 양손 · 현선물" 섹션의 외인 현물·베
 - 장중 절전도 확인: 11-24 11:04(9분)·13:20(5분)·15:36(17분) idle sleep. 그래서 절전 방지(`scripts/launchd/com.changsik.stock.keepawake.plist`)를 평일 **07:50~22:05**로 넓혔다(원래 17:52~22:02). 잠든 Mac을 깨우는 `sudo pmset repeat wakeorpoweron MTWRF 07:45:00`은 관리자 암호가 필요해 사용자가 직접 실행해야 한다(아직 미설정 — `pmset -g sched`에 repeat 없음).
 - 운영 주의: 20:00~21:30에는 worker를 재시작하지 않는다(스크리너 → flow_rank 순서가 끊긴다).
 
+**실측 (2026-11-24 장 후)** — 위 "미검증" 3개 중 2개 해소
+- 15:30 이후 실제 적재 확인: 당일 `futures_외국인` 샘플 400개, 마지막 샘플 16:14.
+- 첫 reconcile 메시지 출력 확인(`collect_log`): `확정=+688,500 마지막샘플(16:14)=+711,500 차이=-23,000 | 15:29이전=+1,647,800 차이=-959,300`(백만원).
+- 값 흐름: 15:29 +16,478억 → 15:56 +14,984억 → 16:05~16:14 +7,115억 → 18:00 확정 +6,885억. 15:29 대비 차이의 대부분(약 -7,900억)은 16:05 전후 소스 정정이고, 16:15 이후에도 소폭(-230억) 더 바뀌었다(11-11에도 16:10→18:01 사이 변경 실측). **장중·16:15 마지막 값은 잠정, 18:00 배치가 확정**이다. 장 막판 '선물 대량 매수'처럼 보이는 차이는 실제 매매가 아니라 소스 정정이다.
+- 08:45~09:05 구간은 소스가 0만 줘서 계속 확인 불가(위 후속 참고).
+- 5.116(NQ 동조도) 장중 화면 동작은 아직 미검증.
+
 ---
 
 ### Phase 5.116 — 코스피·나스닥 선물 장중 동조도 카드 (2026-11-23 사용자 요청)
@@ -5671,6 +5678,57 @@ Phase 5.104의 연속. "외인 양손 · 현선물" 섹션의 외인 현물·베
 - 검증: `test_flow_anomaly.py` 7건·`test_flow_anomaly_router.py` 1건(2099년 가짜 행, 캐시 주입) 통과. 11-24 장중 실응답에서 알테오젠(196170)이 매도 쏠림에 포착(거래대금 1,725억, 기관+외국인 −549억, 비중 32%, 공매도 2.5배; 거래대금 배수는 1.8배라 거래대금 급증은 미충족, 수급·공매도 두 조건). 판정 150종목, 매도 쏠림 1·매수 쏠림 8. 라이트/다크 × 390/1280px 스크린샷(수급 상위 토글 조합, 이상 거래 두 탭), 가로 오버플로 0, `oxlint` 신규 경고 없음.
 - **미검증**: 장중 갱신 동작(잠정치→마감 후 확정 전환), 설명 토글 문구 화면 확인, 임계값의 타당성(첫 배정값, 과거 검증 없음). 수급 상위 데이터가 11-19에서 멈춘 건 별건(저녁 배치 복구 예정).
 - **한계**: 수급은 거래대금 상위 약 155종목만 장중 스캔하므로 그 밖의 종목은 판정하지 않는다. 공매도 데이터가 약 28개 관찰 종목에만 있어 대부분 종목은 거래대금·수급 두 조건만으로 후보가 된다. backend 프로세스의 value-rank/live 캐시는 대시보드 폴링이 채우므로 아무도 열지 않았으면 `value_rank` 폴백(전 거래일)이다.
+
+### Phase 5.118 — 수동 매수 시 사용자 청산 조건 (2026-11-25 사용자 요청)
+
+**경위**: 처음엔 "조건 알림(알림 전용)"으로 만들었으나 사용자의 의도는 수동 매수 때 고른 조건으로 엔진이 **실제 매도 주문**을 내는 것이었다. 알림 전용 기능(ExitRulesCard·감시 루프·알림 API·exit_rule/exit_bookmark 테이블·kt00018 보유조회 추가분)은 모두 제거하고 수동 매수 조건으로 흡수했다. 사용자가 이 실거래 규칙 변경을 명시적으로 요청했다(수동 진입 포지션의 청산 판정에 한정).
+
+**규칙(자동 진입은 불변)**:
+- 자동 진입(엔진 신호): 기존 고정 규칙 그대로(손절 -1.5%/경보 -0.8%, +1% 트레일 전환, 고점 -0.5%, 15:20 강제청산, 외인 수급 반전). `quant/auto_trade_rules.py`·킬스위치는 수정하지 않았다. `entry_source`가 NULL이면 기존 코드 경로를 그대로 탄다.
+- 수동 진입(`POST /api/auto-trade/manual-buy`에 `rules`를 준 경우): 사용자 조건(익절 %, 손절 %, 고점 대비 하락 % [선택: 진입가 +X% 도달 후부터], 목표가, 손절가; 여러 개 동시, 먼저 닿는 조건으로 청산) + **15:20 장마감 강제청산·외인 수급 반전은 그대로 적용**. 기본 손절(-1.5%)·위험경보 손절(-0.8%)·+1% 트레일 전환은 적용하지 않는다. 손절 조건이 없으면 UI가 주황 경고와 confirm 문구로 명시한다(차단은 하지 않음). 종목·수량은 0167A0 1주(5만원 주문 캡) 그대로.
+- `rules`를 생략한 manual-buy는 기존처럼 엔진 고정 규칙으로 관리된다.
+
+**구현**:
+- DB(마이그레이션 `d9a4f2b6c1e8`를 이번 설계로 고침: downgrade→수정→upgrade): `auto_trade_state.entry_source`(NULL/'manual'), `manual_exit_rules`(JSON 텍스트 `{"rules","original","modified_at"}`; 수정해도 원래 조건 보존), `exit_preset`(조합 프리셋, 시드 2개). 다른 테이블 변경 없음. `idle` 복귀 시(`_execute_sell`·30초 감시 매도·/sync) 다른 entry_* 필드와 함께 리셋. 조건 JSON이 깨졌으면 안전 측으로 엔진 고정 규칙으로 폴백.
+- `quant/exit_rules.py` 순수 함수: `validate_rules`(pct 0<v≤50, 가격>0, 목표가>현재가, 손절가<현재가, 종류별 1개), `decide_manual_exit`(경계 포함, 동시 충족 시 손절→익절→트레일 순 사유; peak는 기존 `peak_price`, 초기값=진입가), `trigger_price`.
+- `collectors/auto_trader.py`: 60초 경로 `_handle_position`(분기) → `_handle_manual_position`(사용자 조건 판정 후 고점 갱신, 이어서 `_check_forced_exits`로 강제청산·외인반전), 30초 실시간 호가 경로 `watch_stop_loss`(분기) → `_watch_manual_position`(조건 판정만). 매도는 둘 다 기존 `_execute_sell` 재사용(새 주문 경로 없음, `_position_lock` 안). 새 event_type `exit_manual_rule`(성과 집계·거래 보기에 포함), reason에 조건·값·진입가 대비 % 기록.
+- `routers/auto_trade.py`: manual-buy body 검증(주문 전 400), manual_entry 로그 reason에 청산 조건 기록; `PUT /api/auto-trade/manual-exit-rules`(수동 진입 보유 중에만, 주문 없음, `manual_rules_update` 로그); `GET/POST/DELETE /api/auto-trade/exit-presets`; `GET /state`에 `entry_source`·`manual_exit_rules`(조건별 발동가 원·트레일 활성 여부·원래 조건·수정 시각)·`engine_rules`(엔진 상수)·대기 중 `reference_price`(최근 1분봉 종가, 미리보기용) 추가. CORS에 PUT/DELETE 추가.
+- 프론트: `components/ManualTradePanel.jsx`(+`exitRules.js`). 매수 전: 청산 조건 접기/펼치기(기본 접힘, 접힘 시 선택 조건 요약 한 줄 + 매수 버튼, 손절 없으면 주황; 펼치면 프리셋 select + 숫자 input + 조합 프리셋 칩/저장 + 선택 목록 발동가 미리보기), `aria-expanded`/`aria-controls`, 접힘 상태 localStorage. confirm에 조건 요약, 매수 직후 결과 메시지에 적용 조건. 보유 중 수동 진입: 상단 "매수 시 조건"(진입 시각·진입가·조건별 발동가, '수정됨 hh:mm'과 원래 조건) + "이 포지션은 사용자 조건 + 장마감·외인반전으로 청산" 표 + 접이식 조건 수정. 자동 진입이면 `/state`의 `engine_rules`로 만든 고정 규칙 표(하드코딩 제거). 조건 알림 영역 삭제. 매매일지에 '수동 조건 청산/수정' 라벨.
+
+**테스트**: `tests/test_exit_rules.py` 55건(판정 경계값·트레일 활성화·검증·manual vs auto 분기·손절 없는 manual은 기본 손절 미적용·강제청산/외인반전 manual에도 적용·30초 경로·`_execute_sell` 경유·리셋·manual-buy body 검증·PUT). 실 `AutoTradeState`/킬스위치에 닿지 않는 가짜 세션 기반. 전체 pytest: 4 failed(기존 `test_basis_live_router` 1, `test_market_minute_bars` 1, `test_markets_positioning_hitrate_router` 2)·92 errors(실제 킬스위치 ON 가드로 `test_auto_trader_collector`·`test_auto_trade_router` 거부, 정상). 거부된 기존 테스트의 회귀 확인은 **임시 별도 DB**(`stock_scratch118`, alembic upgrade 후 실행·삭제)에서 해당 5개 파일 155건 전부 통과로 대신했다(실 DB·킬스위치는 건드리지 않음).
+
+**검증**: 프론트 빌드, Playwright(route mock; POST/PUT/DELETE 차단, confirm dismiss) 라이트/다크 × 390/1280px × 대기·수동보유·수정됨·자동보유 × 접힘/펼침 스크린샷 확인, 접힘 토글 aria-expanded·localStorage 확인, 가로 넘침 없음. worker는 `idle` 상태에서 재시작해 반영.
+
+**미검증(정직하게)**: 실제 수동 매수→조건 도달→실제 매도 주문 end-to-end(실거래라 실행하지 않음; `_execute_sell`은 기존 경로이고 단위 테스트는 가짜 키움). 실시간 장중에서 30초 경로의 호가 기반 판정 지연·1분봉 종가 기반 60초 경로와의 판정 차이, 호가 단위 보정(발동가는 순수 계산값), 15:20 이후 manual 포지션의 EOD 판정이 `status='holding'` 고정(수동은 trailing 전환 없음)이라 "트레일링이면 오버나잇 허용" 조건이 수동에는 해당하지 않는 점의 실제 영향, 수동 포지션 재시작 후 복원(DB에 저장되므로 이론상 유지, 실측 안 함).
+
+#### Phase 5.118 후속 — 조건 가이드·검증 (2026-11-25 사용자 요청: "조건을 잘못 쓰거나 이해 못하고 쓸 수 있으니 guide와 validate")
+
+**원칙**: 검증은 백엔드 단일 소스(`quant/exit_rules.analyze_rules`). 프론트는 표시·입력 힌트만 하고 판정은 서버가 한다. `validate_rules`는 analyze의 errors만 쓰는 래퍼(`(rules, errors 목록)`)로 정리. 판정 로직(`decide_manual_exit`)은 손대지 않았고 시나리오도 그 함수를 그대로 호출한다. 킬스위치·`auto_trade_rules.py`·자동 진입 규칙 불변.
+
+**API**: `POST /api/auto-trade/manual-exit-rules/analyze`(rules, 선택 entry_price/peak; 주문·상태 변경 없음, 기준가=`/state`의 reference_price와 같은 1분봉 종가, 보유 중이면 현재 포지션 진입가·고점) -> `{rules, errors, warnings, infos, scenarios, reference_price, entry_price}`. manual-buy·PUT: errors면 400 `{message, errors[]}`, warnings가 있는데 `acknowledge_warnings`가 true가 아니면 409 `{needs_acknowledge, warnings[]}`(주문·저장 없음). 프리셋 저장도 errors 있는 조합은 400.
+
+**차단(errors) 규칙**
+| 규칙 | 기준 |
+|---|---|
+| 조건 개수·중복 | 최대 5개, 같은 종류 중복 불가 |
+| 익절 % + 목표가 / 손절 % + 손절가 | 동시 불가(하나만) |
+| 범위 | 익절·손절 0.2~30%, 고점 대비 0.1~10%, 도달 후 0.1~30% (경계 포함), 가격>0, activate는 고점 대비에만 |
+| 트레일 무력화 | 익절(또는 목표가 환산 %) <= 도달 후 값 |
+| 노이즈 청산 | 고점 대비 하락폭(현재가 x %) < 호가단위 2틱(ETF 5원 x 2 = 10원) |
+| 즉시 발동 | 목표가 <= 기준가, 손절가 >= 기준가 (보유 중 수정이면 기준가=현재가) |
+| 모순 | 손절가(또는 환산)가 익절가 이상 (가격끼리는 기준가 없이도 비교) |
+
+**주의(warnings, 확인 후 진행)**: 손절 조건 없음(도달 후 없는 트레일만 있으면 "사실상 손절 역할" 문구로 대체) / 도달 후 없는 고점 대비(진입 직후 작동, +0.3% 후 -X% 예시 손실률) / 하락폭 > 도달 후(트레일 청산가가 진입가 아래, 최악 %) / 손익비 < 1 / 익절 < 0.3% / 손절 < 0.3%(일중 변동 통계 있으면 "최근 N일 평균 일중 변동 X%" 포함) / 익절이 최근 20일 일중 최대 상승폭(일봉 (고가/시가-1) 최대)보다 큼(거의 닿지 않음). 통계는 `stock_ohlcv` 최근 20거래일(5일 미만이면 문구 생략).
+**안내(infos, 확인 요구 안 함)**: 약 30초 감시라 급변 시 불리하게 체결 가능 — 확인창을 매번 강제하지 않으려고 warnings가 아니라 별도 `infos`로 둠.
+**시나리오**: 기준가에서 4개 경로(곧장 상승 / 중간까지 올랐다 꺾임 / 오르지 않고 하락 / 소폭 상승 후 15:20)를 0.05% 간격으로 `decide_manual_exit`에 흘려 "어느 조건으로 약 몇 원(±%)에 청산"을 문장화. 가상 경로이며 예측이 아님을 화면에 표기.
+
+**프론트**: `ManualTradePanel.jsx` — 조건 변경 300ms 디바운스로 analyze 호출(접힌 상태에서도, 버튼 비활성에 필요). 오류=주황 채움+아이콘(빨강 미사용), 주의=주황 윤곽 점선, 안내·시나리오=회색. 접힌 줄에 "오류 N · 주의 N" 배지, errors 있으면 매수/수정 버튼 비활성+이유. 종류별 허용 범위 힌트, 고점 대비 선택 시 "도달 후 %" 기본 1%(비우면 즉시 작동+주의). '조건 가이드' 접이식(기본 접힘, localStorage): 종류별 설명+기준가 예시, OR 규칙, 익절/고점 대비 관계, 수동 추가 규칙, 추천 조합 3개 버튼(① 고정 익절형 +1/-1, ② 추세 추종형 +1% 도달 후 고점 -0.5%·손절 -1%, ③ ②+익절 +3%). 매수/수정 confirm은 클릭 시 최신 analyze 결과의 warnings를 포함하고 확인 후 `acknowledge_warnings: true`로 요청. '수정됨 hh:mm' 배지는 회색(`badge-neutral`).
+**프리셋 교체**: 모순 조합(익절 + 도달 후 없는 트레일)이던 시드를 추천 3개로 교체(마이그레이션 `d9a4f2b6c1e8` 시드 수정 + 실 DB의 시드 2행 UPDATE·1행 INSERT; 사용자 생성 프리셋은 없었고 건드리지 않음).
+
+**테스트**: `tests/test_exit_rules.py` 96건(analyze 각 error/warning 경계값, 시나리오 결과가 decide_manual_exit와 일치, 라우터 400/409/확인 후 진행·analyze 무부작용·프리셋 저장 거부; 주문은 가짜 클라이언트). 전체 pytest: 4 failed(기존 동일 4건)·92 errors(킬스위치 가드, 정상); 가드 거부 파일은 임시 DB `stock_scratch118`(삭제함)에서 188건 통과. **검증**: 프론트 빌드, Playwright(POST는 analyze 외 차단, confirm dismiss) 라이트/다크 x 390/1280 x 가이드 펼침·오류·주의·추천 조합 적용 스크린샷 확인, 가로 넘침 없음.
+**미검증(정직하게)**: 보유 중(`ManualPosition`) 수정 UI의 analyze(entry/peak 전달)는 단위 테스트(API)만 하고 화면은 스크린샷 확인 안 함. 확인창(window.confirm) 실제 문구는 dismiss만 해서 매수/수정 성공 경로를 브라우저로 끝까지 타지 않음. 호가단위는 ETF 5원 고정 상수(코드에 호가단위 함수가 없었음; 다른 종목 확장 시 가격대별 규칙 필요). 일중 변동 통계는 일봉 기반 근사. 실제 체결 슬리피지·30초 지연은 시나리오에 반영되지 않음.
+
+---
 
 ---
 
