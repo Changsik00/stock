@@ -15,8 +15,10 @@ plan_stock_ohlcv_fetch_start`/`upsert_stock_ohlcv_rows`를 그대로 재사용�
 잡과 공유하기 위해 `services.py`로 이전됐다(그쪽 모듈 docstring "종목
 캔들(stock_ohlcv) 공용 헬퍼" 절 참고). 온디맨드 전용 관심사(60초 쿨다운,
 NXT 장중 판정)는 가져오지 않는다 — 이 잡은 스케줄러 프로세스에서 하루 1회만
-돌아 쿨다운이 무의미하고, "장중"이라는 개념도 이 배치엔 없다(18:00 KST,
-정규장+NXT 모두 마감 이후 실행이 기본 전제).
+돌아 쿨다운이 무의미하고, "장중"이라는 개념도 이 배치엔 없다.
+**주의(Phase 5.119 정정)**: 18:00 본배치 시점엔 NXT 애프터마켓이 20:00까지 거래 중이라
+당일 행은 확정 종가가 아닌 중간값이다. 그래서 20:05(NXT 마감 후)에 scheduler의
+``_run_post_nxt_close_job``이 같은 잡을 재실행해 당일 행을 upsert로 정정한다.
 
 **신규 vs 기존 판단**: `stock_ohlcv`에 그 코드의 행이 하나도 없으면(watchlist에
 막 추가된 종목) `BACKFILL_DAYS`(180거래일 목표 — Phase 5.34 온디맨드 기본값
@@ -60,7 +62,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..clients import naver_index
 from ..models import StockOhlcv
-from ..services import plan_stock_ohlcv_fetch_start, upsert_stock_ohlcv_rows
+from ..services import fetch_and_upsert_stock_ohlcv, plan_stock_ohlcv_fetch_start
 from .base import REGISTRY
 from .watchlist_sync import list_watchlist_codes
 
@@ -78,7 +80,7 @@ REQUEST_DELAY_SECONDS = 0.2
 
 
 async def _sync_one_code(
-    session: AsyncSession, code: str, target_date: dt.date
+    session: AsyncSession, code: str, target_date: dt.date, refresh_target: bool = False
 ) -> tuple[int, bool]:
     """code 하나의 stock_ohlcv를 target_date까지 채운다.
 
@@ -91,26 +93,33 @@ async def _sync_one_code(
     ).scalar_one_or_none()
 
     if existing_max is not None and existing_max >= target_date:
-        return 0, False  # 이미 이 배치 기준일까지 캐시됨(예: 사용자가 오늘 이미 열어봄)
-
-    fetch_start = plan_stock_ohlcv_fetch_start(existing_max, target_date, BACKFILL_DAYS)
-    rows = await asyncio.to_thread(naver_index.fetch_stock_series, code, fetch_start, target_date)
-
+        if not refresh_target:
+            return 0, False  # 이미 이 배치 기준일까지 캐시됨(예: 사용자가 오늘 이미 열어봄)
+        # NXT 마감 후 재수집(Phase 5.119): 18:05 본배치가 넣은 당일 행은 NXT 애프터마켓
+        # 도중 값이라 target_date 하루치만 다시 받아 덮어쓴다.
+        fetch_start = target_date
+    else:
+        fetch_start = plan_stock_ohlcv_fetch_start(existing_max, target_date, BACKFILL_DAYS)
     async with session.begin_nested():
-        rows_written = await upsert_stock_ohlcv_rows(session, code, rows)
+        rows_written, _adjusted = await fetch_and_upsert_stock_ohlcv(
+            session, code, fetch_start, target_date, existing_max
+        )
     return rows_written, True
 
 
-async def collect(session: AsyncSession, target_date: dt.date) -> int:
+async def collect(session: AsyncSession, target_date: dt.date, refresh_target: bool = False) -> int:
     """watchlist 전 종목의 stock_ohlcv를 target_date까지 배치로 갱신 (모듈
-    docstring "종목별 실패 격리" 참고 — 한 종목의 예외가 나머지를 막지 않는다)."""
+    docstring "종목별 실패 격리" 참고 — 한 종목의 예외가 나머지를 막지 않는다).
+
+    ``refresh_target=True``면 이미 target_date 행이 있는 종목도 그날 하루치를 다시 받아
+    덮어쓴다 — 20:05 NXT 마감 후 재수집(scheduler._run_post_nxt_close_job) 전용."""
     codes = await list_watchlist_codes(session)
     total_rows = 0
     failed = 0
 
     for code in codes:
         try:
-            rows_written, fetched = await _sync_one_code(session, code, target_date)
+            rows_written, fetched = await _sync_one_code(session, code, target_date, refresh_target)
         except Exception as e:  # noqa: BLE001 - naver_index/파싱/DB 예외 전부 개별 격리
             failed += 1
             logger.warning("stock_ohlcv_watchlist: code=%s 갱신 실패, 건너뜀: %s", code, e)

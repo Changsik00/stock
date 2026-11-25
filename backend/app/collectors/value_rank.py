@@ -57,6 +57,7 @@ import datetime as dt
 import logging
 import time
 
+from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -128,6 +129,7 @@ async def _upsert_market_rows(
                 "is_etf": stmt.excluded.is_etf,
                 "turnover": stmt.excluded.turnover,
                 "market_value_million": stmt.excluded.market_value_million,
+                "collected_at": func.now(),  # Phase 5.120 C4 — 재수집 시 수집 시각 갱신
             },
         )
         await session.execute(stmt)

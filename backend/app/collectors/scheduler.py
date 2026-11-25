@@ -1,6 +1,7 @@
 """APScheduler AsyncIOScheduler — 평일 18:00 Asia/Seoul에 REGISTRY의 전 잡 실행 +
 평일 07:30 Asia/Seoul에 "macro" 잡만 재실행(PLAN.md §5.22) +
-평일 19:30 Asia/Seoul에 "flow_rank" 잡만 재실행(PLAN.md §5.46).
+평일 19:30 Asia/Seoul에 "flow_rank" 잡만 재실행(PLAN.md §5.46) +
+평일 20:05 Asia/Seoul에 value_rank·stock_ohlcv_watchlist·volume_profile_daily 재실행(NXT 마감 후 확정 종가, Phase 5.119).
 
 기본적으로 꺼져 있다. main.py의 lifespan이 ``ENABLE_SCHEDULER=1`` 환경변수가 설정된
 경우에만 ``start_scheduler()``를 호출한다 (개발 중 의도치 않은 배치/외부 API 호출을
@@ -103,6 +104,7 @@ upsert로 **하루 두 번 실행해도 안전**(idempotent, 해당 모듈 docst
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -294,6 +296,62 @@ async def _run_premarket_outlook_log_job() -> None:
     await run_job("premarket_outlook_log", kst_now().date(), collect_fn)
 
 
+# NXT 애프터마켓(~20:00) 마감 뒤 개별 종목 EOD 재수집 대상(순서 중요: 시세 -> 캔들 -> 캔들 기반 프로파일).
+_POST_NXT_CLOSE_JOBS = ("value_rank", "stock_ohlcv_watchlist", "volume_profile_daily")
+
+
+async def _run_post_nxt_close_job() -> None:
+    """평일 KST 20:05 — NXT 마감(20:00) 뒤 개별 종목 시세 의존 잡 재수집(PLAN.md Phase 5.119).
+
+    18:00 본배치의 value_rank/stock_ohlcv_watchlist는 NXT 애프터마켓이 아직 거래 중인
+    시점(18:00~18:05) 값이라 확정 종가가 아니다. 20:05에 같은 잡을 다시 돌려 덮어쓴다.
+    재실행 안전: value_rank는 PK(date,market,rank) upsert, stock_ohlcv는 마지막 저장일부터
+    다시 받아 upsert, collect_log도 (job,target_date) upsert라 두 번째 실행을 허용한다.
+    """
+    today = kst_now().date()  # 컨테이너 시계는 UTC — KST 일자를 명시
+    from ..krx_calendar import is_krx_closed
+
+    if is_krx_closed(today):
+        logger.info("post-NXT-close re-collect skipped: %s is KRX holiday", today)
+        return
+    for job_name in _POST_NXT_CLOSE_JOBS:
+        collect_fn = REGISTRY.get(job_name)
+        if collect_fn is None:
+            logger.warning("%s job not found in REGISTRY — skipping post-NXT-close run", job_name)
+            continue
+        if job_name == "stock_ohlcv_watchlist":
+            # 18:05에 이미 당일 행이 생긴 종목은 기본 collect가 건너뛰므로 당일 행 강제 재조회
+            collect_fn = functools.partial(collect_fn, refresh_target=True)
+        await run_job(job_name, today, collect_fn)
+
+
+async def _run_freshness_check_job() -> None:
+    """평일 08:05/18:15/20:15/21:40 KST — 데이터 신선도 감시(PLAN.md Phase 5.120 C2).
+
+    레지스트리 기대값과 DB 실제를 대조해 collect_log(job="freshness_check")에 기록한다.
+    REGISTRY에는 넣지 않는다(18:00 본배치가 순회하지 않도록 직접 호출).
+    """
+    from ..db import async_session_factory
+    from ..freshness import check_freshness, summarize_problems
+    from .base import _upsert_log
+
+    now = kst_now()
+    try:
+        async with async_session_factory() as session:
+            items = await check_freshness(session, now)
+            problems = [i for i in items if i["status"] != "ok"]
+            status = "stale" if problems else "ok"
+            message = summarize_problems(items) if problems else None
+            await _upsert_log(session, "freshness_check", now.date(), status, len(problems), message)
+            await session.commit()
+        if problems:
+            logger.warning("freshness_check: %d problem(s) — %s", len(problems), message)
+        else:
+            logger.info("freshness_check ok (%d datasets)", len(items))
+    except Exception:  # noqa: BLE001 - 감시 잡 실패가 스케줄러를 멈추면 안 된다
+        logger.exception("freshness_check failed")
+
+
 def start_scheduler() -> AsyncIOScheduler:
     """Create, start, and return the module-level scheduler (idempotent)."""
     global _scheduler
@@ -378,6 +436,27 @@ def start_scheduler() -> AsyncIOScheduler:
             _run_nxt_minute_bars_job,
             CronTrigger(day_of_week="mon-fri", hour=hh, minute=mm, timezone="Asia/Seoul"),
             id=f"nxt_minute_bars_{hh:02d}{mm:02d}",
+            replace_existing=True,
+            misfire_grace_time=NXT_MISFIRE_GRACE_SECONDS,
+            coalesce=True,
+            max_instances=1,
+        )
+    # Phase 5.119 — NXT 마감(20:00) 뒤 개별 종목 EOD 재수집(value_rank/stock_ohlcv_watchlist/volume_profile_daily).
+    scheduler.add_job(
+        _run_post_nxt_close_job,
+        CronTrigger(day_of_week="mon-fri", hour=20, minute=5, timezone="Asia/Seoul"),
+        id="post_nxt_close_recollect",
+        replace_existing=True,
+        misfire_grace_time=NXT_MISFIRE_GRACE_SECONDS,
+        coalesce=True,
+        max_instances=1,
+    )
+    # Phase 5.120 C2 — 데이터 신선도 감시(기대 날짜·수집 시각 대조). 사용자가 화면에서 먼저 발견하기 전에 잡는다.
+    for hh, mm in ((8, 5), (18, 15), (20, 15), (21, 40)):
+        scheduler.add_job(
+            _run_freshness_check_job,
+            CronTrigger(day_of_week="mon-fri", hour=hh, minute=mm, timezone="Asia/Seoul"),
+            id=f"freshness_check_{hh:02d}{mm:02d}",
             replace_existing=True,
             misfire_grace_time=NXT_MISFIRE_GRACE_SECONDS,
             coalesce=True,

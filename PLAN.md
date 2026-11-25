@@ -5730,6 +5730,26 @@ Phase 5.104의 연속. "외인 양손 · 현선물" 섹션의 외인 현물·베
 
 ---
 
+### Phase 5.119 — NXT 마감(20:00) 후 개별 종목 EOD 재수집 + 마감 후 거래대금 라이브 우선 (2026-11-25 사용자 지적)
+
+**경위**: "장 마감인데 히트맵이 오늘자 정보가 아닌 것 같다". 18:00 본배치의 개별 종목 시세 의존 잡(value_rank, stock_ohlcv_watchlist, volume_profile_daily)은 NXT 애프터마켓이 20:00까지 거래 중인 18:05 시점 값이라 확정 종가가 아니었다(실측: SK하이닉스 value_rank 18:05 -11.74%, 마감 후 -12.44%). 프런트는 NXT 마감 후 `market_closed:true`가 되면 18:05 EOD 스냅샷으로 되돌아가 19:59까지 보이던 최신 값이 뒤로 가는 현상이 있었다.
+
+| 항목 | 상태 |
+|---|---|
+| `scheduler.py` `_run_post_nxt_close_job`(평일 20:05 KST, id=`post_nxt_close_recollect`): value_rank -> stock_ohlcv_watchlist -> volume_profile_daily 순차 run_job, KRX 휴장일 skip, 재실행 안전(upsert) | 완료 |
+| 18:00 본배치는 그대로 유지(당일 값 조기 확보, 20:05에 덮어씀). 잘못된 "18:00은 NXT 마감 후" 전제 docstring 정정 | 완료 |
+| 프런트 `shouldUseValueRankLive`(liveFallback.js): 장중=라이브, 마감 후엔 라이브 date가 EOD date보다 최신일 때만 라이브(배치 지연/실패 대비). Dashboard `effectiveValueRank`·`fetchValueRankAuto` 적용 | 완료 |
+| 테스트: 새 잡 등록/순서/휴장일 skip 3건 추가(frontend엔 테스트 러너 없음, 빌드·lint로 확인) | 완료 |
+| `stock_ohlcv_watchlist.collect(refresh_target=True)`: 18:05에 이미 당일 행이 생긴 종목은 기존 로직(`existing_max >= target_date` 조기 반환)이 건너뛰어 재수집이 2행만 덮어썼다 → 20:05 잡에서만 당일 하루치를 강제 재조회(테스트로 플래그 전달 확인) | 완료 |
+| 2026-11-25 당일분 수동 재수집으로 DB 정정 — value_rank 000660 -11.74%→-12.44%, stock_ohlcv 000660 close 1,022,000→1,014,000(네이버 NXT 최종가 1,014,000·-12.44%와 일치) | 완료 |
+
+**남은 것 / 한계**:
+- 20:00~20:05 사이엔 여전히 18:05 값이 표시된다.
+- ETF 순유입(etf_stats)·개인 방향성은 소스(referenceDate)가 T+1이라 범위 밖.
+- 수급 상위(flow_rank)는 소스 지연으로 21:30 catch-up까지 전일 확정치(라벨 있음).
+- 과거 날짜의 stock_ohlcv(예: 11-24 이전)는 18:05 값 그대로다 — 이번엔 당일분만 정정했다.
+- value-rank/live 마지막 캐시(19:56, -13.3%)는 NXT 마감 직전 중간값이라 확정값과 다를 수 있다(20:05 재수집이 기준).
+
 ---
 
 ## 7. 리스크 / 미확정 사항
@@ -5745,3 +5765,48 @@ Phase 5.104의 연속. "외인 양손 · 현선물" 섹션의 외인 현물·베
 | 두바이유 일별 | 무료 공식 API 없음 | WTI/브렌트만 우선, 두바이는 월별 or 오피넷 파싱 |
 | 수급 데이터 시점 | 확정치는 장마감 후 | 장중에는 잠정치(`ka10063`)임을 UI에 명시 |
 | 지수 시세 소스 | KRX Open API(`idx/kospi_dd_trd` 등)가 **403 Forbidden**(서비스 이용 승인 미비, 2026-07 확인)이라 `/api/markets/{market}/series`가 라이브 500을 반환. `index_ohlcv`를 배치로 채워 라우터는 DB만 읽도록 전환(collectors/ohlcv.py) — 코스피/코스닥은 yfinance(`^KS11`/`^KQ11`) 1차 + 네이버 fchart(`fchart.stock.naver.com/siseJson.naver`, 비공식) 폴백, 코스피200선물(k200_futures)은 yfinance에 심볼이 없어 네이버 fchart(symbol=FUT)만 사용. 두 소스 모두 거래대금(원화 금액)을 제공하지 않아 `index_ohlcv.value`는 당분간 NULL(거래대금 차트는 0으로 표시) | 임시 조치 — 추후 키움 차트 TR(OHLCV+거래대금)로 교체 예정. KRX Open API 승인이 나면 되돌릴 수 있도록 `krx_client.py`/`services.get_index_series`·`get_futures_series`는 그대로 보존 |
+
+### Phase 5.120 — 과거 데이터 정정 + 반복 회귀 원인 분석·재발방지 계획 (2026-11-25 사용자 요청)
+
+**경위**: 5.119 후속으로 사용자 요청 — "과거분도 바로잡고, 왜 버그가 회귀하는지 확인하고 재발방지 대책을 세워라. 테스트 코드도 의미가 없어 보인다."
+
+#### A. 과거 데이터 정정 (완료)
+
+| 항목 | 상태 |
+|---|---|
+| stock_ohlcv NXT 중간값 잔존 여부 — 표본 60종목 5,853행 대조 결과 **0건**. 증분 수집이 다음 날 직전 행을 다시 받아 덮어써 자동 복구되고 있었다(당일 20:05 재수집은 5.119로 해결) | 확인 |
+| **별개 버그 발견: 수정주가 미반영** — 액면분할(×2)·병합(×0.2)·ETF 분배금(×1.00x) 후 소스는 과거를 소급 조정하지만 DB는 옛 가격 그대로. 전 종목 1,073개 전체 이력 대조 → **71개 종목** 전체 재적재 | 완료 |
+| `services.fetch_and_upsert_stock_ohlcv`: 증분 조회를 14일 겹치게 받아 확정 구간(직전 행 제외) 종가가 DB와 다르면 그 종목 최초일부터 전체 재적재. 온디맨드(routers/stocks.py)·배치 공용 | 완료 |
+| `volume_profile_daily` 과거 스냅샷: `_snapshot_stock`이 target_date를 무시하고 최신 N봉을 쓰던 잠복 버그 수정(`get_stock_series_from_db(as_of=)`). 영향 71종목 5,026건 + 나머지 전 종목 과거 스냅샷 재계산 | 완료 |
+| `value_rank` 과거분(18:05 중간값) — 소스가 날짜 조회를 지원하지 않아 **복구 불가**. 영향: 회전율 이력·시가총액 이력(routers/stocks.py)·관심종목 편입(watchlist_sync)에 소폭 오차. 11-25부터는 20:05 재수집으로 확정값 | 한계 |
+| 테스트 4건 추가 — 전부 **수정 전 코드로 되돌려 실패하는 것을 확인**한 뒤 넣음(당일 덮어쓰기, 분할 전체 재적재, 과재적재 방지 가드, 스냅샷 as_of) | 완료 |
+
+#### B. 왜 같은 종류 버그가 반복되는가 (근거)
+
+PLAN.md 127개 Phase 중 "시간대별 데이터 신선도"(장 마감 후 낡은 값·EOD/라이브 전환·배치 시각) 계열 사용자 지적/수정이 최소 12회: 5.4, 5.6, 5.9, 5.21, 5.22, 5.43, 5.53, 5.59(전면 재점검), 5.62, 5.104~5.105, 5.115, 5.119. "전면 재점검"(5.59) 이후에도 재발했다.
+
+1. **시간 규칙이 한곳에 없다.** 소스마다 확정 시각이 다르다(KRX 15:30, NXT 20:00, 선물 15:45→16:15, 본배치 18:00, flow_rank 21:30, ETF/예탁금 T+1, 미국장 07:30). 이걸 각 라우터·수집기·프런트 카드가 따로 판단한다(`valueRankLiveActive`, `closedLiveIndexRowOf`, `pickClosedBasis`, `pickClosedFuturesFlow`, `fetchValueRankAuto`, `required_confirm_kst` …). 새 기능은 그중 하나를 복사하거나 새로 만들고, 놓친 시간대가 다음 버그가 된다.
+2. **틀린 전제가 문서로 굳는다.** "18:00 = NXT까지 마감"(stock_ohlcv_watchlist docstring)처럼 한 번 쓴 가정이 이후 작업의 사실처럼 인용된다. 데이터에 "언제 수집했는지"(collected_at)가 없어 가정을 데이터로 검증할 방법도 없다.
+3. **테스트가 구현을 따라 쓰인다.** 고정 시각 + mock으로 "작성자가 생각한 경로"만 검증한다. 실례(이번 세션): 5.119 첫 구현의 테스트는 REGISTRY를 `object()`로 바꿔 호출 순서만 확인해 통과했지만, 실제 재수집은 조기 반환으로 2행만 덮어쓰고 있었다 — 행 수를 직접 보기 전까지 아무 테스트도 잡지 못했다. 버그 수정 테스트가 "수정 전 코드에서 실패하는지" 확인된 적이 없다. 프런트에는 테스트 러너 자체가 없다.
+   또 테스트가 운영 데이터가 든 같은 Postgres를 공유해 실데이터 상태에 따라 깨진다 — 2026-11-25 전체 실행 시 변경과 무관하게 기존 실패 3건(`test_markets_positioning_hitrate_router` 2건: 실데이터 행이 있어 "빈 결과" 기대가 깨짐, `test_basis_live_router` 1건: 이벤트 루프 혼용). 항상 빨간 테스트가 있으니 새 실패도 무시되기 쉽다.
+4. **시간대에 따라 다른 동작을 그 시간대에 확인하지 않는다.** 검증은 작업하는 시각에만 이뤄진다. "실화면으로 검증하지 못했다/확인하지 못했다"가 PLAN에 반복 기록되지만 후속 확인이 없다(5.104, 5.105 등). 사용자가 마감 후 화면을 볼 때 처음 발견된다.
+5. **위임 단위가 기능 단위라 교차 점검이 없다.** 서브에이전트는 자기 기능의 스펙만 보고 "완료"를 보고한다. 다른 카드·배치와의 시간 상호작용은 아무도 책임지지 않는다.
+
+#### C. 재발방지 계획 (제안 — 사용자 승인 후 진행)
+
+| # | 대책 | 막는 원인 | 크기 |
+|---|---|---|---|
+| C1 | **데이터 신선도 레지스트리** `backend/app/freshness.py` — 데이터셋별 (시간 기준: KRX/NXT/선물/T+1/US, 확정 시각, 기대 최신 날짜 함수)를 한 표로 선언. 프런트의 라이브/EOD 선택 함수도 이 표를 따르는 한 모듈(`liveFallback.js`)로 모은다. 새 데이터셋은 여기 등록하지 않으면 테스트가 실패 | 1, 5 | 중 |
+| C2 (완료) | **신선도 감시 잡** — 평일 15:35/16:20/18:10/20:10/21:35/08:05에 레지스트리 기대값과 DB 실제 최신 날짜·수집 시각을 대조해 어긋나면 collect_log `stale` 기록 + 화면 배너(개발용). 사용자 대신 "그 시간대"에 자동 확인 | 4 | 중 |
+| C3 | **타임라인 테스트** — 가짜 시계로 하루(08:00, 09:30, 15:35, 18:10, 20:03, 20:10, 23:00, 주말, 휴장일)를 돌며 불변식 검사: ① 표시 날짜 ≥ 기대 날짜 ② 시간이 흐를 때 표시값이 과거로 되돌아가지 않음 ③ 확정 시각 이후 수집분만 "확정" 라벨. 백엔드 pytest + 프런트 vitest 도입 | 1, 3 | 중 |
+| C4 (완료) | **수집 시각 기록** — 스냅샷 테이블(value_rank, stock_ohlcv, group_snapshot 등)에 `collected_at` 컬럼. C2가 "확정 시각 전에 수집된 EOD"를 데이터로 잡아낸다 | 2 | 소 |
+| C5 | **테스트 규칙** (CLAUDE.md에 추가): 버그 수정은 수정 전 코드에서 실패하는 재현 테스트를 먼저 쓰고 실패 출력을 보고에 첨부. 검증 대상(수집기·선택 함수) 자체를 mock 금지 — 외부 소스만 가짜로. 수집기는 실제 Postgres에 행을 심고 결과 행을 검증 | 3 | 소 |
+| C5b | **테스트 격리** — 테스트 전용 DB(스키마 분리 또는 별도 DB)로 옮기고 기존 빨간 테스트 3건 정리. 전체 스위트가 "킬스위치 가드 거부 외 0 실패"인 상태를 기준선으로 | 3 | 중 |
+| C6 | **위임 결과 검수 규칙**: 서브에이전트 완료 보고를 받으면 메인이 ① 실데이터(행 수·값) ② 재현 테스트 실패→통과 ③ 시간대 영향(C1 표에서 관련 데이터셋)을 직접 확인한 뒤에만 사용자에게 완료 보고 | 5 | 소 |
+| C7 | "확인하지 못함" 항목은 C2 감시 항목 또는 날짜 지정 후속 작업으로 등록(PLAN 메모로 끝내지 않음) | 4 | 소 |
+
+권장 순서: C5·C6(즉시, 규칙) → C4+C2(감시, 실제 재발을 사용자보다 먼저 발견) → C1+C3(구조 정리, 한 번에).
+
+**C4·C2 구현 메모 (2026-11-25)**: C4 — alembic `a7c3e9d15b42`: `value_rank`·`stock_ohlcv`에 `collected_at timestamptz NULL server_default now()`(과거 행은 NULL=모름 유지, 기본값 없이 추가 후 default만 설정). upsert `set_`에 `collected_at=func.now()`(`value_rank._upsert_market_rows`, `services.upsert_stock_ohlcv_rows`). 다른 잡은 `collect_log.ran_at` 사용. C2 — `backend/app/freshness.py`: `DATASETS` 레지스트리(10개: 지수·수급·등락종목수·프로그램매매(macro_series prog_*, program_trade 아님)·업종테마·value_rank/stock_ohlcv(final 20:00)·매물대·flow_rank(21:35)·etf_stats(lag 1)), 순수 `expected_date`/`judge`, `check_freshness(session, now)`(as_of=now 날짜 상한으로 과거 시점 재현). 감시 잡 `_run_freshness_check_job`(평일 08:05/18:15/20:15/21:40, REGISTRY 미등록)이 collect_log `freshness_check`(ok/stale, rows=문제 수)에 기록. API `GET /api/health/freshness`, 대시보드 `FreshnessBanner`(문제 있을 때만 주황, 5분 폴링). 테스트 `tests/test_freshness.py`(타임라인·판정·11-24 20:15 value_rank early 실사고 재현·collected_at 갱신). 첫 실행에서 flow_rank가 실제로 stale(11-25분 stock_flow 256종목 < 80% 가드로 건너뜀)로 잡혔다. 한계: 휴장일 목록은 krx_calendar 의존, 미국장·뉴스·short_selling은 미등록.
+
+**감시 첫 실행 결과(2026-11-25 22:41)**: `수급 상위 종목 stale(최신 11-24 < 기대 11-25)`를 실제로 잡았다. 원인은 이 작업 중 worker를 20:57 이후 여러 번 재시작해 20:00 `accumulation_screener`(전 종목 stock_flow 적재, 70~90분)가 기록 없이 중단됐고, 21:30 `flow_rank`가 "stock_flow 256종목 < 80%"로 건너뛴 것. run_job은 완료 시에만 collect_log를 남겨 중단된 잡은 흔적이 없다 — 감시가 하류 데이터로 잡아낸 첫 사례. 같은 날 수동 재실행으로 복구. CLAUDE.md "컨테이너·환경"에 재시작 금지 시간대 규칙 추가.

@@ -139,7 +139,7 @@ async def _snapshot_index(session: AsyncSession, market: str, target_date: dt.da
 
 
 async def _snapshot_stock(session: AsyncSession, code: str, target_date: dt.date) -> None:
-    series = await get_stock_series_from_db(session, code, PROFILE_LOOKBACK_DAYS)
+    series = await get_stock_series_from_db(session, code, PROFILE_LOOKBACK_DAYS, as_of=target_date)
     profile = compute_volume_profile(series)
     async with session.begin_nested():
         await _upsert_profile_row(

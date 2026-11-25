@@ -83,3 +83,13 @@ export function pickClosedBasis(basisLive, { closedLiveIndexUsed, eodDate }) {
   if (!isNewerDate(basisLive.date, eodDate)) return null
   return { ...base, isOpen: false }
 }
+
+// 거래대금 상위(value-rank) 라이브 사용 여부 (Phase 5.119).
+// 장중(market_closed===false)이면 라이브. 마감 후에는 라이브 rows가 있고 라이브 date가 EOD 스냅샷
+// date보다 엄밀히 최신일 때만(=EOD 배치가 아직 오늘 것이 아님: 지연/실패) 라이브, 아니면 EOD.
+// 20:05 재수집이 정상이면 EOD date가 오늘이라 EOD(확정 종가)가 쓰인다.
+export function shouldUseValueRankLive(live, eodDate) {
+  if (!live || !Array.isArray(live.rows) || live.rows.length === 0) return false
+  if (live.market_closed === false) return true
+  return isNewerDate(live.date, eodDate)
+}

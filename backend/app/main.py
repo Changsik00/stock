@@ -74,3 +74,20 @@ app.include_router(anomaly.router)
 @app.get("/api/health")
 def health():
     return {"ok": True}
+
+
+@app.get("/api/health/freshness")
+async def health_freshness():
+    """데이터 신선도 대조(PLAN.md Phase 5.120 C2) — 레지스트리 기대 날짜 vs DB 실제."""
+    from .db import async_session_factory
+    from .freshness import check_freshness
+    from .market_hours import kst_now
+
+    now = kst_now()
+    async with async_session_factory() as session:
+        items = await check_freshness(session, now)
+    return {
+        "checked_at": now.isoformat(),
+        "items": items,
+        "problems": sum(1 for i in items if i["status"] != "ok"),
+    }

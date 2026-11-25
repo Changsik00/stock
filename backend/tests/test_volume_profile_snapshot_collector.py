@@ -16,7 +16,7 @@ from __future__ import annotations
 import datetime as dt
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from app.collectors import volume_profile_snapshot
 from app.db import async_session_factory, engine
@@ -248,10 +248,10 @@ async def test_one_stock_failure_does_not_block_others_or_indices(monkeypatch, s
 
     real_get_stock_series = volume_profile_snapshot.get_stock_series_from_db
 
-    async def fake_get_stock_series(session, code, days):
+    async def fake_get_stock_series(session, code, days, as_of=None):
         if code == TEST_CODES[0]:
             raise RuntimeError("stock_ohlcv read failed")
-        return await real_get_stock_series(session, code, days)
+        return await real_get_stock_series(session, code, days, as_of=as_of)
 
     monkeypatch.setattr(volume_profile_snapshot, "get_stock_series_from_db", fake_get_stock_series)
 
@@ -270,3 +270,37 @@ async def test_one_stock_failure_does_not_block_others_or_indices(monkeypatch, s
         )
     assert bad is None
     assert good is not None
+
+
+async def test_snapshot_uses_only_bars_up_to_target_date(monkeypatch, seeded_stocks):
+    """과거 날짜로 재계산할 때 그 날짜 이후 캔들이 섞이면 안 된다(Phase 5.120 — 수정 전엔
+    target_date를 무시하고 최신 N봉을 써서 과거 스냅샷 재계산이 미래 데이터로 오염됐다)."""
+    code = TEST_CODES[0]
+    _patch_watchlist(monkeypatch, [code])
+    past = TARGET_DATE - dt.timedelta(days=20)
+    async with async_session_factory() as session:
+        await _seed_ohlcv(session, code, n_days=30, start=TARGET_DATE - dt.timedelta(days=40))
+        await session.commit()
+
+    async with async_session_factory() as session:
+        await volume_profile_snapshot.collect(session, past)
+        await session.commit()
+
+    async with async_session_factory() as session:
+        row = (
+            await session.execute(
+                select(VolumeProfileDaily).where(
+                    VolumeProfileDaily.entity_type == "stock",
+                    VolumeProfileDaily.entity_code == code,
+                    VolumeProfileDaily.date == past,
+                )
+            )
+        ).scalar_one()
+        n_upto_past = (
+            await session.execute(
+                select(func.count()).select_from(StockOhlcv).where(
+                    StockOhlcv.code == code, StockOhlcv.date <= past
+                )
+            )
+        ).scalar_one()
+    assert row.bar_count == n_upto_past

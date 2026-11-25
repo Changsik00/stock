@@ -184,3 +184,52 @@ def test_premarket_jobs_catchup_schedule_and_grace(fake_scheduler):
         kwargs = fake_scheduler._call_for_id(job_id)
         assert kwargs["misfire_grace_time"] >= 3 * 3600
         assert kwargs["coalesce"] is True
+
+
+def test_post_nxt_close_job_registered(fake_scheduler):
+    """Phase 5.119: 20:05 NXT 마감 후 재수집 크론 등록 + 수 시간 misfire 허용."""
+    kwargs = fake_scheduler._call_for_id("post_nxt_close_recollect")
+    assert kwargs["misfire_grace_time"] >= 3 * 3600
+    assert kwargs["coalesce"] is True
+    assert kwargs["max_instances"] == 1
+
+
+async def test_post_nxt_close_job_runs_three_jobs_in_order(monkeypatch):
+    calls = []
+    kwargs_seen = {}
+
+    def make_fn(name):
+        async def fn(session, target_date, **kwargs):
+            kwargs_seen[name] = kwargs
+            return 0
+        return fn
+
+    async def fake_run_job(job_name, target_date, collect_fn):
+        calls.append(job_name)
+        await collect_fn(None, target_date)
+        return {}
+
+    monkeypatch.setattr(
+        scheduler_module, "REGISTRY",
+        {name: make_fn(name) for name in ("value_rank", "stock_ohlcv_watchlist", "volume_profile_daily")},
+    )
+    monkeypatch.setattr(scheduler_module, "run_job", fake_run_job)
+    monkeypatch.setattr(scheduler_module, "kst_now", lambda: dt.datetime(2026, 11, 25, 20, 5))
+    await scheduler_module._run_post_nxt_close_job()
+    assert calls == ["value_rank", "stock_ohlcv_watchlist", "volume_profile_daily"]
+    # 18:05에 이미 생긴 당일 일봉을 덮어쓰도록 stock_ohlcv_watchlist에만 강제 재조회 플래그
+    assert kwargs_seen["stock_ohlcv_watchlist"] == {"refresh_target": True}
+    assert kwargs_seen["value_rank"] == {}
+
+
+async def test_post_nxt_close_job_skips_on_holiday(monkeypatch):
+    calls = []
+
+    async def fake_run_job(job_name, target_date, collect_fn):
+        calls.append(job_name)
+
+    monkeypatch.setattr(scheduler_module, "REGISTRY", {"value_rank": object()})
+    monkeypatch.setattr(scheduler_module, "run_job", fake_run_job)
+    monkeypatch.setattr(scheduler_module, "kst_now", lambda: dt.datetime(2026, 11, 28, 20, 5))  # 토요일
+    await scheduler_module._run_post_nxt_close_job()
+    assert calls == []

@@ -12,7 +12,9 @@ yfinance/네이버, see PLAN.md §5.4/§7).
 import logging
 from datetime import date, timedelta
 
-from sqlalchemy import select
+import asyncio
+
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -221,6 +223,7 @@ async def upsert_stock_ohlcv_rows(session: AsyncSession, code: str, rows: list[d
                 "close": stmt.excluded.close,
                 "volume": stmt.excluded.volume,
                 "value": stmt.excluded.value,
+                "collected_at": func.now(),  # Phase 5.120 C4
             },
         )
         await session.execute(stmt)
@@ -247,10 +250,72 @@ def plan_stock_ohlcv_fetch_start(existing_max: date | None, target_end: date, da
             int(days * CANDLE_CALENDAR_BUFFER_RATIO) + CANDLE_CALENDAR_BUFFER_MIN_DAYS
         )
         return target_end - timedelta(days=calendar_days)
-    return existing_max
+    # 수정주가 감지용 겹침 구간(Phase 5.120) — 마지막 캐시일보다 앞선 확정 구간을 함께 받아
+    # fetch_and_upsert_stock_ohlcv가 DB와 대조한다.
+    return existing_max - timedelta(days=ADJUSTMENT_OVERLAP_CALENDAR_DAYS)
 
 
-async def get_stock_series_from_db(session: AsyncSession, code: str, days: int) -> list[dict]:
+# 수정주가(액면분할·병합·ETF 분배금 등) 소급 조정 감지용 겹침 구간(달력일).
+ADJUSTMENT_OVERLAP_CALENDAR_DAYS = 14
+
+
+async def detect_price_adjustment(
+    session: AsyncSession, code: str, rows: list[dict], existing_max: date
+) -> bool:
+    """소스 rows 중 ``existing_max`` **이전** 날짜(확정 구간)의 종가가 DB와 하나라도 다르면
+    소스가 과거 가격을 소급 조정한 것(수정주가)으로 본다.
+
+    ``existing_max`` 당일 행은 제외한다 — 18:05 본배치가 NXT 애프터마켓 도중 값을 넣었을 수
+    있어(Phase 5.119) 소스와 다른 게 정상이고, 그건 일반 upsert로 덮인다.
+    2026-11-25 표본 60종목·5,853행 대조에서 조정 없는 종목은 불일치 0건이라 정확 일치로 비교한다.
+    """
+    overlap = {r["date"]: r.get("close") for r in rows if r["date"] < existing_max}
+    if not overlap:
+        return False
+    db_rows = (
+        await session.execute(
+            select(StockOhlcv.date, StockOhlcv.close).where(
+                StockOhlcv.code == code, StockOhlcv.date.in_(list(overlap))
+            )
+        )
+    ).all()
+    for d, close in db_rows:
+        src = overlap[d]
+        if close is None or src is None:
+            continue
+        if float(close) != float(src):
+            return True
+    return False
+
+
+async def fetch_and_upsert_stock_ohlcv(
+    session: AsyncSession,
+    code: str,
+    fetch_start: date,
+    target_end: date,
+    existing_max: date | None,
+) -> tuple[int, bool]:
+    """네이버 일봉을 받아 upsert한다. 겹침 구간에서 수정주가가 감지되면 그 종목의 DB 최초일부터
+    전체를 다시 받아 덮어쓴다. Returns ``(upsert 행 수, 수정주가 재적재 여부)``.
+
+    온디맨드(routers/stocks.py)·배치(collectors/stock_ohlcv_watchlist.py) 공용 경로."""
+    from .clients import naver_index  # 지연 임포트 — 테스트가 모듈 속성을 monkeypatch한다
+
+    rows = await asyncio.to_thread(naver_index.fetch_stock_series, code, fetch_start, target_end)
+    adjusted = False
+    if existing_max is not None and await detect_price_adjustment(session, code, rows, existing_max):
+        first = (
+            await session.execute(select(func.min(StockOhlcv.date)).where(StockOhlcv.code == code))
+        ).scalar_one_or_none()
+        logger.info("stock_ohlcv: %s 수정주가 감지 — %s부터 전체 재적재", code, first)
+        rows = await asyncio.to_thread(naver_index.fetch_stock_series, code, first or fetch_start, target_end)
+        adjusted = True
+    return await upsert_stock_ohlcv_rows(session, code, rows), adjusted
+
+
+async def get_stock_series_from_db(
+    session: AsyncSession, code: str, days: int, as_of: date | None = None
+) -> list[dict]:
     """DB stock_ohlcv에서 code의 최근 `days` 거래일을 markets series와 동일한
     컨벤션으로 반환한다 — ``get_market_series_from_db``(지수)와 짝을 이루는
     종목판(changeRate는 컬럼이 없어 하루치를 더 읽어 전일 종가 대비로 계산하는
@@ -260,9 +325,13 @@ async def get_stock_series_from_db(session: AsyncSession, code: str, days: int) 
     collectors/volume_profile_snapshot.py(배치, PLAN.md §5.35-3, 이 함수가 읽은
     캔들을 그대로 ``quant/volume_profile.py``에 넘긴다)가 공유한다 — 쿼리 로직
     중복 금지."""
+    # as_of(Phase 5.120): 과거 날짜 스냅샷 재계산 시 그날 이후 캔들이 섞이지 않게 상한을 건다.
+    conds = [StockOhlcv.code == code]
+    if as_of is not None:
+        conds.append(StockOhlcv.date <= as_of)
     stmt = (
         select(StockOhlcv)
-        .where(StockOhlcv.code == code)
+        .where(*conds)
         .order_by(StockOhlcv.date.desc())
         .limit(days + 1)
     )
