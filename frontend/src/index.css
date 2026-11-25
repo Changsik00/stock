@@ -487,6 +487,26 @@ header h1 {
   line-height: 1.5;
 }
 
+/* 데이터 신선도 경고(FreshnessBanner.jsx) — 주황=경고(--warn-text), 방향색(--up/--down) 미사용 */
+.freshness-banner-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.freshness-banner-text {
+  color: var(--warn-text);
+  font-weight: 600;
+}
+
+.freshness-banner-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
 /* 시장 위험 경보 배너(PLAN.md §5.36) — 레이아웃만 여기서 정의하고 심각도별
    색은 위 :root의 --risk-*(danger/warn/info) 토큰을 그대로 쓴다
    (RiskAlertBanner.jsx). .banner와 달리 의도적으로 경고 톤을 쓰는 예외임을

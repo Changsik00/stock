@@ -81,6 +81,10 @@ class StockOhlcv(Base):
     close: Mapped[int | None] = mapped_column(BigInteger)
     volume: Mapped[int | None] = mapped_column(BigInteger)
     value: Mapped[int | None] = mapped_column(BigInteger)
+    # 마지막 upsert 시각(Phase 5.120 C4) — NULL=과거 행(수집 시각 모름). freshness.py가 확정 시각 전 수집분을 잡는 데 쓴다.
+    collected_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
 
 
 class StockIntradayBar(Base):
@@ -386,6 +390,10 @@ class ValueRank(Base):
     is_etf: Mapped[bool] = mapped_column(nullable=False, default=False)
     turnover: Mapped[float | None] = mapped_column(Numeric(8, 4))
     market_value_million: Mapped[int | None] = mapped_column(BigInteger)
+    # 마지막 upsert 시각(Phase 5.120 C4) — NULL=과거 행(수집 시각 모름).
+    collected_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
 
 
 class GroupSnapshot(Base):

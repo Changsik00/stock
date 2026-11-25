@@ -37,6 +37,7 @@ import Badge from '../components/Badge'
 import GroupTreemap from '../components/GroupTreemap'
 import Modal from '../components/Modal'
 import RiskAlertBanner from '../components/RiskAlertBanner'
+import FreshnessBanner from '../components/FreshnessBanner'
 import PremarketOutlookCard from '../components/dashboard/PremarketOutlookCard'
 import VolRegimeCard from '../components/dashboard/VolRegimeCard'
 import FlowConsistencyCard from '../components/dashboard/FlowConsistencyCard'
@@ -63,6 +64,7 @@ import {
   pickClosedFuturesFlow,
   pickFxDisplay,
   shouldUseClosedLiveIndexRow,
+  shouldUseValueRankLive,
   shouldUseGroupLive,
 } from '../liveFallback'
 import {
@@ -1204,7 +1206,9 @@ export default function DashboardPage() {
   // 쓰고(응답 스키마가 valueRankTop과 동일), 아니면 valueRankTop(EOD 1회성 fetch)으로
   // 폴백한다(PLAN.md §4.7).
   const valueRankLiveActive = Boolean(!STATIC_DATA && valueRankLive && valueRankLive.market_closed === false)
-  const effectiveValueRank = valueRankLiveActive ? valueRankLive : valueRankTop
+  // 마감 후에도 EOD 스냅샷이 라이브보다 낡았으면(배치 지연/실패) 라이브를 쓴다(Phase 5.119).
+  const effectiveValueRank =
+    !STATIC_DATA && shouldUseValueRankLive(valueRankLive, valueRankTop?.date) ? valueRankLive : valueRankTop
 
   return (
     <div className="dashboard-page m-font">
@@ -1257,6 +1261,9 @@ export default function DashboardPage() {
       {!STATIC_DATA && marketStatus === 'closed' && (
         <div className="banner">장 마감 — 모든 지표가 최근 확정치입니다.</div>
       )}
+
+      {/* 데이터 신선도 경고(PLAN.md Phase 5.120 C2) — 문제가 있을 때만 주황 한 줄 */}
+      <FreshnessBanner />
 
       {/* 0.5 지금 유입 우세(PLAN.md §5.15, 2026-07-23) — 코스닥·외국인 연속
           순매수/매도일수 검증 결과(3년치 index_ohlcv/market_flow 백테스트)만

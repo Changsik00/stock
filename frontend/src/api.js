@@ -1,3 +1,5 @@
+import { shouldUseValueRankLive } from './liveFallback'
+
 async function getJson(url) {
   const res = await fetch(url)
   const body = await res.json()
@@ -391,21 +393,24 @@ export async function fetchValueRankLive() {
 // 스냅샷 경로와 같은 방식). 반환값에 live(bool)·cached_at을 덧붙여 표가 "장중 잠정"
 // 여부와 갱신 시각을 표시할 수 있게 한다.
 export async function fetchValueRankAuto(market = 'all', days = 7) {
+  let live = null
   if (!STATIC_DATA) {
     try {
-      const live = await fetchValueRankLive()
-      if (live && live.market_closed === false && live.rows && live.rows.length > 0) {
-        const rows =
-          market === 'all'
-            ? live.rows
-            : live.rows.filter((r) => r.market === market).map((r, i) => ({ ...r, rank: i + 1 }))
-        return { market, date: live.date, rows, live: true, cached_at: live.cached_at }
-      }
+      live = await fetchValueRankLive()
     } catch {
       // 라이브 실패는 조용히 넘기고 아래 스냅샷으로 폴백한다.
     }
   }
+  const pickLiveRows = (rows) =>
+    market === 'all' ? rows : rows.filter((r) => r.market === market).map((r, i) => ({ ...r, rank: i + 1 }))
+  if (live && live.market_closed === false && live.rows && live.rows.length > 0) {
+    return { market, date: live.date, rows: pickLiveRows(live.rows), live: true, cached_at: live.cached_at }
+  }
   const snapshot = await fetchValueRank(market, days)
+  // 마감 후: 스냅샷이 라이브 날짜보다 낡았으면(배치 지연/실패) 라이브 rows를 쓴다(잠정 아님 -> live:false).
+  if (shouldUseValueRankLive(live, snapshot?.date)) {
+    return { market, date: live.date, rows: pickLiveRows(live.rows), live: false, cached_at: live.cached_at }
+  }
   return { ...snapshot, live: false }
 }
 
@@ -653,6 +658,13 @@ export async function fetchScalpCandidates(limit = 10) {
 // STATIC_DATA 대상 아님 — 정적 배포에서는 호출하지 않는다(호출부에서 가드).
 export async function fetchScalpHitrate() {
   return getJson('/api/markets/scalp-candidates/hitrate')
+}
+
+// GET /api/health/freshness -> { checked_at, items:[{key,name,expected_date,actual_date,
+// collected_at,status:ok|stale|early,detail}], problems } (PLAN.md Phase 5.120 C2).
+// 로컬 전용 — 정적 배포(STATIC_DATA)에서는 호출부(FreshnessBanner)가 호출하지 않는다.
+export async function fetchFreshness() {
+  return getJson('/api/health/freshness')
 }
 
 // GET /api/macro/series?ids=usdkrw,wti,brent&days=N -> { days, series: { id: [...] } }

@@ -147,7 +147,8 @@ async def test_existing_code_triggers_incremental_top_up(monkeypatch, seeded_sto
 
     assert len(calls) == 1
     _, start, end = calls[0]
-    assert start == existing_max
+    # Phase 5.120: 수정주가 감지용 겹침 구간만큼 앞에서부터 받는다
+    assert start == existing_max - dt.timedelta(days=services.ADJUSTMENT_OVERLAP_CALENDAR_DAYS)
     assert end == TARGET_DATE
 
 
@@ -207,3 +208,116 @@ async def test_one_code_failure_does_not_block_others(monkeypatch, seeded_stocks
         ).scalars().all()
     assert rows0 == []
     assert len(rows1) > 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.119/5.120 회귀 테스트 — 둘 다 "수정 전 코드에서 실패"를 확인하고 넣었다.
+# 단위 대상(collect·services)은 mock하지 않고 실제 Postgres에 행을 심어 결과 행을 검증한다.
+# 외부 소스(naver_index.fetch_stock_series)만 가짜로 바꾼다.
+# ---------------------------------------------------------------------------
+
+
+def _async_return(value):
+    async def _fn(_session):
+        return value
+    return _fn
+
+
+def _bar(d: dt.date, close: float) -> dict:
+    return {"date": d, "open": close, "high": close, "low": close, "close": close, "volume": 1000}
+
+
+async def _seed_bars(code: str, bars: list[dict]) -> None:
+    async with async_session_factory() as session:
+        await services.upsert_stock_ohlcv_rows(session, code, bars)
+        await session.commit()
+
+
+async def _closes(code: str) -> dict[dt.date, float]:
+    async with async_session_factory() as session:
+        rows = (
+            await session.execute(select(StockOhlcv.date, StockOhlcv.close).where(StockOhlcv.code == code))
+        ).all()
+    return {d: float(c) for d, c in rows}
+
+
+def _days(end: dt.date, n: int) -> list[dt.date]:
+    return [end - dt.timedelta(days=i) for i in range(n - 1, -1, -1)]
+
+
+async def test_refresh_target_overwrites_same_day_nxt_mid_value(seeded_stocks, monkeypatch):
+    """18:05 본배치가 넣은 당일 행(NXT 애프터마켓 중간값)을 20:05 재수집이 덮어써야 한다.
+    수정 전에는 existing_max >= target_date 조기 반환으로 아무 것도 안 바뀌었다(2026-11-25 실사고)."""
+    code = TEST_CODES[0]
+    monkeypatch.setattr(stock_ohlcv_watchlist, "list_watchlist_codes", _async_return([code]))
+    days = _days(TARGET_DATE, 5)
+    await _seed_bars(code, [_bar(d, 100) for d in days[:-1]] + [_bar(TARGET_DATE, 1_022_000)])
+
+    def fake_fetch(c, start, end):
+        return [_bar(d, 100) for d in days if start <= d < TARGET_DATE] + [_bar(TARGET_DATE, 1_014_000)]
+
+    monkeypatch.setattr(stock_ohlcv_watchlist.naver_index, "fetch_stock_series", fake_fetch)
+
+    async with async_session_factory() as session:
+        await stock_ohlcv_watchlist.collect(session, TARGET_DATE)  # 18:05 동작: 건너뜀
+        await session.commit()
+    assert (await _closes(code))[TARGET_DATE] == 1_022_000
+
+    async with async_session_factory() as session:
+        await stock_ohlcv_watchlist.collect(session, TARGET_DATE, refresh_target=True)  # 20:05 동작
+        await session.commit()
+    assert (await _closes(code))[TARGET_DATE] == 1_014_000
+
+
+async def test_split_adjustment_rewrites_whole_history(seeded_stocks, monkeypatch):
+    """소스가 과거 가격을 소급 조정(액면분할 1:2)하면 겹침 구간 밖의 오래된 행까지 전부 바뀌어야 한다."""
+    code = TEST_CODES[0]
+    monkeypatch.setattr(stock_ohlcv_watchlist, "list_watchlist_codes", _async_return([code]))
+    history = _days(TARGET_DATE - dt.timedelta(days=1), 60)  # 60일치, 겹침(14일)보다 훨씬 길다
+    await _seed_bars(code, [_bar(d, 200) for d in history])
+
+    calls = []
+
+    def fake_fetch(c, start, end):
+        calls.append((start, end))
+        d, out = start, []
+        while d <= end:
+            out.append(_bar(d, 100))  # 분할 반영된 수정주가
+            d += dt.timedelta(days=1)
+        return out
+
+    monkeypatch.setattr(stock_ohlcv_watchlist.naver_index, "fetch_stock_series", fake_fetch)
+    async with async_session_factory() as session:
+        await stock_ohlcv_watchlist.collect(session, TARGET_DATE)
+        await session.commit()
+
+    closes = await _closes(code)
+    assert set(closes.values()) == {100}, "분할 이전 가격(200)이 남아 있으면 안 된다"
+    assert calls[-1][0] == history[0], "전체 재적재는 DB 최초일부터 받아야 한다"
+
+
+async def test_last_day_mismatch_alone_is_not_adjustment(seeded_stocks, monkeypatch):
+    """직전 행만 다르면(NXT 중간값이 다음 날 정정되는 정상 경우) 전체 재적재를 하지 않는다."""
+    code = TEST_CODES[0]
+    monkeypatch.setattr(stock_ohlcv_watchlist, "list_watchlist_codes", _async_return([code]))
+    prev = TARGET_DATE - dt.timedelta(days=1)
+    history = _days(prev, 30)
+    await _seed_bars(code, [_bar(d, 100) for d in history[:-1]] + [_bar(prev, 999)])
+
+    calls = []
+
+    def fake_fetch(c, start, end):
+        calls.append((start, end))
+        d, out = start, []
+        while d <= end:
+            out.append(_bar(d, 100))
+            d += dt.timedelta(days=1)
+        return out
+
+    monkeypatch.setattr(stock_ohlcv_watchlist.naver_index, "fetch_stock_series", fake_fetch)
+    async with async_session_factory() as session:
+        await stock_ohlcv_watchlist.collect(session, TARGET_DATE)
+        await session.commit()
+
+    assert len(calls) == 1
+    assert (await _closes(code))[prev] == 100  # 직전 행은 일반 upsert로 정정

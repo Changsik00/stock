@@ -98,6 +98,7 @@ from ..quant.signals import (
 from ..quant.volume_profile import compute_volume_profile, detect_levels
 from ..services import (
     get_stock_series_from_db,
+    fetch_and_upsert_stock_ohlcv,
     plan_stock_ohlcv_fetch_start,
     upsert_stock_ohlcv_rows,
 )
@@ -241,8 +242,7 @@ async def _ensure_candles_cached(session: AsyncSession, code: str, days: int) ->
     fetch_start = plan_stock_ohlcv_fetch_start(existing_max, target_end, days)
 
     _candle_fetch_attempted_at[code] = time.monotonic()
-    rows = await asyncio.to_thread(naver_index.fetch_stock_series, code, fetch_start, target_end)
-    await upsert_stock_ohlcv_rows(session, code, rows)
+    await fetch_and_upsert_stock_ohlcv(session, code, fetch_start, target_end, existing_max)
 
 
 # -- 수급 (stock_flow 캐시 + 키움 ka10059 온디맨드) ----------------------------
