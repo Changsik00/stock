@@ -507,6 +507,7 @@ async def test_manual_buy_rejected_when_budget_exceeded(monkeypatch):
     from app.collectors.auto_trader import AUTO_TRADE_TOTAL_BUDGET_KRW
 
     high_price = AUTO_TRADE_TOTAL_BUDGET_KRW + 5000
+    monkeypatch.setitem(FAKE_QUOTE_RAW, "sel_fpr_bid", f"-{high_price}")  # 매도1호가 = 주문가
 
     async def fake_intraday(code, interval):
         return {"bars": [{"close": float(high_price)}]}
@@ -520,7 +521,7 @@ async def test_manual_buy_rejected_when_budget_exceeded(monkeypatch):
 
     assert resp.status_code == 400
     assert "예산 가드" in resp.json()["detail"]
-    assert fake_cls.instances == []  # 주문 시도 자체가 없어야 함
+    assert all(c.buy_calls == [] for c in fake_cls.instances)  # 수량 0 -> 주문 시도 없음
 
     state = await _get_state()
     assert state.status == "idle"

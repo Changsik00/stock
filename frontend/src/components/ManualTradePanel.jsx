@@ -663,6 +663,13 @@ export default function ManualBuyBox({ state, onBuy, buyBusy, buyNotice }) {
   }, [rules])
 
   const ref = state?.reference_price
+  // Phase 5.122 — 수량 고정(1주) 폐지: 한도 내 최대 수량. 예상 수량은 기준가 기준 추정치일 뿐이다.
+  const limit = Math.min(target?.max_order_notional || 50000, target?.total_budget || 50000)
+  const limitText = `${Math.round(limit / 10000)}만원 한도`
+  const estQty = ref > 0 ? Math.floor(limit / ref) : null
+  const qtyNote =
+    (estQty != null ? `예상 수량: 약 ${estQty}주(기준가 ${priceLabel(ref)} 기준, ${limitText}). ` : `수량: ${limitText} 내 최대. `) +
+    '최종 수량은 주문 시점의 매도1호가와 계좌 주문가능금액으로 결정되며, 일부만 체결되면 체결된 수량만 보유합니다.'
   const stopless = !hasStop(rules)
   const { analysis, stale, failed } = useExitAnalysis(rules)
   const nErr = analysis?.errors.length || 0
@@ -688,7 +695,7 @@ export default function ManualBuyBox({ state, onBuy, buyBusy, buyNotice }) {
     if (a.errors.length) return setCheckErr(`조건 오류: ${a.errors.join(' / ')}`)
     const warn = a.warnings.length ? `주의:\n${a.warnings.map((w) => `- ${w}`).join('\n')}\n\n` : ''
     const msg =
-      `실제 계좌로 ${targetLabel} 1주 매수 주문이 나갑니다.\n\n` +
+      `실제 계좌로 ${targetLabel} 매수 주문이 나갑니다.\n${qtyNote}\n\n` +
       `청산 조건(수동 매수 사용자 조건): ${describeRules(rules)}\n\n` +
       warn +
       `+ 장마감 강제청산(15:20~15:30)·외인 수급 반전 청산은 그대로 적용됩니다.\n` +
@@ -699,7 +706,7 @@ export default function ManualBuyBox({ state, onBuy, buyBusy, buyNotice }) {
 
   return (
     <div className="at-manual-buy">
-      <div className="at-k">직접 고른 청산 조건으로 {targetLabel} 1주를 매수합니다.</div>
+      <div className="at-k">직접 고른 청산 조건으로 {targetLabel}를 {limitText} 내 최대 수량으로 매수합니다.</div>
       <Collapsible title="청산 조건" summary={summary} warn={stopless || nErr > 0} badge={badge} storageKey="at-cond-open-buy">
         <RuleEditor
           rules={rules}

@@ -75,7 +75,9 @@ from typing import Any, Literal
 # -- 전략 상수 (PLAN.md §5.54, 사용자 확정값 — 바꾸지 말 것) ------------------------
 
 TARGET_CODE = "0167A0"  # SOL AI반도체TOP2플러스 — 자동매매 대상 종목 고정
-TARGET_QTY = 1  # 1주 고정
+# Phase 5.122(2026-11-26) — 더 이상 "진입 수량"이 아니다(수량은 compute_order_qty로 주문 시점에
+# 산출). entry_qty가 비어 있는 비정상 보유 상태의 매도 수량 폴백·하위 호환 import용으로만 남긴다.
+TARGET_QTY = 1
 TARGET_NAME = "SOL AI반도체TOP2플러스"  # TARGET_CODE의 표시용 이름
 
 STOP_LOSS_PCT = -1.5  # 진입가 대비 -1.5% 이하 -> 즉시 손절 (상태 무관)
@@ -257,6 +259,54 @@ def decide_position_action(
             f"진입가 대비 {pct:+.2f}%)"
         ),
     }
+
+
+def compute_order_qty(
+    price: float | None,
+    max_order_notional_krw: float,
+    total_budget_krw: float,
+    orderable_cash_krw: float | None,
+) -> int:
+    """Phase 5.122 — 매수 수량 = floor(min(주문 1건 캡, 누적 예산, 계좌 주문가능금액) / 지정가).
+
+    price<=0/None, 어느 한도라도 <=0, 주문가능금액 None(조회 실패) -> 0(주문 보류).
+    순수 함수 — 호출부가 0을 받으면 주문 없이 budget_blocked로 기록한다."""
+    if price is None or price <= 0:
+        return 0
+    if orderable_cash_krw is None:
+        return 0
+    limits = (max_order_notional_krw, total_budget_krw, orderable_cash_krw)
+    if any(x is None or x <= 0 for x in limits):
+        return 0
+    return int(min(limits) // price)
+
+
+def classify_buy_fill(ordered_qty: int, actual_qty: int | None) -> str:
+    """Phase 5.122 — 매수 주문 후 실보유수량으로 체결 결과를 분류한다(순수).
+
+    "full"(전량) / "partial"(0<실보유<주문) / "unconfirmed"(0주·조회불가·주문수량 초과 등
+    판정 불가 — 기존 동작: 취소 후 idle 유지)."""
+    if actual_qty is None:
+        return "unconfirmed"
+    if actual_qty == ordered_qty:
+        return "full"
+    if 0 < actual_qty < ordered_qty:
+        return "partial"
+    return "unconfirmed"
+
+
+def classify_sell_fill(held_qty: int, remaining_qty: int | None) -> str:
+    """Phase 5.122 — 매도 주문 후 남은 실보유수량으로 체결 결과를 분류한다(순수).
+
+    "full"(0주 남음 -> idle) / "partial"(0<잔량<보유 -> 잔량으로 holding 유지) /
+    "unconfirmed"(체결 없음·조회불가 — 기존 동작: 취소 후 포지션 유지)."""
+    if remaining_qty is None:
+        return "unconfirmed"
+    if remaining_qty == 0:
+        return "full"
+    if 0 < remaining_qty < held_qty:
+        return "partial"
+    return "unconfirmed"
 
 
 def check_entry_budget(

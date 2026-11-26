@@ -38,6 +38,21 @@ function useNow(intervalMs = 30000) {
   return now
 }
 
+// 수량 표기 — 보유 중이면 실제 보유 수량, 대기 중이면 "최대 N주(예상) · 5만원 한도". 대기 중 N은
+// 기준가(최근 1분봉 종가) 기준 추정치이며 실제 수량은 주문 시점 매도1호가·계좌 주문가능금액으로 정해진다.
+function qtyLabel(state) {
+  const t = state?.target
+  if (!t) return ''
+  if (t.qty) return `${t.qty}주`
+  const cap = t.max_order_notional || 50000
+  const budget = t.total_budget || cap
+  const limit = Math.min(cap, budget)
+  const ref = Number(state?.reference_price)
+  const est = ref > 0 ? Math.floor(limit / ref) : null
+  const limitText = `${Math.round(limit / 10000)}만원 한도`
+  return est != null ? `최대 ${est}주(예상) · ${limitText}` : `최대 수량 · ${limitText}`
+}
+
 // ① 상태 바 — 모드 배지 + 대상·수량 + 엔진 ON/OFF 스위치 + 실주문 배지. 방향색은 쓰지 않는다.
 export function StatusBar({ state, onToggle, busy }) {
   const mode = modeOf(state)
@@ -61,7 +76,7 @@ export function StatusBar({ state, onToggle, busy }) {
           {warnStopped && <span className="badge at-mode badge-warn">엔진 정지</span>}
           <div className="at-sb-target">
             <span className="at-sb-name">{target ? target.name : '-'}</span>
-            <span className="at-sub-inline">{target ? `${target.code} · ${target.qty}주` : ''}</span>
+            <span className="at-sub-inline">{target ? `${target.code} · ${qtyLabel(state)}` : ''}</span>
           </div>
         </div>
         <div className="at-sb-side">

@@ -12,7 +12,7 @@ kt10000/kt10001, 2026-08-04 실호출 확정)를 실제로 호출해 진짜 돈�
    맨 첫 줄에서 즉시 반환한다. 신호 평가조차 하지 않는다(로그도 남기지 않음 —
    매 폴링마다 "disabled"를 기록하면 노이즈만 커진다).
 2. **누적 예산 가드** — `quant/auto_trade_rules.check_entry_budget`이
-   `AUTO_TRADE_TOTAL_BUDGET_KRW`(기본 25,000원, 사용자가 실제 입금한 금액)와
+   `AUTO_TRADE_TOTAL_BUDGET_KRW`(기본 50,000원 — Phase 5.122에서 25,000원에서 상향)와
    기존 `MAX_ORDER_NOTIONAL_KRW`(`clients/kiwoom.py`, 5만원, 주문 1건 캡)
    **둘 다** 통과해야만 매수를 시도한다. 상태 기계가 한 번에 포지션 하나만
    허용하므로(단일 종목, 단일 수량 1주) 실질적으로는 "이미 보유 중이면 추가
@@ -170,6 +170,9 @@ from ..quant.auto_trade_rules import (
     TARGET_CODE,
     TARGET_QTY,
     check_entry_budget,
+    classify_buy_fill,
+    classify_sell_fill,
+    compute_order_qty,
     decide_idle_action,
     decide_position_action,
     evaluate_eod_forced_exit,
@@ -192,7 +195,7 @@ logger = logging.getLogger(__name__)
 # 별개로 추가 적용된다 — 둘 다 통과해야 매수 가능
 # (quant/auto_trade_rules.check_entry_budget). 실제 매수는 항상 이 값과
 # MAX_ORDER_NOTIONAL_KRW 중 더 작은 쪽이 사실상의 상한이 된다.
-AUTO_TRADE_TOTAL_BUDGET_KRW = 25_000
+AUTO_TRADE_TOTAL_BUDGET_KRW = 50_000  # Phase 5.122: 25,000 -> 50,000(1주 고정 폐지, 5만원 한도 내 최대 수량)
 
 # 2026-08-21(PLAN.md §5.73, 사용자 지적 — "정보가 장황하기만 하지 유의미한
 # 정보를 제공한다고 생각하지는 않아") — 매매일지(`GET /api/auto-trade/log`)
@@ -403,6 +406,75 @@ async def _confirm_holdings_qty(client: KiwoomClient, code: str, expected_qty: i
         if actual_qty == expected_qty:
             return True
     return False
+
+
+async def _read_holdings_qty(client: KiwoomClient, code: str) -> int | None:
+    """실보유수량을 1회 읽는다. 조회 실패/파싱 불가는 None(Phase 5.122 부분 체결 판정용)."""
+    try:
+        return int(await client.get_account_holdings_qty(code))
+    except Exception as e:  # noqa: BLE001 - 조회 실패는 판정 불가(None)로 취급
+        logger.warning("auto-trade: 실보유수량 조회 실패: %s", e)
+        return None
+
+
+async def _read_holdings_qty_with_retry(client: KiwoomClient, code: str, expected_qty: int) -> int | None:
+    """`_confirm_holdings_qty`와 같은 재시도 간격으로 읽되, expected와 일치하면 즉시 반환하고
+    끝까지 불일치면 **마지막으로 성공적으로 읽은 실보유수량**(한 번도 못 읽으면 None)을 반환한다."""
+    last: int | None = None
+    for delay in (0.0, *_CONFIRM_HOLDINGS_RETRY_DELAYS_SEC):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            last = int(await client.get_account_holdings_qty(code))
+        except Exception:  # noqa: BLE001 - 이번 시도는 건너뛰고 재시도
+            continue
+        if last == expected_qty:
+            return last
+    return last
+
+
+async def _settle_buy_fill(
+    client: KiwoomClient, code: str, order_no: str | None, order_qty: int, confirmed: bool
+) -> tuple[str, int]:
+    """Phase 5.122 — 매수 주문 후 체결 결과 정산. `confirmed`는 `_confirm_holdings_qty`(전량 확인) 결과.
+
+    반환 (kind, qty): ("full", 주문수량) / ("partial", 실보유) — 잔량은 취소하고 재조회로 확정 /
+    ("unconfirmed", 0) — 전량 취소(기존 동작: idle 유지, 다음 폴링 재시도)."""
+    if confirmed:
+        return "full", order_qty
+    actual = await _read_holdings_qty(client, code)
+    kind = classify_buy_fill(order_qty, actual)
+    if kind == "partial":
+        await _cancel_unfilled_order_silently(client, code, order_no, order_qty - int(actual))
+        again = await _read_holdings_qty(client, code)  # 취소 직전 추가 체결 가능성 -> 1회 재확인
+        if again is not None and 0 < again <= order_qty:
+            actual = again
+        kind = classify_buy_fill(order_qty, actual)
+        return kind, int(actual)
+    await _cancel_unfilled_order_silently(client, code, order_no, order_qty)
+    return "unconfirmed", 0
+
+
+async def _settle_sell_fill(
+    client: KiwoomClient, code: str, order_no: str | None, held_qty: int, confirmed: bool
+) -> tuple[str, int]:
+    """Phase 5.122 — 매도 주문 후 체결 결과 정산. `confirmed`는 `_confirm_holdings_qty(…, 0)` 결과.
+
+    반환 (kind, 잔량): ("full", 0) / ("partial", 잔량) — 미체결 잔량 취소 후 재조회 /
+    ("unconfirmed", held_qty) — 전량 취소, 포지션 유지(기존 동작)."""
+    if confirmed:
+        return "full", 0
+    remaining = await _read_holdings_qty(client, code)
+    kind = classify_sell_fill(held_qty, remaining)
+    if kind == "partial":
+        await _cancel_unfilled_order_silently(client, code, order_no, int(remaining))
+        again = await _read_holdings_qty(client, code)
+        if again is not None and 0 <= again <= held_qty:
+            remaining = again
+        kind = classify_sell_fill(held_qty, remaining)
+        return kind, int(remaining)
+    await _cancel_unfilled_order_silently(client, code, order_no, held_qty)
+    return "unconfirmed", held_qty
 
 
 async def _cancel_unfilled_order_silently(
@@ -643,34 +715,35 @@ async def _handle_idle(
         result["action"] = "entry_blocked_risk"
         return result
 
-    notional = TARGET_QTY * current_price
-    if not check_entry_budget(state.status, notional, AUTO_TRADE_TOTAL_BUDGET_KRW, MAX_ORDER_NOTIONAL_KRW):
-        await _log(
-            session,
-            event_type="error",
-            code=code,
-            price=current_price,
-            reason=(
-                f"{decision['reason']} — 그러나 예산 가드 실패: notional={notional} "
-                f"(qty={TARGET_QTY} x price={current_price}), "
-                f"budget={AUTO_TRADE_TOTAL_BUDGET_KRW}, "
-                f"max_order_notional={MAX_ORDER_NOTIONAL_KRW}, status={state.status}"
-            ),
-            signal_snapshot=signal_snapshot,
-        )
-        result["action"] = "budget_blocked"
-        return result
-
+    # Phase 5.122 — 수량 = floor(min(주문캡, 누적예산, 주문가능금액) / 매도1호가). 주문 시점에 산출.
+    order_qty = 0
+    order_price = None
+    order_response: dict = {}
+    orderable_cash: int | None = None
+    block_note = ""
+    fill_kind, filled_qty = "unconfirmed", 0
     try:
         async with KiwoomClient() as client:
             order_price = await _best_fill_price(client, code, "buy")
             if order_price is None:
                 raise RuntimeError("매도호가를 확인할 수 없어 주문가를 정할 수 없음")
-            order_response = await client.place_buy_order(code, TARGET_QTY, int(order_price))
-            order_no = str(order_response.get("ord_no")) if order_response.get("ord_no") else None
-            confirmed = await _confirm_holdings_qty(client, code, TARGET_QTY)
-            if not confirmed:
-                await _cancel_unfilled_order_silently(client, code, order_no, TARGET_QTY)
+            try:
+                orderable_cash = await client.get_orderable_cash()
+            except Exception as e:  # noqa: BLE001 - 주문가능금액을 모르면 진입 보류(보수적)
+                block_note = f"주문가능금액 조회 실패({e})"
+            order_qty = compute_order_qty(
+                order_price, MAX_ORDER_NOTIONAL_KRW, AUTO_TRADE_TOTAL_BUDGET_KRW, orderable_cash
+            )
+            if order_qty >= 1 and not check_entry_budget(
+                state.status, order_qty * order_price, AUTO_TRADE_TOTAL_BUDGET_KRW, MAX_ORDER_NOTIONAL_KRW
+            ):
+                block_note = f"예산 가드 실패(status={state.status})"
+                order_qty = 0
+            if order_qty >= 1:
+                order_response = await client.place_buy_order(code, order_qty, int(order_price))
+                order_no = str(order_response.get("ord_no")) if order_response.get("ord_no") else None
+                confirmed = await _confirm_holdings_qty(client, code, order_qty)
+                fill_kind, filled_qty = await _settle_buy_fill(client, code, order_no, order_qty, confirmed)
     except Exception as e:  # noqa: BLE001 - 주문 실패는 재시도 루프에 빠지지 않고 로그만
         logger.warning("auto-trade: 매수 주문 실패: %s", e)
         await _log(
@@ -685,18 +758,32 @@ async def _handle_idle(
         result["error"] = str(e)[:300]
         return result
 
-    if not confirmed:
-        # PLAN.md §5.78 — 주문은 접수됐지만 실보유수량으로 체결이 확인되지
-        # 않음(취소 시도함). status를 holding으로 넘기지 않고 idle을 유지해
-        # 다음 폴링이 새 호가로 다시 시도하게 한다(모듈 상단 "미체결 확인"
-        # 절 참고).
+    if order_qty < 1:
+        await _log(
+            session,
+            event_type="error",
+            code=code,
+            price=order_price,
+            reason=(
+                f"{decision['reason']} — 그러나 주문 수량 0주라 진입 보류: 지정가 {order_price}원, "
+                f"한도(주문캡 {MAX_ORDER_NOTIONAL_KRW}, 누적예산 {AUTO_TRADE_TOTAL_BUDGET_KRW}), "
+                f"주문가능금액 {orderable_cash}원" + (f" / {block_note}" if block_note else "")
+            ),
+            signal_snapshot=signal_snapshot,
+        )
+        result["action"] = "budget_blocked"
+        return result
+
+    if fill_kind == "unconfirmed":
+        # PLAN.md §5.78 — 주문은 접수됐지만 실보유수량으로 체결이 확인되지 않음(취소 시도함).
+        # status를 holding으로 넘기지 않고 idle을 유지해 다음 폴링이 새 호가로 다시 시도한다.
         await _log(
             session,
             event_type="buy_unconfirmed",
             code=code,
             price=order_price,
             reason=(
-                decision["reason"] + f" -> 매수 주문 제출(지정가 {order_price}원)했으나 "
+                decision["reason"] + f" -> 매수 주문 제출(지정가 {order_price}원, {order_qty}주)했으나 "
                 "체결 미확인(실보유수량 불일치, 취소 시도) — 진입 보류, 다음 폴링에서 재시도"
             ),
             signal_snapshot=signal_snapshot,
@@ -705,10 +792,12 @@ async def _handle_idle(
         result["action"] = "buy_unconfirmed"
         return result
 
+    partial_note = f" [부분 체결 {filled_qty}/{order_qty}주, 잔량 취소]" if fill_kind == "partial" else ""
+    signal_snapshot = {**signal_snapshot, "qty": filled_qty}
     now = dt.datetime.now(dt.timezone.utc)
     state.status = "holding"
     state.entry_price = order_price
-    state.entry_qty = TARGET_QTY
+    state.entry_qty = filled_qty
     state.entry_at = now
     state.entry_order_no = str(order_response.get("ord_no")) if order_response.get("ord_no") else None
     state.peak_price = None
@@ -734,7 +823,7 @@ async def _handle_idle(
         code=code,
         price=order_price,
         reason=(
-            decision["reason"] + f" -> 매수 주문 제출(지정가 {order_price}원, {TARGET_QTY}주), "
+            decision["reason"] + f" -> 매수 주문 제출(지정가 {order_price}원, {filled_qty}주){partial_note}, "
             f"진입 시점 외인 현물 수급 부호={state.entry_foreign_flow_sign!r}"
         ),
         signal_snapshot=signal_snapshot,
@@ -764,15 +853,12 @@ async def _execute_sell(
             order_price = await _best_fill_price(client, code, "sell")
             if order_price is None:
                 raise RuntimeError("매수호가를 확인할 수 없어 주문가를 정할 수 없음")
-            order_response = await client.place_sell_order(
-                code, int(state.entry_qty or TARGET_QTY), int(order_price)
-            )
+            held_qty = int(state.entry_qty or TARGET_QTY)
+            order_response = await client.place_sell_order(code, held_qty, int(order_price))
             order_no = str(order_response.get("ord_no")) if order_response.get("ord_no") else None
             confirmed = await _confirm_holdings_qty(client, code, 0)
-            if not confirmed:
-                await _cancel_unfilled_order_silently(
-                    client, code, order_no, int(state.entry_qty or TARGET_QTY)
-                )
+            # Phase 5.122 — 부분 체결이면 잔량 취소 후 잔여 수량 확정, 아니면 기존 동작.
+            fill_kind, remaining_qty = await _settle_sell_fill(client, code, order_no, held_qty, confirmed)
     except Exception as e:  # noqa: BLE001 - 주문 실패는 재시도 루프에 빠지지 않고 로그만
         logger.warning("auto-trade: 매도 주문 실패(%s): %s", event_type, e)
         await _log(
@@ -787,7 +873,25 @@ async def _execute_sell(
         result["error"] = str(e)[:300]
         return result
 
-    if not confirmed:
+    if fill_kind == "partial":
+        # Phase 5.122 — 일부만 체결: 실보유 잔량으로 entry_qty를 줄이고 status는 유지해 다음
+        # 폴링이 잔량을 다시 매도한다(수량 초과 거부 반복 방지).
+        state.entry_qty = remaining_qty
+        await session.commit()
+        await _log(
+            session,
+            event_type="sell_unconfirmed",
+            code=code,
+            price=order_price,
+            reason=reason + f" -> 매도 주문 제출(지정가 {order_price}원, {held_qty}주) 중 "
+            f"{held_qty - remaining_qty}주만 체결 — 부분 체결, 잔량 {remaining_qty}주 유지(미체결분 취소)",
+            signal_snapshot={**signal_snapshot, "qty": held_qty - remaining_qty, "remaining_qty": remaining_qty},
+            order_response=order_response,
+        )
+        result["action"] = "sell_partial"
+        return result
+
+    if fill_kind != "full":
         # PLAN.md §5.78 — 8/14 실사고(§5.71)에 더해 8/26 실사고(모듈 상단
         # "미체결 확인" 절 참고): 주문은 접수됐지만 실보유수량으로 체결이
         # 확인되지 않음(취소 시도함). status를 idle로 넘기지 않고
@@ -822,8 +926,8 @@ async def _execute_sell(
         event_type=event_type,
         code=code,
         price=order_price,
-        reason=reason + f" -> 매도 주문 제출(지정가 {order_price}원)",
-        signal_snapshot=signal_snapshot,
+        reason=reason + f" -> 매도 주문 제출(지정가 {order_price}원, {held_qty}주)",
+        signal_snapshot={**signal_snapshot, "qty": held_qty},
         order_response=order_response,
     )
     # `result["action"]`은 여기서 건드리지 않는다 — 손절/트레일청산 호출부
@@ -1177,13 +1281,12 @@ async def watch_stop_loss(session: AsyncSession) -> dict:
 
         try:
             async with KiwoomClient() as client:
-                order_response = await client.place_sell_order(code, int(state.entry_qty or TARGET_QTY), int(live_price))
+                held_qty = int(state.entry_qty or TARGET_QTY)
+                order_response = await client.place_sell_order(code, held_qty, int(live_price))
                 order_no = str(order_response.get("ord_no")) if order_response.get("ord_no") else None
                 confirmed = await _confirm_holdings_qty(client, code, 0)
-                if not confirmed:
-                    await _cancel_unfilled_order_silently(
-                        client, code, order_no, int(state.entry_qty or TARGET_QTY)
-                    )
+                # Phase 5.122 — 부분 체결 정산(잔량 취소 + 실보유 잔량 확정)
+                fill_kind, remaining_qty = await _settle_sell_fill(client, code, order_no, held_qty, confirmed)
         except Exception as e:  # noqa: BLE001 - 주문 실패는 재시도 루프에 빠지지 않고 로그만
             logger.warning("auto-trade(fast watch): 매도 주문 실패: %s", e)
             await _log(
@@ -1198,7 +1301,26 @@ async def watch_stop_loss(session: AsyncSession) -> dict:
             result["error"] = str(e)[:300]
             return result
 
-        if not confirmed:
+        if fill_kind == "partial":
+            state.entry_qty = remaining_qty
+            await session.commit()
+            await _log(
+                session,
+                event_type="sell_unconfirmed",
+                code=code,
+                price=live_price,
+                reason=(
+                    f"[실시간 호가 손절 감시(30초)] 손절 조건 충족: 실시간가 {live_price} vs "
+                    f"진입가 {entry_price} ({pct:+.2f}%) <= {stop_loss_threshold}% -> 매도 {held_qty}주 중 "
+                    f"{held_qty - remaining_qty}주만 체결 — 부분 체결, 잔량 {remaining_qty}주 유지(미체결분 취소)"
+                ),
+                signal_snapshot={**signal_snapshot, "qty": held_qty - remaining_qty, "remaining_qty": remaining_qty},
+                order_response=order_response,
+            )
+            result["action"] = "sell_partial"
+            return result
+
+        if fill_kind != "full":
             # PLAN.md §5.78(§5.71 후속) — `_execute_sell`과 동일한 이유(모듈
             # 상단 "미체결 확인" 절 참고). 이 30초 고빈도 잡은 `_execute_sell`
             # 을 안 쓰고 자체 구현이라 별도로 동일 패턴을 적용한다.
@@ -1239,9 +1361,9 @@ async def watch_stop_loss(session: AsyncSession) -> dict:
                 f"[실시간 호가 손절 감시(30초)] 손절 조건 충족: 실시간가 {live_price} vs "
                 f"진입가 {entry_price} ({pct:+.2f}%) <= {stop_loss_threshold}%"
                 + (" (리스크 경보 활성 -> 임시 손절선 적용)" if risk_alert_active else "")
-                + " -> 매도 주문 제출"
+                + f" -> 매도 주문 제출({held_qty}주)"
             ),
-            signal_snapshot=signal_snapshot,
+            signal_snapshot={**signal_snapshot, "qty": held_qty},
             order_response=order_response,
         )
         result["action"] = "exit_stop_loss"

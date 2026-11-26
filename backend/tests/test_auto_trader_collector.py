@@ -76,6 +76,8 @@ class _FakeKiwoomClient:
         self.holdings_qty_override: int | None = None
         self.get_account_holdings_qty_error: Exception | None = None
         self.cancel_error: Exception | None = None
+        # Phase 5.122 — 주문가능금액(원). 기본은 1주만 살 수 있는 값(기존 1주 가정 테스트 유지).
+        self.orderable_cash: int | None = 16_100
         _FakeKiwoomClient.instances.append(self)
 
     async def __aenter__(self):
@@ -86,6 +88,11 @@ class _FakeKiwoomClient:
 
     async def stock_quote(self, code):
         return dict(self.quote_data)
+
+    async def get_orderable_cash(self):
+        if self.orderable_cash is None:
+            raise RuntimeError("주문가능금액 조회 실패")
+        return self.orderable_cash
 
     async def place_buy_order(self, code, qty, price):
         self.buy_calls.append((code, qty, price))
@@ -532,10 +539,11 @@ async def test_idle_enters_normally_when_bars_date_matches_injected_today(monkey
 
 
 async def test_idle_blocked_by_budget_guard_when_notional_exceeds_total_budget(monkeypatch):
-    """AUTO_TRADE_TOTAL_BUDGET_KRW(25,000원)를 넘는 가격이면 진입 조건이
-    충족돼도 매수를 절대 시도하지 않는다 — §5.54-2 완료 기준의 핵심 케이스."""
+    """지정가 x 1주가 한도(주문가능금액 등)를 넘으면 진입 조건이 충족돼도 매수를
+    절대 시도하지 않는다(Phase 5.122: 수량 0 -> budget_blocked) — §5.54-2 핵심 케이스."""
     await _set_state(enabled=True, status="idle")
     high_price = auto_trader.AUTO_TRADE_TOTAL_BUDGET_KRW + 5000
+    monkeypatch.setitem(FAKE_QUOTE_RAW, "sel_fpr_bid", f"-{high_price}")  # 매도1호가 = 주문가
     _patch_signals(monkeypatch, ma_state="golden", is_spike=True, bars_close=float(high_price))
     fake_cls = _patch_kiwoom_client(monkeypatch)
 
@@ -543,7 +551,7 @@ async def test_idle_blocked_by_budget_guard_when_notional_exceeds_total_budget(m
         result = await auto_trader.run_auto_trade(session, now_kst=SAFE_NOW_KST)
 
     assert result["action"] == "budget_blocked"
-    assert fake_cls.instances == []  # place_buy_order로 이어지는 클라이언트 호출 자체가 없어야 함
+    assert all(c.buy_calls == [] for c in fake_cls.instances)  # 수량 0 -> 주문 호출 없음
 
     state = await _get_state()
     assert state.status == "idle"

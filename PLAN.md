@@ -5831,3 +5831,28 @@ PLAN.md 127개 Phase 중 "시간대별 데이터 신선도"(장 마감 후 낡�
 **구현 노트 (2026-11-26)**: 백엔드는 조회 전용 추가만 했다 — `auto_trader.LAST_EVAL`/`build_last_eval`/`record_last_eval`(live_refresh가 run_auto_trade 결과를 넘김, enabled일 때만 갱신), run_auto_trade 결과에 `status`·`golden_recent`·`spike_recent`·`current_price` 추가(분기·판정 불변), `/state`에 `mode`·`entry_reason`·`exit_levels`(exit_rules.trigger_price·엔진 상수 재사용)·`last_eval`·`engine_rules.entry_block_windows`. 프런트는 `tradeView.js`(표시용 순수 함수), `components/TradePanels.jsx`(상태 바·포지션 카드·대기 카드·오늘), `HoldingTile.jsx`(대시보드 보유 타일), `devMock.js`(dev 서버 전용 `?mock=auto|manual|stopped` 화면 확인용). 탭 이름 `매매`(key는 auto-trade 유지). 오늘 실현손익은 오늘 로그의 진입·청산가 짝으로 계산(전일 진입분 청산은 제외 표기). 테스트 `backend/tests/test_auto_trade_state_view.py`(DB 미사용). 한계: last_eval은 프로세스 메모리라 재시작 직후 null, 보유 포지션 화면은 mock으로만 확인.
 
 **후속 (2026-11-26 사용자 요청)**: 수동 매수 > 조합 프리셋 저장 이름 기본값 — 현재 조건이 가이드 추천 조합과 같으면 `조합 이름: 조건 요약`, 아니면 `조건 요약`을 placeholder로 보여주고, 이름을 비운 채 저장하면 그 이름으로 저장(60자 컷). 직접 입력한 이름이 우선. 프론트 반영은 장중에 먼저(backend 재시작 없음), 백엔드는 15:30 이후 반영(보유 포지션 손절 감시 중단 방지).
+
+### Phase 5.122 — 자동매매 수량: 1주 고정 → 5만원 한도 내 최대 수량 (2026-11-26 사용자 명시 요청)
+
+**요청**: "현재 1주로 되어 있는걸 5만원 한도내 총액 다 쓰는거로 수정"(분할 매도는 스캘핑과 맞지 않아 보류). 실거래 규칙 변경 — 사용자 명시 요청으로 진행.
+
+**수량 산식**: `qty = floor(min(MAX_ORDER_NOTIONAL_KRW=50,000, AUTO_TRADE_TOTAL_BUDGET_KRW, 계좌 주문가능금액) / 지정가)`. 지정가는 기존대로 매도 1호가. qty<1이면 주문 없이 `budget_blocked` 로그. `AUTO_TRADE_TOTAL_BUDGET_KRW` 25,000 → 50,000. 계좌 주문가능금액은 kt00001(`qry_tp=3`, 읽기전용) `100stk_ord_alow_amt`를 쓰고, 조회 실패 시 보수적으로 진입 보류. 수동 매수도 같은 산식.
+**실측(2026-11-26 11:5x)**: 예수금 23,908원, 주문가능 12,620원(미결제 반영)·D+2 23,683원 → 지금 계좌로는 약 2주가 상한. 5만원을 다 쓰려면 추가 입금 필요.
+
+**1주 전제로 숨어 있던 위험(같이 고친다)**:
+1. 부분 체결 — 매수 N주 중 일부만 체결되면 현재는 "미확인→취소→idle"이 돼 **실보유 주식이 손절 감시 밖**에 남는다. → 주문 후 실보유수량을 읽어 `0 < 실보유 < N`이면 잔량 취소 후 실보유수량으로 holding 전환.
+2. 매도 부분 체결 — 현재는 entry_qty가 그대로 남아 다음 매도가 수량 초과로 계속 거부된다. → 실보유수량으로 entry_qty를 줄이고 holding 유지, 다음 폴링에서 잔량 매도.
+3. 매도 notional 캡 — `place_sell_order`에도 5만원 캡이 있어 4주 보유 중 가격이 +17%면 청산 주문이 막힌다. → 매도 캡은 매수 캡의 2배(100,000원)로 완화(매도는 노출을 줄이는 방향). 매수 캡 5만원은 그대로.
+4. 동기화(`/sync`) 기대수량 — `TARGET_QTY` 대신 `state.entry_qty`.
+**화면**: '1주' 고정 표기를 실제 수량(보유 시 entry_qty, 대기 시 "최대 N주 · 5만원 한도")으로.
+**검증**: 키움 클라이언트만 가짜로 두고(체결 수량 시나리오: 전량/부분/0) 상태·로그를 실제 값으로 확인하는 테스트. 수정 전 코드에서 부분 체결 테스트가 실패해야 한다. 반영은 15:30 이후(backend 재시작 = 손절 감시 일시 중단).
+
+**구현 노트 (2026-11-26)**
+- `quant/auto_trade_rules.py`: 순수 함수 `compute_order_qty`(수량 산식), `classify_buy_fill`/`classify_sell_fill`(full/partial/unconfirmed 분류) 추가. `TARGET_QTY`는 더 이상 진입 수량이 아니며 entry_qty 없음 폴백·import 호환용으로만 남김.
+- `clients/kiwoom.py`: `get_orderable_cash()`(kt00001 `qry_tp=3`, `100stk_ord_alow_amt`, 읽기전용), `get_deposit_detail`에 `qry_tp` 추가, `SELL_MAX_ORDER_NOTIONAL_KRW=100,000`(매도 캡 2배, 매수 캡 불변).
+- `collectors/auto_trader.py`: `AUTO_TRADE_TOTAL_BUDGET_KRW` 50,000. 매수(`_handle_idle`)·수동 매수(router)는 매도1호가→주문가능금액→수량 산출, 0주면 주문 없이 `budget_blocked`(error 로그). 정산 헬퍼 `_settle_buy_fill`/`_settle_sell_fill`: 부분 체결이면 잔량 취소 후 1회 재조회로 확정 → 매수는 실보유수량으로 holding(로그에 "부분 체결 N/M주"), 매도는 `entry_qty`=잔량·status 유지·`sell_unconfirmed` 이벤트(+action `sell_partial`)로 기록, 0주/조회불가는 기존 동작. 매도 수량은 `entry_qty`(`_execute_sell`·`watch_stop_loss` 두 곳).
+- 로그 `signal_snapshot.qty`에 체결 수량 기록(entry/manual_entry/exit_*), 프런트 `summarizeToday`는 이 값으로 실현손익 계산(없으면 기존 가정). **한계**: 부분 매도(`sell_unconfirmed`)는 EXIT_TYPES가 아니라 오늘 실현손익 합계에 반영되지 않고, `/performance`는 수익률(%) 기반이라 수량 영향 없음.
+- `/sync`: 보유 상태 기대수량 = `entry_qty`. 보유 중 불일치(실보유>0, ≠entry_qty)는 기존대로 409(사람 확인) 유지.
+- `/state`: `target.qty`는 보유 시 entry_qty, 대기 시 None + `max_order_notional`·`total_budget` 노출.
+- 테스트: `tests/test_auto_trade_qty_sizing.py`(신규, 45건). 킬스위치 가드 DB 테스트(collector/router)는 가드로 실행 불가라 가짜 키움에 `get_orderable_cash`를 추가하고 예산 초과 케이스 2건을 호가 기반으로 수정만 함(실행 미검증).
+- 미확인: 라이트/다크×390/1280 스크린샷, 실계좌 kt00001 응답 재확인, 반영(재시작)은 15:30 이후.

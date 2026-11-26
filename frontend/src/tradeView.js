@@ -202,7 +202,7 @@ export const EVENT_LABEL = {
   exit_manual_rule: '내 조건 청산',
   manual_rules_update: '조건 수정',
   buy_unconfirmed: '매수 체결 미확인',
-  sell_unconfirmed: '매도 체결 미확인',
+  sell_unconfirmed: '매도 체결 미확인/부분',
 }
 
 const HUMAN_REASON = {
@@ -217,7 +217,7 @@ const HUMAN_REASON = {
   trail_activate: '진입가 대비 전환 수익률에 도달해 트레일링으로 전환했습니다.',
   manual_rules_update: '보유 중 청산 조건을 수정했습니다.',
   buy_unconfirmed: '매수 주문을 냈지만 체결을 확인하지 못해 취소를 시도했습니다.',
-  sell_unconfirmed: '매도 주문을 냈지만 체결을 확인하지 못해 취소를 시도했습니다.',
+  sell_unconfirmed: '매도 주문이 체결되지 않았거나 일부만 체결돼 미체결분 취소를 시도했습니다(자세한 내용은 사유 참고).',
 }
 
 export function humanLogReason(row) {
@@ -242,6 +242,18 @@ const ENTRY_TYPES = ['entry', 'manual_entry']
 const EXIT_TYPES = ['exit_stop_loss', 'exit_trail', 'exit_eod_forced', 'exit_flow_reversal', 'exit_manual', 'exit_manual_rule']
 const BLOCK_TYPES = ['entry_blocked_time', 'entry_blocked_risk']
 
+// 로그 행의 체결 수량(Phase 5.122: 백엔드가 signal_snapshot.qty에 기록). 없으면 null.
+function rowQty(row) {
+  let sig = row?.signal_snapshot
+  try {
+    if (typeof sig === 'string') sig = JSON.parse(sig)
+  } catch {
+    sig = null
+  }
+  const q = Number(sig?.qty)
+  return Number.isFinite(q) && q > 0 ? q : null
+}
+
 // 오늘 로그 행(최신순) -> 요약. 진입·청산 짝은 같은 날 안에서만 맞춘다(전일 진입 청산은 손익을 계산하지 않는다).
 export function summarizeToday(rows, qty = 1) {
   const asc = [...rows].sort((a, b) => new Date(a.ts) - new Date(b.ts))
@@ -253,7 +265,7 @@ export function summarizeToday(rows, qty = 1) {
     if (ENTRY_TYPES.includes(r.event_type)) open = r
     else if (EXIT_TYPES.includes(r.event_type)) {
       if (open && open.price != null && r.price != null) {
-        pnl += (Number(r.price) - Number(open.price)) * qty
+        pnl += (Number(r.price) - Number(open.price)) * (rowQty(r) ?? rowQty(open) ?? qty)
         pairs += 1
       } else unpaired += 1
       open = null

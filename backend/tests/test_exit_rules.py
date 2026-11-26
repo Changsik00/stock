@@ -592,6 +592,9 @@ class FakeOrderClient:
     async def __aexit__(self, *a):
         return False
 
+    async def get_orderable_cash(self):
+        return 10_010  # 매도1호가 10010 기준 1주
+
     async def place_buy_order(self, code, qty, price):
         FakeOrderClient.buys.append((code, qty, price))
         return {"ord_no": "77", "return_code": 0}

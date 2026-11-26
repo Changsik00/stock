@@ -680,7 +680,7 @@ async def test_place_buy_order_over_cap_raises_without_any_http_call(make_client
 
 
 async def test_place_sell_order_over_cap_raises_without_any_http_call(make_client):
-    """매도도 동일한 캡을 적용하며, 마찬가지로 HTTP 호출이 전혀 없어야 한다."""
+    """매도 캡(Phase 5.122: 매수 캡의 2배=10만원) 초과 시에도 HTTP 호출이 전혀 없어야 한다."""
     calls = {"count": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -690,7 +690,7 @@ async def test_place_sell_order_over_cap_raises_without_any_http_call(make_clien
     client = make_client(handler)
     try:
         with pytest.raises(ValueError):
-            await client.place_sell_order("007980", 100, 1000)  # 100,000 > 50,000
+            await client.place_sell_order("007980", 101, 1000)  # 101,000 > 100,000
     finally:
         await client.aclose()
 
@@ -776,7 +776,7 @@ async def test_get_deposit_detail_request_shape(make_client):
             return _token_response(request)
         assert request.url.path == "/api/dostk/acnt"
         assert request.headers["api-id"] == "kt00001"
-        assert json.loads(request.content) == {}
+        assert json.loads(request.content) == {"qry_tp": "3"}  # 2026-11-26 실측: qry_tp 필수
         return httpx.Response(
             200,
             json={"return_code": 0, "return_msg": "", "entr": "100000"},

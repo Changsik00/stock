@@ -73,10 +73,14 @@ const EVENT_TYPE_LABEL = {
 // 이 페이지가 보여주는 값들은 전부 PLAN.md §5.54/§5.55에서 사용자가 직접 확정한
 // 규칙 그대로다 — "이 조합이 좋다"는 판단 문구가 아니라 지금 설정된 규칙 자체를
 // 고정 텍스트로 서술한다(house rule §5).
+// 수량 표기 — 보유 중이면 실제 수량, 대기 중이면 한도 안내(수량은 주문 시점 호가·주문가능금액으로 결정).
+const qtyRuleText = (target) =>
+  target.qty ? `${target.qty}주 보유` : `최대 ${Math.round((target.max_order_notional || 50000) / 10000)}만원 한도 내 최대 수량`
+
 const buildStrategyRules = (target) => [
   {
     label: '대상 종목',
-    value: target ? `${target.name} (${target.code}) 고정 · ${target.qty}주` : '-',
+    value: target ? `${target.name} (${target.code}) 고정 · ${qtyRuleText(target)}` : '-',
   },
   { label: '진입 조건', value: 'ma_cross.state == "golden" AND volume_spike.is_spike == true' },
   {
@@ -598,7 +602,7 @@ export default function AutoTradePage() {
   }
 
   const holding = holdingOf(state)
-  const qty = state?.target?.qty || 1
+  const qty = state?.entry_qty || state?.target?.qty || 1
 
   return (
     <div className="at-page">

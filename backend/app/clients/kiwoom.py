@@ -556,6 +556,11 @@ ORDER_TRADE_TYPE_LIMIT = "0"
 # 할 후속 작업으로 남겨 둔다.
 MAX_ORDER_NOTIONAL_KRW = 50_000
 
+# Phase 5.122 — 매도 주문 1건 notional 캡. 매수는 5만원 한도로 N주를 사므로 보유 중 가격이
+# 올라 보유 평가액이 5만원을 넘을 수 있다(예: 4주 x +17%). 매도는 노출을 줄이는 방향이라
+# 청산 주문이 캡에 막히면 안 되므로 매수 캡의 2배까지 허용한다. 매수 캡은 그대로.
+SELL_MAX_ORDER_NOTIONAL_KRW = 2 * MAX_ORDER_NOTIONAL_KRW
+
 # 토큰 만료 30분 전에 선제 재발급 (PLAN.md §5.4).
 TOKEN_REFRESH_MARGIN = dt.timedelta(minutes=30)
 
@@ -1466,23 +1471,20 @@ class KiwoomClient:
         """매도주문 (kt10001) — **실호출로 미확정**(요청 body 형태는
         `place_buy_order`와 동일, 모듈 docstring "주문 TR" 절 참고).
 
-        `place_buy_order`와 동일한 `MAX_ORDER_NOTIONAL_KRW` notional 캡을
-        건다 — 매도는 원래 "돈을 쓴다"는 의미의 캡이 필요 없지만(자산을 팔 뿐),
-        이번 최초 버전은 단순함/대칭성을 위해 매수와 동일한 방어선을 그대로
-        적용하는 의도적 단순화다(잘못된 대량 수량 매도를 막는 부수 효과는
-        있음). 기능이 성숙하면 완화될 수 있다.
+        Phase 5.122: notional 캡은 `SELL_MAX_ORDER_NOTIONAL_KRW`(매수 캡의 2배,
+        10만원) — 보유 중 가격 상승으로 청산 주문이 막히지 않게 완화했다.
+        (이전엔 매수와 동일한 5만원 캡.)
 
         Args/Returns/Raises: `place_buy_order` 참고(캡 초과 시 HTTP 호출 전에
         `ValueError`).
         """
         notional = quantity * price
-        if notional > MAX_ORDER_NOTIONAL_KRW:
+        if notional > SELL_MAX_ORDER_NOTIONAL_KRW:
             raise ValueError(
                 f"매도 주문 notional {notional:,}원(수량 {quantity} x 단가 "
-                f"{price:,}원)이 안전 한도 {MAX_ORDER_NOTIONAL_KRW:,}원을 "
-                "초과합니다 — 매수와 동일한 하드 캡을 매도에도 적용한다(모듈 "
-                "상수 MAX_ORDER_NOTIONAL_KRW 정의부 주석 참고). 수량/단가 "
-                "단위를 다시 확인하세요."
+                f"{price:,}원)이 안전 한도 {SELL_MAX_ORDER_NOTIONAL_KRW:,}원을 "
+                "초과합니다 — 매도 하드 캡(모듈 상수 SELL_MAX_ORDER_NOTIONAL_KRW "
+                "정의부 주석 참고). 수량/단가 단위를 다시 확인하세요."
             )
         body = {
             "dmst_stex_tp": exchange,
@@ -1540,8 +1542,21 @@ class KiwoomClient:
         Returns:
             `call_tr`이 반환한 응답 body dict.
         """
-        data, _ = await self.call_tr("kt00001", {})
+        # 2026-11-26 실측: kt00001은 qry_tp가 필수("필수입력 파라미터=qry_tp"). "3"=추정조회.
+        data, _ = await self.call_tr("kt00001", {"qry_tp": "3"})
         return data
+
+    async def get_orderable_cash(self) -> int:
+        """계좌 주문가능금액(원) — kt00001(`qry_tp="3"`) `100stk_ord_alow_amt`. **읽기전용**.
+
+        2026-11-26 실측: 값은 앞자리 0이 채워진 문자열('000000000023680'). 미결제 대금을
+        반영한 `ord_alow_amt`보다 큰 값이 올 수 있어 보수적 선택은 호출부 몫이 아니라 여기서
+        `100stk_ord_alow_amt`(100% 증거금 기준)로 고정한다. 필드가 없거나 파싱 불가면 ValueError."""
+        data = await self.get_deposit_detail()
+        raw = data.get("100stk_ord_alow_amt")
+        if raw is None:
+            raise ValueError("kt00001 응답에 100stk_ord_alow_amt 없음")
+        return int(str(raw).strip() or "0")
 
     async def get_unfilled_orders(self) -> dict[str, Any]:
         """미체결요청 (ka10075) — **읽기전용**, 2026-08-04 실호출 확정.

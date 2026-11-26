@@ -41,6 +41,7 @@ from ..collectors.auto_trader import (
     _best_fill_price,
     _cancel_unfilled_order_silently,
     _confirm_holdings_qty,
+    _settle_buy_fill,
     _execute_sell,
     _log,
     _position_lock,
@@ -57,7 +58,7 @@ from ..quant.auto_trade_performance import (
 )
 from ..quant import auto_trade_rules as _engine_rules
 from ..quant import exit_rules as exit_rules_mod
-from ..quant.auto_trade_rules import TARGET_NAME, check_entry_budget, foreign_flow_sign
+from ..quant.auto_trade_rules import TARGET_NAME, check_entry_budget, compute_order_qty, foreign_flow_sign
 from ..quant.etf_pair_metrics import PAIR_ETF_NAMES, PAIR_ETFS
 from .stocks import _warm_stock_intraday
 
@@ -342,7 +343,10 @@ def _serialize_state(
         "target": {
             "code": TARGET_CODE,
             "name": TARGET_NAME,
-            "qty": TARGET_QTY,
+            # Phase 5.122 — 고정 수량 폐지: 보유 중이면 실제 수량, 대기 중이면 None(주문 시점에 산출).
+            "qty": row.entry_qty if held else None,
+            "max_order_notional": MAX_ORDER_NOTIONAL_KRW,
+            "total_budget": AUTO_TRADE_TOTAL_BUDGET_KRW,
             "db_code": row.code,
         },
         # Phase 5.118 — 진입 방식('manual'|'auto'|None=포지션 없음)과 수동 진입의 사용자 청산 조건.
@@ -499,26 +503,35 @@ async def manual_buy_auto_trade(
             analysis = exit_rules_mod.analyze_rules(_rules_payload(body.rules), current_price, stats=stats)
             manual_rules = _gate_analysis(analysis, body.acknowledge_warnings)
 
-        notional = TARGET_QTY * current_price
-        if not check_entry_budget(state.status, notional, AUTO_TRADE_TOTAL_BUDGET_KRW, MAX_ORDER_NOTIONAL_KRW):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"예산 가드 실패: notional={notional}(qty={TARGET_QTY} x price={current_price}), "
-                    f"budget={AUTO_TRADE_TOTAL_BUDGET_KRW}, max_order_notional={MAX_ORDER_NOTIONAL_KRW}"
-                ),
-            )
-
+        # Phase 5.122 — 수량 = floor(min(주문캡, 누적예산, 주문가능금액) / 매도1호가), 주문 시점 산출.
+        order_qty = 0
+        order_price = None
+        order_response: dict = {}
+        orderable_cash: int | None = None
+        block_note = ""
+        fill_kind, filled_qty = "unconfirmed", 0
         try:
             async with KiwoomClient() as client:
                 order_price = await _best_fill_price(client, code, "buy")
                 if order_price is None:
                     raise RuntimeError("매도호가를 확인할 수 없어 주문가를 정할 수 없음")
-                order_response = await client.place_buy_order(code, TARGET_QTY, int(order_price))
-                order_no = str(order_response.get("ord_no")) if order_response.get("ord_no") else None
-                confirmed = await _confirm_holdings_qty(client, code, TARGET_QTY)
-                if not confirmed:
-                    await _cancel_unfilled_order_silently(client, code, order_no, TARGET_QTY)
+                try:
+                    orderable_cash = await client.get_orderable_cash()
+                except Exception as e:  # noqa: BLE001 - 주문가능금액을 모르면 보류(보수적)
+                    block_note = f"주문가능금액 조회 실패({e})"
+                order_qty = compute_order_qty(
+                    order_price, MAX_ORDER_NOTIONAL_KRW, AUTO_TRADE_TOTAL_BUDGET_KRW, orderable_cash
+                )
+                if order_qty >= 1 and not check_entry_budget(
+                    state.status, order_qty * order_price, AUTO_TRADE_TOTAL_BUDGET_KRW, MAX_ORDER_NOTIONAL_KRW
+                ):
+                    block_note = f"예산 가드 실패(status={state.status})"
+                    order_qty = 0
+                if order_qty >= 1:
+                    order_response = await client.place_buy_order(code, order_qty, int(order_price))
+                    order_no = str(order_response.get("ord_no")) if order_response.get("ord_no") else None
+                    confirmed = await _confirm_holdings_qty(client, code, order_qty)
+                    fill_kind, filled_qty = await _settle_buy_fill(client, code, order_no, order_qty, confirmed)
         except Exception as e:  # noqa: BLE001 - 주문 실패는 상태 변경 없이 로그만
             await _log(
                 session,
@@ -530,7 +543,23 @@ async def manual_buy_auto_trade(
             )
             raise HTTPException(status_code=502, detail=f"매수 주문 실패: {e}") from e
 
-        if not confirmed:
+        if order_qty < 1:
+            detail = (
+                f"주문 수량 0주 — 지정가 {order_price}원, 한도(주문캡 {MAX_ORDER_NOTIONAL_KRW}, "
+                f"누적예산 {AUTO_TRADE_TOTAL_BUDGET_KRW}), 주문가능금액 {orderable_cash}원"
+                + (f" / {block_note}" if block_note else "")
+            )
+            await _log(
+                session,
+                event_type="error",
+                code=code,
+                price=order_price,
+                reason=f"수동 매수 보류(budget_blocked): {detail}",
+                signal_snapshot={"current_price": current_price, "source": "manual"},
+            )
+            raise HTTPException(status_code=400, detail=f"예산 가드 실패: {detail}")
+
+        if fill_kind == "unconfirmed":
             # PLAN.md §5.78(§5.71 후속) — `_handle_idle`과 동일한 이유(collectors/
             # auto_trader.py 모듈 상단 "미체결 확인" 절 참고). 주문은 접수됐지만
             # 실보유수량으로 체결이 확인되지 않음(취소 시도함) — status를
@@ -542,7 +571,7 @@ async def manual_buy_auto_trade(
                 price=order_price,
                 reason=(
                     f"사용자가 대시보드에서 수동으로 매수 주문을 실행함(지정가 {order_price}원, "
-                    f"{TARGET_QTY}주)했으나 체결 미확인(실보유수량 불일치, 취소 시도)"
+                    f"{order_qty}주)했으나 체결 미확인(실보유수량 불일치, 취소 시도)"
                 ),
                 signal_snapshot={"current_price": current_price, "source": "manual"},
                 order_response=order_response,
@@ -552,10 +581,12 @@ async def manual_buy_auto_trade(
                 detail="매수 주문을 제출했지만 체결이 확인되지 않았습니다(취소 시도함) — 잠시 후 다시 시도하세요.",
             )
 
+        partial_note = f" [부분 체결 {filled_qty}/{order_qty}주, 잔량 취소]" if fill_kind == "partial" else ""
+
         now = dt.datetime.now(dt.timezone.utc)
         state.status = "holding"
         state.entry_price = order_price
-        state.entry_qty = TARGET_QTY
+        state.entry_qty = filled_qty
         state.entry_at = now
         state.entry_order_no = str(order_response.get("ord_no")) if order_response.get("ord_no") else None
         state.peak_price = None
@@ -588,7 +619,7 @@ async def manual_buy_auto_trade(
             price=order_price,
             reason=(
                 f"사용자가 대시보드에서 수동으로 매수 주문을 실행함(지정가 {order_price}원, "
-                f"{TARGET_QTY}주), 진입 시점 외인 현물 수급 부호={state.entry_foreign_flow_sign!r}"
+                f"{filled_qty}주){partial_note}, 진입 시점 외인 현물 수급 부호={state.entry_foreign_flow_sign!r}"
                 + (
                     f" / 청산 조건: {exit_rules_mod.describe_rules(manual_rules)}"
                     + ("" if exit_rules_mod.has_stop(manual_rules) else " (손절 조건 없음)")
@@ -600,6 +631,7 @@ async def manual_buy_auto_trade(
             signal_snapshot={
                 "current_price": current_price,
                 "source": "manual",
+                "qty": filled_qty,
                 **({"exit_rules": manual_rules} if manual_rules is not None else {}),
             },
             order_response=order_response,
@@ -783,6 +815,8 @@ async def manual_sell_auto_trade(session: AsyncSession = Depends(get_session)) -
                 "포지션은 유지됩니다, 잠시 후 다시 시도하세요.",
             )
 
+        # Phase 5.122 — result["action"] == "sell_partial"이면 일부만 체결돼 잔량이 남은 상태
+        # (entry_qty 갱신·status 유지됨). 오류가 아니라 정상 응답으로 현재 상태를 돌려준다.
         await session.refresh(state)
         return _serialize_state(state, current_price=None)
 
@@ -796,7 +830,7 @@ async def sync_auto_trade_state(session: AsyncSession = Depends(get_session)) ->
     지연 시간이 불명) — 그 경우를 위한 사용자 직접 트리거 안전망이다.
     `_position_lock`을 잡아 자동 엔진과 동시에 상태를 건드리지 않는다.
 
-    비교 기준: status가 "holding"/"trailing"이면 기대 수량은 `TARGET_QTY`,
+    비교 기준: status가 "holding"/"trailing"이면 기대 수량은 `state.entry_qty`(Phase 5.122, 없으면 1),
     "idle"이면 0.
 
     - 일치하면 아무 것도 바꾸지 않고 ``{"corrected": false, ...}``.
@@ -818,7 +852,7 @@ async def sync_auto_trade_state(session: AsyncSession = Depends(get_session)) ->
     async with _position_lock:
         state = await _get_or_create_state(session)
         code = state.code or TARGET_CODE
-        expected_qty = TARGET_QTY if state.status in ("holding", "trailing") else 0
+        expected_qty = int(state.entry_qty or TARGET_QTY) if state.status in ("holding", "trailing") else 0
 
         try:
             async with KiwoomClient() as client:
@@ -867,8 +901,8 @@ async def sync_auto_trade_state(session: AsyncSession = Depends(get_session)) ->
             }
 
         if state.status != "idle":
-            # 이 전략은 항상 단일 종목·단일 수량(TARGET_QTY=1)만 다루므로 status가
-            # 이미 holding/trailing인데 실보유수량이 0도 TARGET_QTY도 아닌 조합은
+            # 이 전략은 단일 종목·단일 포지션만 다루므로 status가 이미 holding/trailing인데
+            # 실보유수량이 0도 entry_qty(기대 수량, Phase 5.122)도 아닌 조합은
             # 정상 흐름에서 나올 수 없다 — 뭘 근거로 자동 정정할지 애매하니(예:
             # peak_price/entry_order_no를 지워도 되는지 불확실) 사람 확인으로 넘긴다.
             raise HTTPException(
