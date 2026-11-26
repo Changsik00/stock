@@ -1041,6 +1041,23 @@ export default function DashboardPage({ onNavigate }) {
     if (!t || Number.isNaN(t.getTime())) return null
     return new Intl.DateTimeFormat('ko-KR', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit', hour12: false }).format(t)
   })()
+  // Phase 5.127 — 외국인·기관계 타일의 선물(코스피200) 순매수와 기관계의 금융투자 몫. 현물과 같은 날짜일 때만 붙인다
+  // (다른 날 값끼리 같은/반대 방향을 비교하면 틀리므로).
+  const futuresFor = (name, source, date) => {
+    if (!STATIC_DATA && source === 'live') {
+      return futuresFlowLive && futuresFlowLive.market_closed === false
+        ? (futuresFlowLive.investors?.[name]?.net_value ?? null)
+        : null
+    }
+    if (!STATIC_DATA && futuresFlowLive?.date && date && futuresFlowLive.date === date) {
+      return futuresFlowLive.investors?.[name]?.net_value ?? null
+    }
+    const row = latestFlowRow(marketData.futures?.flows, name)
+    return row && date && row.date === date ? row.net_value : null
+  }
+  const sumMarkets = (a, b) => (typeof a === 'number' || typeof b === 'number' ? (a ?? 0) + (b ?? 0) : null)
+  const liveFin = () =>
+    sumMarkets(flowLive?.kospi?.investors?.['금융투자']?.net_value, flowLive?.kosdaq?.investors?.['금융투자']?.net_value)
   const investorFlowTiles = DEFAULT_INVESTORS.map((name) => {
     const liveValue = flowLiveSummary?.[name]
     if (liveValue !== undefined) {
@@ -1050,6 +1067,8 @@ export default function DashboardPage({ onNavigate }) {
         total: liveValue,
         kospi: flowLive.kospi?.investors?.[name]?.net_value,
         kosdaq: flowLive.kosdaq?.investors?.[name]?.net_value,
+        futures: futuresFor(name, 'live'),
+        fin: liveFin(),
       }
     }
     const closedValue = flowClosedLiveSummary?.values?.[name]
@@ -1061,10 +1080,12 @@ export default function DashboardPage({ onNavigate }) {
         total: closedValue,
         kospi: flowLive.kospi?.investors?.[name]?.net_value,
         kosdaq: flowLive.kosdaq?.investors?.[name]?.net_value,
+        futures: futuresFor(name, 'closed', flowClosedLiveSummary.date),
+        fin: liveFin(),
       }
     }
     const row = flowInvestorSummary?.[name]
-    const onDate = (flows) => flows?.[name]?.find((r) => r.date === row?.date)?.net_value
+    const onDate = (flows, who = name) => flows?.[who]?.find((r) => r.date === row?.date)?.net_value
     return {
       name,
       source: 'eod',
@@ -1072,6 +1093,8 @@ export default function DashboardPage({ onNavigate }) {
       total: row?.net_value,
       kospi: row ? onDate(marketData.kospi?.flows) : undefined,
       kosdaq: row ? onDate(marketData.kosdaq?.flows) : undefined,
+      futures: row ? futuresFor(name, 'eod', row.date) : null,
+      fin: row ? sumMarkets(onDate(marketData.kospi?.flows, '금융투자'), onDate(marketData.kosdaq?.flows, '금융투자')) : null,
     }
   })
 

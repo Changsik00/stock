@@ -2391,6 +2391,12 @@ header h1 {
 .nc-bar-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 999px; background: var(--text-secondary); }
 .nc-summary { margin: 0; font-size: var(--fs-body); line-height: 1.5; color: var(--text-primary); }
 .nc-hint { margin: 0 0 var(--sp-2); }
+/* Phase 5.127 — 수급 읽는 법 */
+.ifs-guide { margin-bottom: var(--sp-3); font-size: var(--fs-label); line-height: 1.6; color: var(--text-secondary); }
+.ifs-guide-p { margin: 0 0 var(--sp-2); }
+.ifs-guide-p:last-child { margin-bottom: 0; }
+.ifs-guide-list { margin: 0 0 var(--sp-2); padding-left: var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-1); }
+.ifs-guide b { color: var(--text-primary); }
 .nc-hint:last-child { margin-bottom: 0; }
 .nc-split dt { min-width: 0; }
 

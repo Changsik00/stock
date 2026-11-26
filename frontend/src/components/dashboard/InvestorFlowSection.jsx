@@ -46,12 +46,12 @@ function usePersistedOpen(key) {
 }
 
 // 분할 한 줄: 코스피/코스닥 값 + ▲▼(방향색은 화살표만)
-function SplitLine({ name, value }) {
+function SplitLine({ name, value, title }) {
   const has = typeof value === 'number'
   const arrow = value > 0 ? '▲' : value < 0 ? '▼' : ''
   const cls = value > 0 ? 'up' : value < 0 ? 'down' : ''
   return (
-    <span className="ifs-line">
+    <span className="ifs-line" title={title}>
       <span className="ifs-line-name">{name}</span>
       <span className="ifs-line-val">
         {arrow && (
@@ -61,6 +61,36 @@ function SplitLine({ name, value }) {
           </>
         )}
         {has ? heroEok(value) ?? '-' : '-'}
+      </span>
+    </span>
+  )
+}
+
+// Phase 5.127 — 코스피 현물 vs 코스피200 선물 순매수 관계. 선물은 코스피 지수 선물이라 현물 합계가 아닌 코스피와 비교한다.
+// 한쪽이 다른 쪽의 ONE_SIDED_RATIO 미만이면 "한쪽 위주"(첫 배정값, 검증 안 됨 — 이름 붙은 상수로 둔다).
+const ONE_SIDED_RATIO = 0.2
+export function spotFuturesRelation(spot, futures) {
+  if (typeof spot !== 'number' || typeof futures !== 'number') return null
+  const a = Math.abs(spot)
+  const b = Math.abs(futures)
+  if (a === 0 && b === 0) return null
+  if (Math.min(a, b) < Math.max(a, b) * ONE_SIDED_RATIO) return b > a ? 'futures_only' : 'spot_only'
+  return spot > 0 === futures > 0 ? 'same' : 'opposite'
+}
+const RELATION_TEXT = {
+  same: '현물·선물 같은 방향',
+  opposite: '현물·선물 반대 · 헤지/차익 가능성',
+  futures_only: '선물 위주',
+  spot_only: '현물 위주',
+}
+
+function RelationChip({ spot, futures }) {
+  const rel = spotFuturesRelation(spot, futures)
+  if (!rel) return null
+  return (
+    <span className="ifs-chips">
+      <span className="badge badge-neutral" title="코스피 현물 순매수와 코스피200 선물 순매수 비교">
+        {RELATION_TEXT[rel]}
       </span>
     </span>
   )
@@ -196,16 +226,58 @@ function Interpretation({ data, loading }) {
   )
 }
 
+// 읽는 법(Phase 5.127) — 현물·선물 수급을 함께 읽는 법과 점검 순서. 참고용, 매매 신호 아님.
+function ReadingGuide() {
+  return (
+    <div className="vr-card ifs-guide">
+      <p className="ifs-guide-p">
+        <b>현물만 보면 틀리기 쉽습니다.</b> 같은 주체의 현물(코스피)과 선물(코스피200) 순매수를 함께 봅니다. 선물은 코스피 지수
+        선물이라 현물 합계가 아니라 코스피와 비교합니다.
+      </p>
+      <ul className="ifs-guide-list">
+        <li>
+          <b>같은 방향</b> — 현물·선물을 함께 사거나 함께 팝니다. 방향성 매매일 가능성이 큽니다(특히 외국인).
+        </li>
+        <li>
+          <b>반대 방향</b> — 현물을 사고 선물을 팔거나 그 반대입니다. 헤지·차익거래일 가능성이 커 순매수 금액만큼의 방향 의미는
+          약합니다.
+        </li>
+        <li>
+          <b>선물 위주</b> — 현물은 거의 안 하고 선물로만 움직입니다. 외국인이 선물로 먼저 방향을 잡는 경우가 많고, 베이시스를 통해
+          차익 프로그램이 현물로 옮겨 오기도 합니다.
+        </li>
+        <li>
+          <b>금융투자</b> — 기관 중 차익·헤지·ETF 유동성 공급 비중이 큰 주체입니다. 기관 순매수의 대부분이 금융투자면 연기금·투신의
+          방향성 매수와 구분해서 봅니다.
+        </li>
+      </ul>
+      <p className="ifs-guide-p">
+        <b>점검 순서</b> ① 외국인 현물·선물 관계 → ② 기관 순매수 중 금융투자 비중 → ③ 아래 '외국인 장중 흐름 해석'(고점 대비
+        되돌림, 비차익 프로그램) → ④ '외인 양손 · 현선물'의 베이시스(선물이 싸면 현물 매도 차익 부담, 만기일 근접 시 커짐) → ⑤
+        '코스피 등락 분해'의 한국 요인. 여러 개가 같은 쪽을 가리킬 때만 의미를 둡니다.
+      </p>
+      <p className="ifs-guide-p vr-aside">관계 판정은 금액 비교의 첫 배정 기준이며 검증되지 않았습니다 — 참고용, 매매 신호 아님.</p>
+    </div>
+  )
+}
+
 // tiles: [{name, total, kospi, kosdaq, source:'live'|'closed'|'eod', date}] (금액 백만원, 없으면 total undefined)
 // liveTime: 'HH:MM' | null (장중 잠정 기준 시각), consistency: GET /api/markets/flow/consistency 본문 | null
 export default function InvestorFlowSection({ tiles, liveActive, liveTime, consistency, consistencyEnabled, loading, baseDate, onTileClick }) {
   const hasConsistency = consistency && consistency.markets && Object.keys(consistency.markets).length > 0
+  const [guideOpen, setGuideOpen] = usePersistedOpen('stock.dashboard.flowGuideOpen')
   return (
     <>
-      <div className="section-title mt-title">
-        투자자별 수급 (현물)
-        {liveActive && <span className="narr-meta">{liveTime ? ` 장중 잠정 · ${liveTime} 기준` : ' 장중 잠정'}</span>}
+      <div className="section-title mt-title vr-title">
+        <span>
+          투자자별 수급 (현물)
+          {liveActive && <span className="narr-meta">{liveTime ? ` 장중 잠정 · ${liveTime} 기준` : ' 장중 잠정'}</span>}
+        </span>
+        <button type="button" className="btn btn-link btn-sm" aria-expanded={guideOpen} onClick={() => setGuideOpen(!guideOpen)}>
+          {guideOpen ? '읽는 법 닫기' : '읽는 법'}
+        </button>
       </div>
+      {guideOpen && <ReadingGuide />}
       <div className="mt-row">
         {tiles.map((t) => {
           const hasValue = typeof t.total === 'number'
@@ -237,8 +309,13 @@ export default function InvestorFlowSection({ tiles, liveActive, liveTime, consi
                   <span className="ifs-lines">
                     <SplitLine name="코스피" value={t.kospi} />
                     <SplitLine name="코스닥" value={t.kosdaq} />
+                    {JUDGED.includes(t.name) && typeof t.futures === 'number' && (
+                      <SplitLine name="선물" value={t.futures} title="코스피200 선물 순매수" />
+                    )}
+                    {t.name === '기관계' && typeof t.fin === 'number' && <SplitLine name="금융투자" value={t.fin} title="기관계 중 금융투자(차익·헤지·ETF 유동성 공급 비중이 큼)" />}
                   </span>
                   {markets && <JudgeChips markets={markets} />}
+                  {JUDGED.includes(t.name) && <RelationChip spot={t.kospi} futures={t.futures} />}
                 </>
               }
               title={t.source !== 'live' && t.date ? t.date : undefined}
