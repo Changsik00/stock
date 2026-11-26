@@ -2584,17 +2584,7 @@ button.fa-row:hover { background: var(--chip-bg); }
 .at-lad-lab { font-size: var(--fs-label); color: var(--text-secondary); }
 .at-lad-price { font-size: var(--fs-label); font-weight: 600; color: var(--text-primary); font-variant-numeric: tabular-nums; }
 
-.at-chart-svg { display: block; width: 100%; height: auto; background: var(--page); border: 1px solid var(--border); border-radius: 10px; }
-.at-chart-line { stroke: var(--series-price); stroke-width: 1.6; stroke-linejoin: round; }
-.at-chart-entry { stroke: var(--text-secondary); stroke-width: 1; stroke-dasharray: 4 3; }
-.at-chart-stop { stroke: var(--warn-text); stroke-width: 1; stroke-dasharray: 4 3; }
-.at-chart-dot { fill: var(--text-primary); stroke: var(--surface); stroke-width: 1.5; }
-.at-chart-skel { height: 96px; }
-.at-chart-legend { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); margin-top: var(--sp-1); font-size: var(--fs-label); color: var(--text-secondary); }
-.at-leg-item { display: inline-flex; align-items: center; gap: var(--sp-1); }
-.at-leg { display: inline-block; width: 14px; height: 0; border-top: 2px solid var(--series-price); }
-.at-leg-entry { border-top: 2px dashed var(--text-secondary); }
-.at-leg-stop { border-top: 2px dashed var(--warn-text); }
+.at-chart-skel { height: 240px; }
 
 .at-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-2) var(--sp-4); margin: 0; }
 .at-facts dt { font-size: var(--fs-label); color: var(--text-secondary); }

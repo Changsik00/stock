@@ -5884,3 +5884,9 @@ PLAN.md 127개 Phase 중 "시간대별 데이터 신선도"(장 마감 후 낡�
 3. 백엔드(조회 필드 추가만): `flow_consistency.analyze_curve` 결과에 `peak`·`peak_time`·`trough`·`trough_time`(10분 격자 기준, 시각 HH:MM) 추가.
 
 **구현 노트 (2026-11-26)**: 백엔드 `analyze_curve`에 `peak/peak_time/trough/trough_time` 추가(10분 격자 값, 시각=버킷 시작 HH:MM, 동률은 먼저 나온 버킷; 테스트 3개 추가 — 수정 전 코드에서 KeyError로 실패 확인). 프런트: `FlowConsistencyCard.jsx` 삭제 -> `InvestorFlowSection.jsx`(타일 + 접는 `외국인 장중 흐름 해석`, 접힘 상태 localStorage `stock.dashboard.flowInterpOpen`, 기본 접힘). 타일은 합계(기존 값) + 코스피/코스닥 줄, 외국인·기관계 판정 칩(장중 라이브일 때만; 두 시장 판정이 같으면 "코스피·코스닥 X"로 합침, 일관 매도만 badge-warn). 장중 잠정 시각은 flow/live `cached_at`(KST). 확정/마감 후 타일은 기존처럼 "합계 · 확정 · 날짜". `MetricTile`에 `extra` 슬롯 추가. 미검증: 일관 매도(주황) 상태의 실화면(당일 데이터가 혼조/일관 매수뿐), 마감 후·EOD 폴백 화면. 알려진 한계: 타일(flow/live, 1분 TTL)과 해석(intraday_sample)의 시장별 값이 수 억 어긋날 수 있음(표본 시각 차).
+
+### Phase 5.125 — 매매 탭 포지션 차트를 캔들로 통일 (2026-11-26 사용자 지적)
+
+**문제**: 매매 탭 포지션 카드의 미니차트만 SVG 종가 선 차트라 다른 화면(종목 상세·지수 모달의 `CandleChart` 캔들+거래량)과 일관성이 없었다.
+**변경**: 미니차트를 `CandleChart`(분봉 모드, `/api/stocks/{code}/intraday?interval=1`, 60초 갱신)로 교체. `CandleChart`에 `markLines` prop 추가 — `[{price, label, tone}]`, 진입가=중립(--text-secondary) 실선, 손절가=경고(--warn-text) 점선, 가격 방향색 미사용. 손절선이 당일 범위 밖이어도 보이도록 `autoscaleInfoProvider`로 세로축을 기준선까지 넓힌다. 기존 SVG 전용 CSS 제거.
+**검증(2026-11-26 13:34, 실제 수동 보유 포지션)**: 라이트/다크 × 390/1280 오류·가로 밀림 없음, 진입 11,010 기준선 표시. 손절선·진입 근거는 백엔드(5.121 exit_levels/entry_reason) 반영 후 표시 — 15:37 반영 대상.

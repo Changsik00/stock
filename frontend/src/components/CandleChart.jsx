@@ -106,6 +106,7 @@ export default function CandleChart({
   overlayLabel = 'VWAP',
   levels = null,
   flowLevels = null,
+  markLines = null,
 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
@@ -385,6 +386,50 @@ export default function CandleChart({
       for (const line of priceLines) candleSeries.removePriceLine(line)
     }
   }, [flowLevels])
+
+  // 보유 포지션 기준선(Phase 5.125, 매매 탭) — [{ price, label, tone: 'neutral'|'warn' }].
+  // 진입가 같은 기준값은 중립(--text-secondary, 실선), 손절가처럼 "닿으면 청산"인 선은
+  // 경고색(--warn-text, 점선). 가격 방향색(--up/--down)은 쓰지 않는다.
+  useEffect(() => {
+    const candleSeries = candleSeriesRef.current
+    if (!candleSeries) return undefined
+
+    const vars = readCssVars(['--text-secondary', '--warn-text'])
+    const priceLines = (markLines || [])
+      .filter((ml) => ml?.price != null)
+      .map((ml) =>
+        candleSeries.createPriceLine({
+          price: ml.price,
+          color: ml.tone === 'warn' ? vars['--warn-text'] : vars['--text-secondary'],
+          lineWidth: 1,
+          lineStyle: ml.tone === 'warn' ? LineStyle.Dashed : LineStyle.Solid,
+          axisLabelVisible: true,
+          title: ml.label || '',
+        })
+      )
+    // 손절선이 당일 가격 범위 밖이면 잘려 안 보이므로 기준선 가격까지 세로축 자동 범위를 넓힌다.
+    const prices = (markLines || []).map((ml) => ml?.price).filter((p) => p != null)
+    if (prices.length) {
+      candleSeries.applyOptions({
+        autoscaleInfoProvider: (original) => {
+          const r = original()
+          if (!r || !r.priceRange) return r
+          return {
+            ...r,
+            priceRange: {
+              minValue: Math.min(r.priceRange.minValue, ...prices),
+              maxValue: Math.max(r.priceRange.maxValue, ...prices),
+            },
+          }
+        },
+      })
+    }
+
+    return () => {
+      for (const line of priceLines) candleSeries.removePriceLine(line)
+      if (prices.length) candleSeries.applyOptions({ autoscaleInfoProvider: undefined })
+    }
+  }, [markLines])
 
   return (
     <div className="chart-card candle-chart-card">

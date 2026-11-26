@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { fetchStockIntraday } from '../api'
+import CandleChart from './CandleChart'
 import {
   BLOCK_LABEL,
   EVENT_LABEL,
@@ -152,7 +153,8 @@ function PriceLadder({ state, ticks }) {
 
 const numberText = (v) => new Intl.NumberFormat('ko-KR').format(v)
 
-// 오늘 1분봉 미니차트 — 종가선 + 진입가(점선) + 손절선(주황 점선). 외부 차트 라이브러리 없이 SVG로 그린다.
+// 오늘 1분봉 캔들 — 다른 화면(종목 상세·지수 모달)과 같은 CandleChart를 쓰고, 진입가(중립 실선)·
+// 손절가(주황 점선)를 기준선으로 겹친다(Phase 5.125, 차트 일관성).
 function MiniChart({ code, state, ticks }) {
   const [bars, setBars] = useState(null)
   const [err, setErr] = useState(false)
@@ -175,37 +177,34 @@ function MiniChart({ code, state, ticks }) {
     }
   }, [code])
 
+  const entry = state.entry_price
+  const stop = ticks.find((t) => t.key === 'stop_loss' || (t.key.startsWith('manual_') && t.side === 'down' && !t.key.endsWith('trail_pct')))
+  const stopPrice = stop?.price ?? null
+  const stopLabel = stop?.label ?? '손절'
+  // 매 초 리렌더(보유 시간 표시)마다 기준선을 다시 그리지 않도록 값이 바뀔 때만 새 배열을 만든다.
+  const markLines = useMemo(
+    () =>
+      [
+        entry != null && { price: Number(entry), label: `진입 ${numberText(entry)}`, tone: 'neutral' },
+        stopPrice != null && { price: Number(stopPrice), label: `${stopLabel} ${numberText(stopPrice)}`, tone: 'warn' },
+      ].filter(Boolean),
+    [entry, stopPrice, stopLabel],
+  )
+
   if (err && !bars) return <div className="at-sub">분봉을 불러오지 못했습니다.</div>
   if (!bars) return <div className="mt-skel at-chart-skel" aria-hidden="true" />
   if (bars.length < 2) return <div className="at-sub">오늘 분봉이 아직 없습니다.</div>
 
-  const entry = state.entry_price
-  const stop = ticks.find((t) => t.key === 'stop_loss' || (t.key.startsWith('manual_') && t.side === 'down' && !t.key.endsWith('trail_pct')))
-  const values = bars.map((b) => b.close)
-  const extra = [entry, stop?.price].filter((v) => v != null)
-  const lo = Math.min(...values, ...extra)
-  const hi = Math.max(...values, ...extra)
-  const pad = (hi - lo || 1) * 0.08
-  const W = 320
-  const H = 96
-  const x = (i) => (i / (bars.length - 1)) * W
-  const y = (v) => H - ((v - (lo - pad)) / (hi - lo + pad * 2)) * H
-  const line = bars.map((b, i) => `${x(i).toFixed(1)},${y(b.close).toFixed(1)}`).join(' ')
-  const entryHm = state.entry_at ? kstHm(state.entry_at).replace(':', '') : null
-  const entryIdx = entryHm ? bars.findIndex((b) => b.time >= entryHm) : -1
   return (
     <div className="at-chart">
-      <svg viewBox={`0 0 ${W} ${H}`} className="at-chart-svg" role="img" aria-label="오늘 1분봉 종가 추이">
-        {entry != null && <line x1="0" x2={W} y1={y(entry)} y2={y(entry)} className="at-chart-entry" />}
-        {stop && <line x1="0" x2={W} y1={y(stop.price)} y2={y(stop.price)} className="at-chart-stop" />}
-        <polyline points={line} className="at-chart-line" fill="none" />
-        {entryIdx >= 0 && entry != null && <circle cx={x(entryIdx)} cy={y(entry)} r="3.5" className="at-chart-dot" />}
-      </svg>
-      <div className="at-chart-legend">
-        <span className="at-leg-item"><i className="at-leg at-leg-line" />1분봉 종가</span>
-        {entry != null && <span className="at-leg-item"><i className="at-leg at-leg-entry" />진입 {numberText(entry)}</span>}
-        {stop && <span className="at-leg-item"><i className="at-leg at-leg-stop" />{stop.label} {numberText(stop.price)}</span>}
-      </div>
+      <CandleChart
+        key={code}
+        data={bars}
+        height={240}
+        intraday
+        title="캔들 · 거래량 (1분봉 · 오늘)"
+        markLines={markLines}
+      />
     </div>
   )
 }
