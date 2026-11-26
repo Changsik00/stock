@@ -23,8 +23,6 @@ import {
   fetchMacroSeries,
   fetchMarketSeries,
   fetchRegime,
-  fetchVolRegime,
-  fetchPremarketOutlook,
   fetchScalpCandidates,
   fetchScalpHitrate,
   fetchSectorRotation,
@@ -39,8 +37,6 @@ import GroupTreemap from '../components/GroupTreemap'
 import Modal from '../components/Modal'
 import RiskAlertBanner from '../components/RiskAlertBanner'
 import FreshnessBanner from '../components/FreshnessBanner'
-import PremarketOutlookCard from '../components/dashboard/PremarketOutlookCard'
-import VolRegimeCard from '../components/dashboard/VolRegimeCard'
 import InvestorFlowSection from '../components/dashboard/InvestorFlowSection'
 import NqComovementCard from '../components/dashboard/NqComovementCard'
 import FlowAnomalyCard from '../components/dashboard/FlowAnomalyCard'
@@ -103,7 +99,6 @@ import {
   scoreClass,
   scoreFmt,
   scoreLabel,
-  signedEokLabel,
   staleHintLabel,
   trillion,
   trillionLabel,
@@ -316,10 +311,6 @@ export default function DashboardPage({ onNavigate }) {
   // kosdaq, cached_at }). scalpCandidates 등과 동일하게 로컬 전용 기능이라
   // 정적 배포에서는 항상 null.
   const [regime, setRegime] = useState(null)
-  // 오늘 변동성 레짐(PLAN.md §5.95, 표시 전용) — 장 마감 후엔 마지막 값 유지, 실패 시에도 이전 값 유지.
-  const [volRegime, setVolRegime] = useState(null)
-  // 프리마켓 예상 시작점(PLAN.md §5.107, 표시 전용) — null=로딩, {error:true}=첫 로드 실패, 이후 실패는 마지막 값 유지.
-  const [premarket, setPremarket] = useState(null)
 
   // 종목 랭킹 요약 3개 카드(거래대금 상위/실시간 관심 TOP5/스켈핑 후보)의 시장
   // 필터(PLAN.md §5.15-3) — 'all'|'kospi'|'kosdaq', 기본 전체. 수급 상위/ETF
@@ -509,24 +500,6 @@ export default function DashboardPage({ onNavigate }) {
         })
     }
 
-    function loadVolRegime() {
-      return fetchVolRegime()
-        .then((body) => {
-          if (!cancelled) setVolRegime(body)
-        })
-        .catch(() => {}) // 실패 시 마지막 값 유지
-    }
-
-    function loadPremarket() {
-      return fetchPremarketOutlook()
-        .then((body) => {
-          if (!cancelled) setPremarket(body)
-        })
-        .catch(() => {
-          if (!cancelled) setPremarket((prev) => prev ?? { error: true })
-        })
-    }
-
     // 지수 3종 타일 1D 실시간(PLAN.md 작업 지시, 2026-07-21) — 기존 1분 티어에
     // 편입(별도 setInterval 신설 금지). 실패 시 null로 두면 렌더 쪽이 자동으로
     // marketData(3M EOD)의 마지막 봉으로 폴백한다(아래 렌더부 indexTileOf 참고).
@@ -599,9 +572,7 @@ export default function DashboardPage({ onNavigate }) {
           loadBasisLive(),
           loadFuturesFlowLive(),
           loadFxLive(),
-          loadRegime(),
-          loadVolRegime(),
-          loadPremarket()
+          loadRegime()
         )
       }
       return Promise.all(tasks)
@@ -1332,102 +1303,10 @@ export default function DashboardPage({ onNavigate }) {
       {/* 데이터 신선도 경고(PLAN.md Phase 5.120 C2) — 문제가 있을 때만 주황 한 줄 */}
       <FreshnessBanner />
 
-      {/* 0.5 지금 유입 우세(PLAN.md §5.15, 2026-07-23) — 코스닥·외국인 연속
-          순매수/매도일수 검증 결과(3년치 index_ohlcv/market_flow 백테스트)만
-          근거로 "지금 어느 시장이 유리한지" 판정한다. 문구는 항상 관찰+확률
-          서술이다(§5 전체 원칙) — "사라"/"지금이 기회" 같은 명령형·추천형 문구는
-          이 카드에서도 절대 쓰지 않는다. 코스피 등 신뢰도 낮은 조합은 숨기지 않고
-          흐리게("참고용 · 신호 약함") 구분해 그대로 노출한다(정직성 원칙). 정적
-          배포는 라이브 폴링이 없어 대상이 아니다(다른 로컬 전용 카드와 동일). */}
-      {!STATIC_DATA && regime && (
-        <>
-          <div className="section-title">지금 유입 우세</div>
-          <div className={`regime-card regime-card-${regime.regime === '코스닥우세' ? 'kosdaq' : 'neutral'}`}>
-            <div className="regime-card-top">
-              <span className="regime-verdict">{regime.regime}</span>
-              {regime.regime === '코스닥우세' && (
-                <button
-                  type="button"
-                  className="toggle-chip"
-                  onClick={() => setRankingMarketFilter('kosdaq')}
-                  title="아래 종목 랭킹 요약을 코스닥으로 필터"
-                >
-                  코스닥만 보기 ›
-                </button>
-              )}
-            </div>
-            <div className="regime-reason">{regime.reason}</div>
-            <div className="regime-combo-grid">
-              {['kosdaq', 'kospi'].map((m) =>
-                ['외국인', '기관계'].map((inv) => {
-                  const combo = regime[m]?.[inv]
-                  if (!combo) return null
-                  const streakLabel =
-                    combo.streak > 0
-                      ? `${combo.streak}일 연속 매수`
-                      : combo.streak < 0
-                        ? `${Math.abs(combo.streak)}일 연속 매도`
-                        : '연속 없음'
-                  return (
-                    <div
-                      key={`${m}-${inv}`}
-                      className={`regime-combo ${combo.reliable ? 'regime-combo-reliable' : 'regime-combo-weak'}`}
-                    >
-                      <span className="regime-combo-label">
-                        {m === 'kospi' ? '코스피' : '코스닥'} · {inv}
-                      </span>
-                      <span className="regime-combo-streak">{streakLabel}</span>
-                      {combo.bucket_stats ? (
-                        <span className="regime-combo-stats">
-                          다음날 상승확률 {combo.bucket_stats.positive_rate_pct}% (표본 {combo.bucket_stats.n}일)
-                        </span>
-                      ) : (
-                        <span className="regime-combo-stats">이 구간 과거 표본 없음</span>
-                      )}
-                      {!combo.reliable && <span className="regime-combo-hint">참고용 · 신호 약함</span>}
-                      {/* 2026-07-23 수정 — 사용자 지적: "오늘 수급이 좋아 보이는데
-                          왜 중립이냐". 확정 스트릭은 하루치 잠정 데이터로 방향을
-                          안 뒤집는(보수적 처리) 게 맞지만, 오늘 실제로 반대 방향
-                          움직임이 있다는 사실 자체는 숨기지 않는다. */}
-                      {combo.live_reversal && (
-                        <span className="regime-combo-hint regime-combo-reversal">
-                          오늘 장중은 현재 {combo.today_live_net_value > 0 ? '매수' : '매도'} 전환 조짐
-                        </span>
-                      )}
-                      {/* PLAN.md §5.17 — 수급 가속도(실시간 반응성 지표). 스트릭(위
-                          streakLabel/bucket_stats, 느리지만 검증된 신호)과는 별도
-                          필드로 항상 따로 보여준다 — 종합 판정에 섞지 않는다. 부호만
-                          일관되게 해석 가능한 관찰 서술이고("가속"/"감속"), "좋다/
-                          나쁘다" 판단 문구는 쓰지 않는다(§5 원칙). */}
-                      {combo.acceleration ? (
-                        <span className="regime-combo-hint regime-combo-reversal">
-                          최근 30분 순매수 속도 {signedEokLabel(combo.acceleration.recent_velocity)}
-                          (직전 30분 대비{' '}
-                          {combo.acceleration.acceleration > 0
-                            ? '가속'
-                            : combo.acceleration.acceleration < 0
-                              ? '감속'
-                              : '속도 유지'}
-                          )
-                        </span>
-                      ) : (
-                        <span className="regime-combo-hint">가속도 데이터 부족(적립 중)</span>
-                      )}
-                    </div>
-                  )
-                })
-              )}
-            </div>
-          </div>
-        </>
-      )}
+      {/* '지금 유입 우세'(PLAN.md §5.15)는 Phase 5.128에서 '시장' 탭 상단(MarketOverviewCards)으로 옮겼다. regime 데이터는
+          수급 집중도 기준치(activity_baseline)에 계속 쓰므로 조회는 여기 남긴다. */}
 
-      {/* 프리마켓 예상 시작점(PLAN.md §5.107) — 장 시작 전 가장 먼저 볼 정보라 변동성 레짐 위에 둔다.
-          정규장 중(phase=hidden)엔 컴포넌트가 null이라 자리를 차지하지 않는다. 정적 배포에서는 숨김 */}
-      {!STATIC_DATA && <PremarketOutlookCard data={premarket} />}
-
-      {/* 오늘 변동성 레짐(PLAN.md §5.95) — 표시 전용, 정적 배포에서는 숨김 */}
-      {!STATIC_DATA && <VolRegimeCard data={volRegime} />}
+      {/* 프리마켓 예상 시작점·오늘 변동성 레짐은 Phase 5.128에서 '시장' 탭 상단(MarketOverviewCards)으로 옮겼다. */}
 
       {/* 1. 지수 3종 */}
       <div className="section-title mt-title">지수</div>

@@ -19,6 +19,7 @@ import FlowPathTable from '../components/FlowPathTable'
 import FlowRankTable from '../components/FlowRankTable'
 import GroupTreemap from '../components/GroupTreemap'
 import MarketFundChart from '../components/MarketFundChart'
+import MarketOverviewCards from '../components/MarketOverviewCards'
 import Modal from '../components/Modal'
 import PeriodPicker from '../components/PeriodPicker'
 import SentimentGauge from '../components/SentimentGauge'
@@ -396,6 +397,8 @@ export default function MarketPage() {
 
   return (
     <div>
+      {/* 지금 유입 우세 + 프리마켓 예상 시작점 + 오늘 변동성 레짐(Phase 5.128, 대시보드에서 이동) — 코스피·코스닥 공통이라 시장 탭 위 */}
+      <MarketOverviewCards onKosdaq={() => setMarket('kosdaq')} />
       <div className="tabs">
         {MARKETS.map((m) => (
           <button
