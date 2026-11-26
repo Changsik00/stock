@@ -46,12 +46,12 @@ function usePersistedOpen(key) {
 }
 
 // 분할 한 줄: 코스피/코스닥 값 + ▲▼(방향색은 화살표만)
-function SplitLine({ name, value, title }) {
+function SplitLine({ name, value, title, futures = false, sep = false }) {
   const has = typeof value === 'number'
   const arrow = value > 0 ? '▲' : value < 0 ? '▼' : ''
   const cls = value > 0 ? 'up' : value < 0 ? 'down' : ''
   return (
-    <span className="ifs-line" title={title}>
+    <span className={`ifs-line${futures || sep ? ' ifs-line-sep' : ''}`} title={title}>
       <span className="ifs-line-name">{name}</span>
       <span className="ifs-line-val">
         {arrow && (
@@ -309,10 +309,12 @@ export default function InvestorFlowSection({ tiles, liveActive, liveTime, consi
                   <span className="ifs-lines">
                     <SplitLine name="코스피" value={t.kospi} />
                     <SplitLine name="코스닥" value={t.kosdaq} />
-                    {JUDGED.includes(t.name) && typeof t.futures === 'number' && (
-                      <SplitLine name="선물" value={t.futures} title="코스피200 선물 순매수" />
+                    {t.name === '기관계' && typeof t.fin === 'number' && (
+                      <SplitLine name={<><span className="ifs-wide-only">그중 </span>금융투자</>} value={t.fin} title="기관계 현물 합계(코스피+코스닥) 중 금융투자 — 차익·헤지·ETF 유동성 공급 비중이 큼" sep />
                     )}
-                    {t.name === '기관계' && typeof t.fin === 'number' && <SplitLine name="금융투자" value={t.fin} title="기관계 중 금융투자(차익·헤지·ETF 유동성 공급 비중이 큼)" />}
+                    {JUDGED.includes(t.name) && typeof t.futures === 'number' && (
+                      <SplitLine name="선물" value={t.futures} title="코스피200 선물 순매수(현물과 별개)" futures />
+                    )}
                   </span>
                   {markets && <JudgeChips markets={markets} />}
                   {JUDGED.includes(t.name) && <RelationChip spot={t.kospi} futures={t.futures} />}

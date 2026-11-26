@@ -2394,6 +2394,9 @@ header h1 {
 /* Phase 5.127 — 수급 읽는 법 */
 .ifs-guide { margin-bottom: var(--sp-3); font-size: var(--fs-label); line-height: 1.6; color: var(--text-secondary); }
 .ifs-guide-p { margin: 0 0 var(--sp-2); }
+/* '그중 금융투자'(기관 합계의 일부)·'선물'(현물과 별개) 줄은 코스피·코스닥과 구분선으로 분리 */
+@media (max-width: 640px) { .ifs-wide-only { display: none; } }
+.ifs-line-sep { margin-top: var(--sp-1); padding-top: var(--sp-1); border-top: 1px dashed var(--border); }
 .ifs-guide-p:last-child { margin-bottom: 0; }
 .ifs-guide-list { margin: 0 0 var(--sp-2); padding-left: var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-1); }
 .ifs-guide b { color: var(--text-primary); }
