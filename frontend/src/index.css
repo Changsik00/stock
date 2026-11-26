@@ -2380,6 +2380,18 @@ header h1 {
 /* 코스피–나스닥 선물 동조도 카드(PLAN.md Phase 5.116) — .vr-card/.fc-list 골격 재사용, 라벨·상관은 중립 */
 .nc-card .vr-panel { width: 100%; }
 .nc-split { padding-top: var(--sp-2); border-top: 1px solid var(--border); }
+/* Phase 5.126 — 코스피 등락 분해: 두 몫 막대(중립색, 크기만) + 한 문장 */
+.nc-hero-row { display: inline-flex; align-items: baseline; gap: var(--sp-2); }
+.nc-rows { width: 100%; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: var(--sp-2) var(--sp-3); }
+.nc-row { display: contents; font-size: var(--fs-body); }
+.nc-row > * { font-size: var(--fs-body); }
+.nc-row-label { color: var(--text-secondary); white-space: nowrap; }
+.nc-row-val { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; }
+.nc-bar { position: relative; height: 8px; border-radius: 999px; background: var(--grid); overflow: hidden; }
+.nc-bar-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 999px; background: var(--text-secondary); }
+.nc-summary { margin: 0; font-size: var(--fs-body); line-height: 1.5; color: var(--text-primary); }
+.nc-hint { margin: 0 0 var(--sp-2); }
+.nc-hint:last-child { margin-bottom: 0; }
 .nc-split dt { min-width: 0; }
 
 /* 수급 상위 카드 투자자·방향 토글(PLAN.md Phase 5.117) — 기존 .toggle-chip 재사용, 카드 안이라 하단 여백만 조정 */
