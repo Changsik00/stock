@@ -194,7 +194,7 @@ def test_post_nxt_close_job_registered(fake_scheduler):
     assert kwargs["max_instances"] == 1
 
 
-async def test_post_nxt_close_job_runs_three_jobs_in_order(monkeypatch):
+async def test_post_nxt_close_job_runs_four_jobs_in_order(monkeypatch):
     calls = []
     kwargs_seen = {}
 
@@ -204,19 +204,24 @@ async def test_post_nxt_close_job_runs_three_jobs_in_order(monkeypatch):
             return 0
         return fn
 
+    targets = {}
+
     async def fake_run_job(job_name, target_date, collect_fn):
         calls.append(job_name)
+        targets[job_name] = target_date
         await collect_fn(None, target_date)
         return {}
 
     monkeypatch.setattr(
         scheduler_module, "REGISTRY",
-        {name: make_fn(name) for name in ("value_rank", "stock_ohlcv_watchlist", "volume_profile_daily")},
+        {name: make_fn(name) for name in ("value_rank", "program_flow", "stock_ohlcv_watchlist", "volume_profile_daily")},
     )
     monkeypatch.setattr(scheduler_module, "run_job", fake_run_job)
     monkeypatch.setattr(scheduler_module, "kst_now", lambda: dt.datetime(2026, 11, 25, 20, 5))
     await scheduler_module._run_post_nxt_close_job()
-    assert calls == ["value_rank", "stock_ohlcv_watchlist", "volume_profile_daily"]
+    assert calls == ["value_rank", "program_flow", "stock_ohlcv_watchlist", "volume_profile_daily"]
+    # Phase 5.123: 프로그램매매도 20:05에 오늘 일자로 재수집(KRX+NXT 통합값 확정)
+    assert targets["program_flow"] == dt.date(2026, 11, 25)
     # 18:05에 이미 생긴 당일 일봉을 덮어쓰도록 stock_ohlcv_watchlist에만 강제 재조회 플래그
     assert kwargs_seen["stock_ohlcv_watchlist"] == {"refresh_target": True}
     assert kwargs_seen["value_rank"] == {}

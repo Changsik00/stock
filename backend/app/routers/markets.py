@@ -98,7 +98,7 @@ from ..clients.kiwoom import (
     parse_minute_chart_rows,
     parse_quote_levels,
 )
-from ..collectors import intraday_snapshot
+from ..collectors import intraday_snapshot, program_flow
 from ..collectors.market_flow import fetch_live_flow
 from ..db import get_session
 from ..market_hours import (
@@ -1563,6 +1563,76 @@ async def _consistency_history(session: AsyncSession, today: dt.date) -> dict:
     return data
 
 
+# 프로그램매매 장중 잠정치 캐시(PLAN.md Phase 5.123): market -> (monotonic ts, entry|None). 60초.
+_PROGRAM_LIVE_TTL_SECONDS = 60
+_program_live_cache: dict[str, tuple[float, dict | None]] = {}
+
+
+def _program_live_window(now: dt.datetime) -> bool:
+    """장중 잠정 조회 구간: KRX 거래일 08:00 <= now < 20:05 KST. 20:05 이후엔 재수집된 DB 확정값."""
+    from ..krx_calendar import is_krx_closed
+
+    if is_krx_closed(now.date()):
+        return False
+    return dt.time(8, 0) <= now.time() < dt.time(20, 5)
+
+
+async def _program_from_db(session: AsyncSession, market: str) -> dict[str, object]:
+    """macro_series의 최신 프로그램매매(일별) 값 — 확정(provisional False)."""
+    entry: dict[str, object] = {"date": None, "non_arb": None, "arb": None, "provisional": False}
+    for field, series in (("non_arb", f"prog_nonarb_{market}"), ("arb", f"prog_arb_{market}")):
+        row = (
+            await session.execute(
+                select(MacroSeries.date, MacroSeries.value)
+                .where(MacroSeries.series == series, MacroSeries.value.is_not(None))
+                .order_by(MacroSeries.date.desc())
+                .limit(1)
+            )
+        ).first()
+        if row is not None:
+            entry[field] = float(row[1])
+            entry["date"] = row[0].isoformat() if entry["date"] is None else max(entry["date"], row[0].isoformat())
+    return entry
+
+
+async def _program_live(client: KiwoomClient, market: str, today: dt.date) -> dict | None:
+    """ka90010(읽기 전용)의 오늘 행 -> 잠정 값. 오늘 행이 없으면 None. 60초 캐시(결과 None 포함)."""
+    cached = _program_live_cache.get(market)
+    if cached is not None and time.monotonic() - cached[0] < _PROGRAM_LIVE_TTL_SECONDS:
+        return cached[1]
+    rows, _headers = await program_flow._fetch_page(client, market, today)
+    entry: dict | None = None
+    if rows and rows[0]["date"] == today and rows[0]["nonarb_net"] is not None:
+        entry = {
+            "date": today.isoformat(),
+            "non_arb": float(rows[0]["nonarb_net"]),
+            "arb": float(rows[0]["arb_net"]) if rows[0]["arb_net"] is not None else None,
+            "provisional": True,
+        }
+    _program_live_cache[market] = (time.monotonic(), entry)
+    return entry
+
+
+async def _consistency_program(session: AsyncSession, now: dt.datetime) -> dict[str, dict]:
+    """시장별 프로그램매매 값. 장중 구간이면 원천 오늘 행(잠정), 실패/없음/구간 밖이면 DB 최신값."""
+    live: dict[str, dict | None] = {}
+    if _program_live_window(now):
+        today = now.date()
+        try:
+            async with KiwoomClient() as client:
+                for market in _CONSISTENCY_MARKETS:
+                    try:
+                        live[market] = await _program_live(client, market, today)
+                    except Exception:  # noqa: BLE001 - 원천 실패는 DB 폴백
+                        logger.warning("program live fetch failed: %s", market, exc_info=True)
+        except Exception:  # noqa: BLE001
+            logger.warning("program live client failed", exc_info=True)
+    program: dict[str, dict] = {}
+    for market in _CONSISTENCY_MARKETS:
+        program[market] = live.get(market) or await _program_from_db(session, market)
+    return program
+
+
 @router.get("/api/markets/flow/consistency")
 async def flow_consistency_endpoint(session: AsyncSession = Depends(get_session)):
     """장중 외국인·기관계 누적 순매수 곡선의 "일관성" 지표(PLAN.md Phase 5.113).
@@ -1574,9 +1644,9 @@ async def flow_consistency_endpoint(session: AsyncSession = Depends(get_session)
 
     Returns ``{date, market_closed, as_of, markets: {kospi: {외국인: {...analysis,
     size_percentile}, 기관계: {...}}, kosdaq}, history: {kospi: {...stats}, kosdaq},
-    program: {kospi: {date, non_arb, arb}, kosdaq}}``. 금액은 백만원. ``size_percentile``
+    program: {kospi: {date, non_arb, arb, provisional}, kosdaq}}``. 금액은 백만원. ``size_percentile``
     은 오늘 final이 과거 final들 중 몇 % 이하인지(낮을수록 과거 대비 큰 순매도).
-    ``program``은 일별 확정(EOD) 값이라 하루 늦을 수 있어 자체 date를 갖는다.
+    ``program``은 자체 date를 갖는다: 거래일 08:00~20:05엔 ka90010 오늘 행(장중 잠정, provisional True, 60초 캐시), 그 외·실패 시 DB 최신(확정).
     샘플이 하나도 없으면 ``date``가 None이고 markets는 빈 dict.
     """
     keys = _consistency_series_keys()
@@ -1612,22 +1682,7 @@ async def flow_consistency_endpoint(session: AsyncSession = Depends(get_session)
                 )
             markets[market][investor] = analysis
 
-    program: dict[str, dict] = {}
-    for market in _CONSISTENCY_MARKETS:
-        entry: dict[str, object] = {"date": None, "non_arb": None, "arb": None}
-        for field, series in (("non_arb", f"prog_nonarb_{market}"), ("arb", f"prog_arb_{market}")):
-            row = (
-                await session.execute(
-                    select(MacroSeries.date, MacroSeries.value)
-                    .where(MacroSeries.series == series, MacroSeries.value.is_not(None))
-                    .order_by(MacroSeries.date.desc())
-                    .limit(1)
-                )
-            ).first()
-            if row is not None:
-                entry[field] = float(row[1])
-                entry["date"] = row[0].isoformat() if entry["date"] is None else max(entry["date"], row[0].isoformat())
-        program[market] = entry
+    program = await _consistency_program(session, kst_now())
 
     return {
         "date": today.isoformat(),

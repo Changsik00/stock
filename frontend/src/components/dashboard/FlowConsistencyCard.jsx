@@ -62,7 +62,7 @@ function Panel({ market, analysis, instit, program, stats, hintOpen }) {
         )}
         {program && typeof program.non_arb === 'number' && (
           <div>
-            <dt>비차익 프로그램 ({mmdd(program.date)} 확정)</dt>
+            <dt>비차익 프로그램 ({mmdd(program.date)} {program.provisional ? '장중 잠정' : '확정'})</dt>
             <dd>{heroEok(program.non_arb)}</dd>
           </div>
         )}
@@ -129,7 +129,7 @@ export default function FlowConsistencyCard({ data, loading }) {
             <p className="vr-foot">
               10분 단위로 본 외국인 누적 순매수가 하루 종일 거의 한 방향(순매도)으로만 이어지고 중간 반등이 작으면
               {' '}일관 매도, 혼조, 일관 매수로 분류합니다. 일정한 속도로 나눠 파는 바스켓(프로그램) 매도 성격의 날을 가려내려는 것이며
-              개별 사유(반대매매·공매도 등)를 구분하지는 않습니다. 비차익 프로그램은 일별 확정치라 하루 늦을 수 있습니다.
+              개별 사유(반대매매·공매도 등)를 구분하지는 않습니다. 비차익 프로그램은 장중엔 잠정치, 20:05 이후 확정치입니다.
               과거 통계는 표본이 작아 참고용입니다 — 매매 신호 아님.
             </p>
           )}

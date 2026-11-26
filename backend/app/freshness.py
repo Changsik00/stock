@@ -48,7 +48,10 @@ DATASETS: list[Dataset] = [
     Dataset("market_flow", "투자자별 수급", "market_flow", where="market IN ('kospi','kosdaq')", job="market_flow"),
     Dataset("market_breadth", "등락 종목수", "market_breadth", job="breadth"),
     # program_flow 잡은 program_trade(종목별)가 아니라 macro_series(prog_*)에 쓴다
-    Dataset("program_flow", "프로그램매매", "macro_series", where="series = 'prog_arb_kospi'", job="program_flow"),
+    Dataset(
+        "program_flow", "프로그램매매", "macro_series", where="series = 'prog_arb_kospi'", job="program_flow",
+        final_after=FINAL_NXT,  # ka90010은 KRX+NXT 통합 — 20:05 재수집분이 확정(Phase 5.123)
+    ),
     Dataset("group_snapshot", "업종·테마", "group_snapshot", job="group_snapshot"),
     Dataset(
         "value_rank", "거래대금 상위", "value_rank", job="value_rank",

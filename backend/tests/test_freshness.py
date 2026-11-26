@@ -120,6 +120,20 @@ def test_judge_unknown_collected_at_is_ok():
     assert judge(VR, at(WED, 21, 0), WED, WED, None)[0] == "ok"
 
 
+PF = next(d for d in DATASETS if d.key == "program_flow")
+
+
+def test_program_flow_final_after_nxt_close():
+    """Phase 5.123: 프로그램매매도 value_rank처럼 20:00 이후 확정. 18:30엔 아직 판정 안 함, 20:15에 18:05 수집분은 early."""
+    assert PF.final_after == VR.final_after
+    assert judge(PF, at(WED, 18, 30), WED, WED, at(WED, 18, 5))[0] == "ok"
+    status, detail = judge(PF, at(WED, 20, 15), WED, WED, at(WED, 18, 5))
+    assert status == "early" and "18:05" in detail
+    assert judge(PF, at(WED, 20, 15), WED, WED, at(WED, 20, 6))[0] == "ok"
+    # 오늘 행이 없으면 20:15엔 stale
+    assert judge(PF, at(WED, 20, 15), WED, TUE, None)[0] == "stale"
+
+
 def test_judge_ok_plain():
     assert judge(PLAIN, at(WED, 18, 15), WED, WED, None) == ("ok", "")
 

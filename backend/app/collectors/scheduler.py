@@ -297,7 +297,7 @@ async def _run_premarket_outlook_log_job() -> None:
 
 
 # NXT 애프터마켓(~20:00) 마감 뒤 개별 종목 EOD 재수집 대상(순서 중요: 시세 -> 캔들 -> 캔들 기반 프로파일).
-_POST_NXT_CLOSE_JOBS = ("value_rank", "stock_ohlcv_watchlist", "volume_profile_daily")
+_POST_NXT_CLOSE_JOBS = ("value_rank", "program_flow", "stock_ohlcv_watchlist", "volume_profile_daily")
 
 
 async def _run_post_nxt_close_job() -> None:

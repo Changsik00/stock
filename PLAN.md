@@ -5857,3 +5857,19 @@ PLAN.md 127개 Phase 중 "시간대별 데이터 신선도"(장 마감 후 낡�
 - 테스트: `tests/test_auto_trade_qty_sizing.py`(신규, 45건). 킬스위치 가드 DB 테스트(collector/router)는 가드로 실행 불가라 가짜 키움에 `get_orderable_cash`를 추가하고 예산 초과 케이스 2건을 호가 기반으로 수정만 함(실행 미검증).
 - 미확인: 라이트/다크×390/1280 스크린샷, 실계좌 kt00001 응답 재확인, 반영(재시작)은 15:30 이후.
 **검수 보완 (2026-11-26, 메인 검수)**: "미체결로 보고 전량 취소" 경로(매수·매도 모두)에 조회~취소 사이 체결 경쟁이 남아 있었다 — 취소 후 실보유수량을 1회 재확인해 매수는 그 수량으로 holding, 매도는 잔량으로 반영(테스트 3건 추가, 수정 전 fedeb0f에서 3 failed → 수정 후 관련 304 passed). 대기 중 화면의 "최대 N주(예상)"는 계좌 주문가능금액을 반영하지 않은 추정치(15초 폴링마다 계좌 TR을 부르지 않기 위함) — 실제 수량은 주문 시점에 현금으로 다시 줄어든다. 가드된 기존 테스트(test_auto_trader_collector·test_auto_trade_router)는 킬스위치 ON 상태라 실행 불가(미검증).
+
+### Phase 5.123 — 프로그램매매: NXT 마감 후 재수집 + 장중 잠정치 표시 (2026-11-26 사용자 지적)
+
+**증상**: 대시보드 '외인 매도 일관성' 카드의 `비차익 프로그램 (11-25 확정)` — 장중인데 어제 날짜, 그리고 그 '확정' 값도 실제 확정이 아니었다.
+**원인**: ka90010(mrkt_tp `P001_AL01`/`P101_AL02` = KRX+NXT 통합)을 18:00 배치에서 받는데 NXT는 20:00까지 거래 → 18:00 값은 잠정. 다음 날 배치가 과거 일자를 덮어써서 그때야 맞아진다(5.119 value_rank와 같은 부류). 실측: 11-25 코스피 비차익 DB −1,373,422 vs 원천 −1,291,563, 코스닥 −16,988 vs +3,341(부호 반대). 11-17~11-24는 일치. 2026-11-26 12:3x `program_flow` 11-25 수동 재실행으로 정정 완료.
+**대책**:
+1. `program_flow`를 `_POST_NXT_CLOSE_JOBS`(20:05 재수집)에 추가. freshness 레지스트리의 program_flow를 value_rank처럼 "20:00 이후 확정"으로.
+2. `/api/markets/flow/consistency`의 `program`: DB 최신일 < 오늘이고 장중(NXT 08:00~20:00)이면 ka90010 오늘 행(장중 잠정)을 60초 캐시로 조회해 `{date: 오늘, provisional: true}`로 반환. 조회 실패 시 기존 DB 값(provisional 없음) 폴백. 20:05 재수집 이후엔 DB 오늘 값(확정).
+3. 카드 문구: `비차익 프로그램 (MM-DD 장중 잠정)` / `(MM-DD 확정)`.
+**시간대**: 장 전(08:00 이전)=전일 확정 / 08:00~20:00=오늘 잠정 / 18:00~20:05=DB에 18:00 잠정값 → 이 구간은 원천 조회가 우선(잠정 표기) / 20:05 이후=오늘 확정.
+
+**구현 노트 (2026-11-26)**:
+- `scheduler._POST_NXT_CLOSE_JOBS`에 `program_flow` 추가(value_rank 다음). `freshness` program_flow에 `final_after=FINAL_NXT`(20:00 이후 확정, collect_log.ran_at로 early 판정).
+- `markets._consistency_program`: KRX 거래일(`is_krx_closed` 아님) 08:00 <= now < 20:05 KST에 `program_flow._fetch_page`(ka90010 읽기 전용) 첫 행이 오늘이면 `{date, non_arb, arb, provisional: True}`. 시장별 60초 모듈 캐시(`_program_live_cache`, 실패는 캐시하지 않음). 예외·오늘 행 없음·구간 밖은 `_program_from_db`(provisional False). 단위는 DB와 동일(백만원).
+- 카드: `비차익 프로그램 (MM-DD 장중 잠정|확정)`. 테스트: `tests/test_flow_consistency_program_live.py`(가짜 키움+시계, 12:00/21:00/20:04·20:05/휴일/실패/캐시).
+- 미확인: 실제 ka90010 장중 호출(오늘 행이 장중에 실제로 오는지)은 운영 서버 호출 없이 검증하지 못함 — 다음 장중에 카드 라벨로 확인 필요. 화면 스크린샷 미확인.
