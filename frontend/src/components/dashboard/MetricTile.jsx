@@ -29,7 +29,7 @@ export function Skel({ w = 64, h = 14 }) {
 }
 
 // value: 핵심 숫자 문자열. loading이면 스켈레톤, value가 없으면 '데이터 없음' 빈 상태.
-export default function MetricTile({ label, dot, value, dir, delta, sub, loading, onClick, title }) {
+export default function MetricTile({ label, dot, value, dir, delta, sub, extra, loading, onClick, title }) {
   const empty = !loading && (value === null || value === undefined || value === '')
   return (
     <button type="button" className="mt" onClick={onClick} title={title} aria-busy={loading || undefined}>
@@ -51,6 +51,7 @@ export default function MetricTile({ label, dot, value, dir, delta, sub, loading
             {delta !== undefined && <Delta dir={dir}>{delta}</Delta>}
           </span>
           {sub && <span className="mt-sub">{sub}</span>}
+          {extra}
         </>
       )}
     </button>

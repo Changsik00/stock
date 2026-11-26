@@ -101,3 +101,36 @@ def test_history_stats_empty_and_missing_next():
 def test_percentile_rank():
     assert fc.percentile_rank(-100, [-100, -50, 0, 50]) == 25.0
     assert fc.percentile_rank(0, []) is None
+
+
+def test_peak_trough_with_times():
+    # 09:00부터 10분 간격: 상승해 10:00(인덱스 6)에서 고점, 이후 하락 -> 저점은 마지막
+    values = [500.0 * (i + 1) for i in range(7)] + [3500.0 - 700.0 * (i + 1) for i in range(12)]
+    r = fc.analyze_curve(_pts(values))
+    assert r["peak"] == 3500.0
+    assert r["peak_time"] == "10:00"
+    assert r["trough"] == values[-1]
+    assert r["trough_time"] == "12:00"
+    assert r["final"] == r["trough"]
+
+
+def test_peak_time_uses_bucket_start_and_datetime_input():
+    kst = dt.timezone(dt.timedelta(hours=9))
+    base = dt.datetime(2026, 11, 26, 9, 0, tzinfo=kst)
+    # 같은 버킷(10:20~10:29) 안 두 점 -> 마지막 값이 버킷 값, 시각은 10:20
+    pts = [(base + dt.timedelta(minutes=10 * i), 100.0 * (i + 1)) for i in range(8)]  # 09:00..10:10
+    pts.append((dt.datetime(2026, 11, 26, 10, 21, tzinfo=kst), 5000.0))
+    pts.append((dt.datetime(2026, 11, 26, 10, 28, tzinfo=kst), 900.0))
+    pts += [(dt.datetime(2026, 11, 26, 10, 30, tzinfo=kst), 800.0)]
+    r = fc.analyze_curve(pts)
+    assert r["peak"] == 900.0
+    assert r["peak_time"] == "10:20"
+    assert r["trough"] == 100.0
+    assert r["trough_time"] == "09:00"
+
+
+def test_peak_trough_all_negative_curve():
+    values = [-1000.0 * (i + 1) for i in range(10)]
+    r = fc.analyze_curve(_pts(values))
+    assert r["peak"] == -1000.0 and r["peak_time"] == "09:00"
+    assert r["trough"] == -10000.0 and r["trough_time"] == "10:30"

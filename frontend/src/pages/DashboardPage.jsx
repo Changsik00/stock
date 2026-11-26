@@ -41,7 +41,7 @@ import RiskAlertBanner from '../components/RiskAlertBanner'
 import FreshnessBanner from '../components/FreshnessBanner'
 import PremarketOutlookCard from '../components/dashboard/PremarketOutlookCard'
 import VolRegimeCard from '../components/dashboard/VolRegimeCard'
-import FlowConsistencyCard from '../components/dashboard/FlowConsistencyCard'
+import InvestorFlowSection from '../components/dashboard/InvestorFlowSection'
 import NqComovementCard from '../components/dashboard/NqComovementCard'
 import FlowAnomalyCard from '../components/dashboard/FlowAnomalyCard'
 import MetricTile, { heroEok } from '../components/dashboard/MetricTile'
@@ -1034,6 +1034,47 @@ export default function DashboardPage({ onNavigate }) {
     return { values: out, date: liveDate }
   })()
 
+  // 투자자별 수급 타일(PLAN.md Phase 5.124): 합계(기존 값 그대로) + 코스피/코스닥 시장별 값.
+  // 시장별 값은 합계와 같은 원천·같은 기준일에서 뽑아 합계 = 코스피 + 코스닥이 되게 한다.
+  const flowLiveTime = (() => {
+    const t = flowLive?.cached_at ? new Date(flowLive.cached_at) : null
+    if (!t || Number.isNaN(t.getTime())) return null
+    return new Intl.DateTimeFormat('ko-KR', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit', hour12: false }).format(t)
+  })()
+  const investorFlowTiles = DEFAULT_INVESTORS.map((name) => {
+    const liveValue = flowLiveSummary?.[name]
+    if (liveValue !== undefined) {
+      return {
+        name,
+        source: 'live',
+        total: liveValue,
+        kospi: flowLive.kospi?.investors?.[name]?.net_value,
+        kosdaq: flowLive.kosdaq?.investors?.[name]?.net_value,
+      }
+    }
+    const closedValue = flowClosedLiveSummary?.values?.[name]
+    if (closedValue !== undefined) {
+      return {
+        name,
+        source: 'closed',
+        date: flowClosedLiveSummary.date,
+        total: closedValue,
+        kospi: flowLive.kospi?.investors?.[name]?.net_value,
+        kosdaq: flowLive.kosdaq?.investors?.[name]?.net_value,
+      }
+    }
+    const row = flowInvestorSummary?.[name]
+    const onDate = (flows) => flows?.[name]?.find((r) => r.date === row?.date)?.net_value
+    return {
+      name,
+      source: 'eod',
+      date: row?.date,
+      total: row?.net_value,
+      kospi: row ? onDate(marketData.kospi?.flows) : undefined,
+      kosdaq: row ? onDate(marketData.kosdaq?.flows) : undefined,
+    }
+  })
+
   // 외인 양손 · 현선물 섹션(PLAN.md §4.5-5) — 현물은 위에서 이미 계산한
   // flowInvestorSummary/flowLiveSummary의 '외국인' 값을 그대로 재사용하고(중복 fetch
   // 없음), 선물은 marketData.futures(지수 3종 fetch가 이미 flows까지 받아온다)의
@@ -1410,54 +1451,20 @@ export default function DashboardPage({ onNavigate }) {
         })}
       </div>
 
-      {/* 2. 투자자별 수급 요약 — 장중에는 라이브 잠정치(PLAN.md §6 3.7-3) + "장중 잠정"
-          배지, 그 외(장마감 후·라이브 실패·정적 배포)에는 기존 확정치 + "확정" 라벨로
-          자동 전환된다(flowLiveActive, 위 계산부 참고). 라이브 배지가 날짜 역할을
-          겸하므로 라이브 타일에는 StaleDate를 붙이지 않는다(작업 지시). 이 3개 타일은
-          코스피+코스닥(현물) 기준이라 "(현물)"을 제목에 명시한다(PLAN.md §5.45-3) —
-          선물 값은 클릭해 여는 FlowSummaryModal의 "선물" 필터에서 확인한다. */}
-      <div className="section-title mt-title">투자자별 수급 요약 (현물)</div>
-      <div className="mt-row">
-        {DEFAULT_INVESTORS.map((name) => {
-          const liveValue = flowLiveSummary?.[name]
-          const isLive = liveValue !== undefined
-          const closedLiveValue = flowClosedLiveSummary?.values?.[name]
-          const row =
-            !isLive && closedLiveValue !== undefined
-              ? { net_value: closedLiveValue, date: flowClosedLiveSummary.date }
-              : flowInvestorSummary?.[name]
-          const value = isLive ? liveValue : row?.net_value
-          const hasValue = value !== undefined && value !== null
-          return (
-            <MetricTile
-              key={name}
-              label={name}
-              dot={INVESTOR_COLOR_VAR[name]}
-              loading={!hasValue && marketLoading}
-              value={hasValue ? heroEok(value) : null}
-              dir={hasValue ? (value > 0 ? 'up' : value < 0 ? 'down' : '') : undefined}
-              delta={hasValue ? (value > 0 ? '순매수' : value < 0 ? '순매도' : '보합') : undefined}
-              sub={
-                isLive ? (
-                  <Badge kind="live" />
-                ) : (
-                  row?.date && (
-                    <>
-                      확정
-                      <StaleDate date={row.date} baseDate={baseDate} prefix=" · " />
-                    </>
-                  )
-                )
-              }
-              title={!isLive && row?.date ? formatDate(row.date) : undefined}
-              onClick={() => setModal({ type: 'flowSummary', title: '투자자별 수급 요약' })}
-            />
-          )
-        })}
-      </div>
-
-      {/* 2.2 외인 매도 일관성(PLAN.md Phase 5.113) — 참고용, 정적 배포에서는 숨김 */}
-      {!STATIC_DATA && <FlowConsistencyCard data={flowConsistency} loading={flowConsistency === null && marketLoading} />}
+      {/* 2. 투자자별 수급 (현물) + 외인 장중 흐름 해석(PLAN.md Phase 5.124) — 값은 타일(합계 +
+          코스피/코스닥), 해석은 접는 영역. 장중엔 라이브 잠정치(섹션 제목에 "장중 잠정 · 시각" 1회),
+          그 외(장마감 후·라이브 실패·정적 배포)에는 기존 확정치 + 타일별 "확정 · 날짜"(flowLiveActive 참고).
+          선물 값은 클릭해 여는 FlowSummaryModal의 "선물" 필터에서 확인한다(PLAN.md §5.45-3). */}
+      <InvestorFlowSection
+        tiles={investorFlowTiles}
+        liveActive={flowLiveActive}
+        liveTime={flowLiveTime}
+        consistency={STATIC_DATA ? null : flowConsistency}
+        consistencyEnabled={!STATIC_DATA}
+        loading={marketLoading}
+        baseDate={baseDate}
+        onTileClick={() => setModal({ type: 'flowSummary', title: '투자자별 수급 요약' })}
+      />
 
       {/* 2.3 코스피–나스닥 선물 동조도(PLAN.md Phase 5.116) — 참고용, 정적 배포에서는 숨김 */}
       {!STATIC_DATA && <NqComovementCard data={nqComovement} loading={nqComovement === null && marketLoading} />}

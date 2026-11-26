@@ -50,6 +50,22 @@ def resample_10min(points: Iterable[tuple[dt.datetime | int, float]]) -> list[fl
     return values[start:]
 
 
+def _bucket_curve(points: Iterable[tuple[dt.datetime | int, float]]) -> list[tuple[int, float]]:
+    """(시각, 값) -> [(버킷 시작 분(시*60+분, 10분 단위), 마지막 값)] 시간순. 선행 0 버킷 제거."""
+    last: dict[int, float] = {}
+    for t, v in sorted(points, key=lambda p: (_bucket_key(p[0]), p[0] if isinstance(p[0], dt.datetime) else 0)):
+        last[_bucket_key(t)] = float(v)
+    out = [(k * BUCKET_MINUTES, last[k]) for k in sorted(last)]
+    start = 0
+    while start < len(out) and out[start][1] == 0:
+        start += 1
+    return out[start:]
+
+
+def _hhmm(minutes: int) -> str:
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
 def _r2(values: list[float]) -> float:
     """버킷 번호에 대한 단순 선형회귀 결정계수(직선성). 분산이 0이면 0."""
     n = len(values)
@@ -66,10 +82,11 @@ def _r2(values: list[float]) -> float:
 def analyze_curve(points: list[tuple[dt.datetime | int, float]]) -> dict | None:
     """누적 순매수 곡선 -> 일관성 분석. 유효 버킷이 6개 미만이면 None.
 
-    반환: ``{final, down_share, up_share, rebound, pullback, r2, buckets, label}``
+    반환: ``{peak, peak_time, trough, trough_time, final, down_share, up_share, rebound, pullback, r2, buckets, label}``
     (금액은 입력 단위 그대로, share는 0~1).
     """
-    values = resample_10min(points)
+    curve = _bucket_curve(points)
+    values = [v for _, v in curve]
     if len(values) < MIN_BUCKETS:
         return None
 
@@ -98,7 +115,15 @@ def analyze_curve(points: list[tuple[dt.datetime | int, float]]) -> dict | None:
     elif final > 0 and up_share >= SHARE_THRESHOLD and pullback < EXCURSION_RATIO * final:
         label = LABEL_BUY
 
+    # 고점/저점: 10분 격자 값 기준, 동률이면 먼저 나온 버킷. 시각은 버킷 시작 HH:MM(KST).
+    peak_i = max(range(len(values)), key=lambda i: (values[i], -i))
+    trough_i = min(range(len(values)), key=lambda i: (values[i], i))
+
     return {
+        "peak": values[peak_i],
+        "peak_time": _hhmm(curve[peak_i][0]),
+        "trough": values[trough_i],
+        "trough_time": _hhmm(curve[trough_i][0]),
         "final": final,
         "down_share": down_share,
         "up_share": up_share,

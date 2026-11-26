@@ -2648,3 +2648,31 @@ button.fa-row:hover { background: var(--chip-bg); }
 @media (prefers-reduced-motion: reduce) {
   .at-switch, .at-switch-track, .at-switch-thumb, .at-hold-tile { transition: none; }
 }
+
+/* 투자자별 수급 섹션(PLAN.md Phase 5.124) — 타일 안 코스피/코스닥 분할 줄, 판정 칩, 접는 해석 영역 */
+.ifs-lines { display: flex; flex-direction: column; gap: 2px; width: 100%; font-size: var(--fs-label); font-variant-numeric: tabular-nums; }
+.ifs-line { display: flex; justify-content: space-between; align-items: baseline; gap: var(--sp-2); }
+.ifs-line-name { color: var(--text-secondary); }
+.ifs-line-val { position: relative; display: inline-flex; align-items: baseline; gap: 3px; text-align: right; color: var(--text-primary); }
+.ifs-arrow { font-size: 10px; }
+.ifs-arrow.up { color: var(--up); }
+.ifs-arrow.down { color: var(--down); }
+.ifs-chips { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+.ifs-chips .badge { white-space: normal; font-size: var(--fs-label); }
+.ifs-interp { margin-top: var(--sp-3); background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-card); }
+.ifs-interp-head {
+  display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: var(--sp-1) var(--sp-3);
+  width: 100%; padding: var(--sp-3) var(--sp-4); font: inherit; color: var(--text-primary); text-align: left;
+  background: transparent; border: 0; border-radius: var(--r-card); cursor: pointer;
+}
+.ifs-interp-head:disabled { cursor: default; }
+.ifs-interp-head:focus-visible { outline: 2px solid var(--series-price); outline-offset: 2px; }
+.ifs-interp-title { display: inline-flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-body); font-weight: 600; }
+.ifs-chevron { width: 12px; color: var(--text-secondary); }
+.ifs-interp-summary { font-size: var(--fs-label); color: var(--text-secondary); }
+.ifs-interp-summary.fc-label-sell { font-weight: 600; }
+.ifs-interp-body { padding: 0 var(--sp-4) var(--sp-4); }
+.ifs-interp-foot { display: flex; justify-content: space-between; align-items: center; gap: var(--sp-3); margin-top: var(--sp-3); }
+.fc-verdict { font-size: var(--fs-hero); line-height: 1.2; font-weight: 700; color: var(--text-primary); }
+.fc-verdict.fc-label-sell { color: var(--warn-text); }
+.ifs-peak { font-size: 13px; font-variant-numeric: tabular-nums; color: var(--text-primary); }
