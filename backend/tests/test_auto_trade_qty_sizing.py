@@ -312,6 +312,18 @@ async def test_buy_zero_fill_stays_idle_and_cancels_all(env):
     assert state.status == "idle" and state.entry_qty is None
 
 
+async def test_buy_zero_fill_but_filled_during_cancel_holds_actual(env):
+    """첫 조회 0주 -> 전량 취소, 그런데 그 사이 2주 체결 -> 취소 후 재확인으로 holding(2주).
+    재확인이 없으면 실보유 2주가 손절 감시 밖에 남는다."""
+    state = make_state()
+    FakeKiwoom.cash = 60_000
+    FakeKiwoom.holdings_after_buy = 0
+    FakeKiwoom.holdings_after_cancel = 2
+    res = await _enter(state)
+    assert res["action"] == "entry"
+    assert state.status == "holding" and state.entry_qty == 2
+
+
 async def test_buy_unreadable_holdings_stays_idle(env):
     state = make_state()
     FakeKiwoom.holdings_error = True
@@ -376,6 +388,16 @@ async def test_sell_zero_fill_keeps_position_unchanged(env):
     assert res["action"] == "sell_unconfirmed"
     assert FakeKiwoom.instances[-1].cancels == [("0167A0", "S1", 4)]
     assert state.status == "holding" and state.entry_qty == 4
+
+
+@pytest.mark.parametrize("after_cancel, status, qty", [(0, "idle", None), (2, "holding", 2)])
+async def test_sell_zero_fill_but_filled_during_cancel(env, after_cancel, status, qty):
+    """첫 조회 4주(미체결) -> 전량 취소, 그 사이 체결 -> 취소 후 재확인 잔량을 반영."""
+    state = _holding(4)
+    FakeKiwoom.holdings_after_sell = 4
+    FakeKiwoom.holdings_after_cancel = after_cancel
+    await _sell(state)
+    assert state.status == status and state.entry_qty == qty
 
 
 async def test_sell_unreadable_holdings_keeps_position(env):

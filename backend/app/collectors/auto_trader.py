@@ -452,6 +452,11 @@ async def _settle_buy_fill(
         kind = classify_buy_fill(order_qty, actual)
         return kind, int(actual)
     await _cancel_unfilled_order_silently(client, code, order_no, order_qty)
+    # 조회~취소 사이에 체결됐을 수 있다 — 취소 후 1회 재확인해, 실보유가 있으면 그 수량으로
+    # 보유 전환한다(놓치면 실보유 주식이 손절 감시 밖에 남는다).
+    again = await _read_holdings_qty(client, code)
+    if again is not None and 0 < again <= order_qty:
+        return classify_buy_fill(order_qty, again), int(again)
     return "unconfirmed", 0
 
 
@@ -474,6 +479,10 @@ async def _settle_sell_fill(
         kind = classify_sell_fill(held_qty, remaining)
         return kind, int(remaining)
     await _cancel_unfilled_order_silently(client, code, order_no, held_qty)
+    # 조회~취소 사이에 체결됐을 수 있다 — 취소 후 1회 재확인해 실제 잔량을 반영한다.
+    again = await _read_holdings_qty(client, code)
+    if again is not None and 0 <= again < held_qty:
+        return classify_sell_fill(held_qty, again), int(again)
     return "unconfirmed", held_qty
 
 

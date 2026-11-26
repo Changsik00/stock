@@ -5856,3 +5856,4 @@ PLAN.md 127개 Phase 중 "시간대별 데이터 신선도"(장 마감 후 낡�
 - `/state`: `target.qty`는 보유 시 entry_qty, 대기 시 None + `max_order_notional`·`total_budget` 노출.
 - 테스트: `tests/test_auto_trade_qty_sizing.py`(신규, 45건). 킬스위치 가드 DB 테스트(collector/router)는 가드로 실행 불가라 가짜 키움에 `get_orderable_cash`를 추가하고 예산 초과 케이스 2건을 호가 기반으로 수정만 함(실행 미검증).
 - 미확인: 라이트/다크×390/1280 스크린샷, 실계좌 kt00001 응답 재확인, 반영(재시작)은 15:30 이후.
+**검수 보완 (2026-11-26, 메인 검수)**: "미체결로 보고 전량 취소" 경로(매수·매도 모두)에 조회~취소 사이 체결 경쟁이 남아 있었다 — 취소 후 실보유수량을 1회 재확인해 매수는 그 수량으로 holding, 매도는 잔량으로 반영(테스트 3건 추가, 수정 전 fedeb0f에서 3 failed → 수정 후 관련 304 passed). 대기 중 화면의 "최대 N주(예상)"는 계좌 주문가능금액을 반영하지 않은 추정치(15초 폴링마다 계좌 TR을 부르지 않기 위함) — 실제 수량은 주문 시점에 현금으로 다시 줄어든다. 가드된 기존 테스트(test_auto_trader_collector·test_auto_trade_router)는 킬스위치 ON 상태라 실행 불가(미검증).
