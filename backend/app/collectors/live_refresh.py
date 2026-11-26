@@ -317,6 +317,7 @@ async def _run_live_refresh() -> None:
         if not nxt_closed:
             try:
                 auto_trade_result = await auto_trader.run_auto_trade(session)
+                auto_trader.record_last_eval(auto_trade_result)  # Phase 5.121 조회용
                 logger.debug("live-refresh: auto-trader %s", auto_trade_result)
             except Exception as e:  # noqa: BLE001
                 logger.warning("live-refresh: auto-trader 실패: %s", e)

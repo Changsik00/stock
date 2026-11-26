@@ -30,6 +30,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..clients.kiwoom import MAX_ORDER_NOTIONAL_KRW, KiwoomClient
+from ..collectors import auto_trader as auto_trader_mod
 from ..collectors import intraday_snapshot
 from ..collectors.auto_trader import (
     AUTO_TRADE_TOTAL_BUDGET_KRW,
@@ -198,6 +199,11 @@ def _engine_rule_constants() -> dict:
         "trail_giveback_pct": _engine_rules.TRAIL_GIVEBACK_PCT,
         "eod_forced_exit_start": _engine_rules.EOD_FORCED_EXIT_START.strftime("%H:%M"),
         "eod_forced_exit_end": _engine_rules.EOD_FORCED_EXIT_END.strftime("%H:%M"),
+        # Phase 5.121 — 신규 진입 제한 시간대(표시용, 판정은 auto_trade_rules가 전담)
+        "entry_block_windows": [
+            [_engine_rules.ENTRY_BLOCK_OPEN_START.strftime("%H:%M"), _engine_rules.ENTRY_BLOCK_OPEN_END.strftime("%H:%M")],
+            [_engine_rules.ENTRY_BLOCK_CLOSE_START.strftime("%H:%M"), _engine_rules.ENTRY_BLOCK_CLOSE_END.strftime("%H:%M")],
+        ],
     }
 
 
@@ -223,8 +229,75 @@ def _serialize_manual(row: AutoTradeState) -> dict | None:
     }
 
 
+def derive_mode(enabled: bool, status: str | None, entry_source: str | None) -> str:
+    """Phase 5.121 — 화면 모드. 'stopped'|'watching'|'auto_holding'|'manual_holding'.
+    보유 중이면 킬스위치와 무관하게 보유 모드(포지션은 그대로 존재)."""
+    if status in ("holding", "trailing"):
+        return "manual_holding" if entry_source == "manual" else "auto_holding"
+    return "watching" if enabled else "stopped"
+
+
+def build_entry_reason(log_row) -> dict | None:
+    """진입 로그 행(ts·event_type·reason·signal_snapshot 속성) -> 화면용 dict. 없으면 None."""
+    if log_row is None:
+        return None
+    signal = None
+    raw = getattr(log_row, "signal_snapshot", None)
+    if raw:
+        try:
+            signal = raw if isinstance(raw, dict) else json.loads(raw)
+        except Exception:  # noqa: BLE001 - 깨진 스냅샷은 null로
+            signal = None
+    ts = getattr(log_row, "ts", None)
+    return {
+        "ts": ts.isoformat() if ts else None,
+        "event_type": log_row.event_type,
+        "reason": log_row.reason,
+        "signal": signal,
+    }
+
+
+def build_exit_levels(
+    entry_price: float | None,
+    peak: float | None,
+    entry_source: str | None,
+    manual_rules: list[dict] | None,
+) -> list[dict]:
+    """보유 포지션의 발동가 목록 [{key,label,price,pct}] (표시용, 엔진 상수·exit_rules 재사용).
+    자동: 손절(평상/리스크 경보)·트레일 전환가. 수동: 사용자 조건별 발동가."""
+    if not entry_price or entry_price <= 0:
+        return []
+
+    def level(key: str, label: str, rule: dict) -> dict | None:
+        price = exit_rules_mod.trigger_price(rule, entry_price, peak)
+        if price is None:
+            return None
+        return {"key": key, "label": label, "price": price, "pct": round((price / entry_price - 1) * 100, 2)}
+
+    if entry_source == "manual":
+        out = []
+        for i, r in enumerate(manual_rules or []):
+            item = level(f"manual_{i}_{r['kind']}", exit_rules_mod.describe_rule(r), r)
+            if item:
+                out.append(item)
+        return out
+    specs = [
+        ("stop_loss", "손절", {"kind": "stop_loss_pct", "value": abs(_engine_rules.STOP_LOSS_PCT)}),
+        (
+            "stop_loss_risk_alert",
+            "손절(리스크 경보 시)",
+            {"kind": "stop_loss_pct", "value": abs(_engine_rules.STOP_LOSS_PCT_RISK_ALERT)},
+        ),
+        ("trail_activate", "트레일 전환", {"kind": "take_profit_pct", "value": _engine_rules.TRAIL_ACTIVATE_PCT}),
+    ]
+    return [x for x in (level(k, lb, r) for k, lb, r in specs) if x]
+
+
 def _serialize_state(
-    row: AutoTradeState, current_price: float | None, reference_price: float | None = None
+    row: AutoTradeState,
+    current_price: float | None,
+    reference_price: float | None = None,
+    entry_reason: dict | None = None,
 ) -> dict:
     unrealized_pnl = unrealized_pnl_pct = None
     if current_price is not None and row.entry_price is not None and row.entry_qty:
@@ -233,7 +306,19 @@ def _serialize_state(
         unrealized_pnl = round((current_price - entry_price) * qty, 4)
         unrealized_pnl_pct = round((current_price - entry_price) / entry_price * 100, 4) if entry_price else None
 
+    entry_source = _entry_source_label(row)
+    manual = _serialize_manual(row)
+    peak_f = float(row.peak_price) if row.peak_price is not None else None
+    entry_f = float(row.entry_price) if row.entry_price is not None else None
+    held = row.status in ("holding", "trailing")
     return {
+        # Phase 5.121 — 조회 전용 노출(판정·킬스위치와 무관)
+        "mode": derive_mode(row.enabled, row.status, entry_source),
+        "entry_reason": entry_reason if held else None,
+        "exit_levels": build_exit_levels(entry_f, peak_f, entry_source, manual["rules"] if manual else None)
+        if held
+        else [],
+        "last_eval": auto_trader_mod.LAST_EVAL,
         "enabled": row.enabled,
         "status": row.status,
         "code": row.code,
@@ -261,8 +346,8 @@ def _serialize_state(
             "db_code": row.code,
         },
         # Phase 5.118 — 진입 방식('manual'|'auto'|None=포지션 없음)과 수동 진입의 사용자 청산 조건.
-        "entry_source": _entry_source_label(row),
-        "manual_exit_rules": _serialize_manual(row),
+        "entry_source": entry_source,
+        "manual_exit_rules": manual,
         "engine_rules": _engine_rule_constants(),
         # 관찰만 하는(주문 안 나감) 쌍 ETF.
         "observing": [
@@ -314,7 +399,15 @@ async def get_auto_trade_state(session: AsyncSession = Depends(get_session)) -> 
     else:
         reference_price = last_close  # 대기 중엔 수동 매수 조건 미리보기 기준가로만 쓴다
 
-    return _serialize_state(row, current_price, reference_price)
+    entry_reason = None
+    if row.status in ("holding", "trailing"):
+        q = select(AutoTradeLog).where(AutoTradeLog.event_type.in_(("entry", "manual_entry")))
+        if row.entry_at is not None:
+            q = q.where(AutoTradeLog.ts >= row.entry_at - dt.timedelta(minutes=5))
+        log_row = (await session.execute(q.order_by(AutoTradeLog.ts.desc()).limit(1))).scalars().first()
+        entry_reason = build_entry_reason(log_row)
+
+    return _serialize_state(row, current_price, reference_price, entry_reason)
 
 
 @router.post("/toggle")

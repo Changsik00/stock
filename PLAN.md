@@ -5810,3 +5810,22 @@ PLAN.md 127개 Phase 중 "시간대별 데이터 신선도"(장 마감 후 낡�
 **C4·C2 구현 메모 (2026-11-25)**: C4 — alembic `a7c3e9d15b42`: `value_rank`·`stock_ohlcv`에 `collected_at timestamptz NULL server_default now()`(과거 행은 NULL=모름 유지, 기본값 없이 추가 후 default만 설정). upsert `set_`에 `collected_at=func.now()`(`value_rank._upsert_market_rows`, `services.upsert_stock_ohlcv_rows`). 다른 잡은 `collect_log.ran_at` 사용. C2 — `backend/app/freshness.py`: `DATASETS` 레지스트리(10개: 지수·수급·등락종목수·프로그램매매(macro_series prog_*, program_trade 아님)·업종테마·value_rank/stock_ohlcv(final 20:00)·매물대·flow_rank(21:35)·etf_stats(lag 1)), 순수 `expected_date`/`judge`, `check_freshness(session, now)`(as_of=now 날짜 상한으로 과거 시점 재현). 감시 잡 `_run_freshness_check_job`(평일 08:05/18:15/20:15/21:40, REGISTRY 미등록)이 collect_log `freshness_check`(ok/stale, rows=문제 수)에 기록. API `GET /api/health/freshness`, 대시보드 `FreshnessBanner`(문제 있을 때만 주황, 5분 폴링). 테스트 `tests/test_freshness.py`(타임라인·판정·11-24 20:15 value_rank early 실사고 재현·collected_at 갱신). 첫 실행에서 flow_rank가 실제로 stale(11-25분 stock_flow 256종목 < 80% 가드로 건너뜀)로 잡혔다. 한계: 휴장일 목록은 krx_calendar 의존, 미국장·뉴스·short_selling은 미등록.
 
 **감시 첫 실행 결과(2026-11-25 22:41)**: `수급 상위 종목 stale(최신 11-24 < 기대 11-25)`를 실제로 잡았다. 원인은 이 작업 중 worker를 20:57 이후 여러 번 재시작해 20:00 `accumulation_screener`(전 종목 stock_flow 적재, 70~90분)가 기록 없이 중단됐고, 21:30 `flow_rank`가 "stock_flow 256종목 < 80%"로 건너뛴 것. run_job은 완료 시에만 collect_log를 남겨 중단된 잡은 흔적이 없다 — 감시가 하류 데이터로 잡아낸 첫 사례. 같은 날 수동 재실행으로 복구. CLAUDE.md "컨테이너·환경"에 재시작 금지 시간대 규칙 추가.
+### Phase 5.121 — 매매 탭 UI 재구성: 모드 명확화·요약/펼치기·포지션 대시보드 (2026-11-26 사용자 요청)
+
+**배경**: '자동매매' 탭에 수동 매수(65건)·자동 진입(56건)·후보·성과·일지가 섞여 있고, 모드(누가 이 포지션을 열었나)·진입 근거·청산까지 거리·대기 중 "왜 안 사나"가 화면에 없다. 2,800px 넘게 전부 펼쳐져 있다. 2026-11-26 사용자가 "자동 매수 안 하나?"를 직접 물어야 했다.
+
+**원칙**: 포지션 슬롯은 하나, 모드는 토글이 아니라 상태에서 파생된다 — `정지`(킬스위치 OFF) / `자동 감시 중`(ON+idle) / `자동 진입 보유`(entry_source≠manual) / `수동 진입 보유`(entry_source=manual). 공통(대상·엔진 ON/OFF·포지션·손익·즉시매도·동기화·안전청산[장마감·외인반전]·기록)과 모드별(진입 계기·기본 청산 규칙 출처)을 분리한다. 킬스위치·`auto_trade_rules.py`·판정 로직은 바꾸지 않는다(조회용 노출만).
+
+**구성**:
+1. 탭 이름 `자동매매` → `매매`. 탭 안 자동 부분 명칭은 `자동 진입 엔진`.
+2. ① 상태 바(항상): 모드 배지 + 종목·수량 + 엔진 ON/OFF 스위치 + `실주문` 배지(맨 위 긴 주황 배너 대체).
+3. ② 보유 중 → 포지션 카드: 평가손익(핵심 숫자 하나), 가격 사다리(손절─진입─현재─트레일 전환/익절), 1분봉 미니차트(진입가·손절선), 보유 시간·장마감 강제청산까지 남은 시간, 진입 근거 한 줄, 청산 조건(기본 청산 + 공통 안전 청산, 접힘), [지금 매도]. 수동 포지션이면 조건 수정 가능.
+   대기 중 → 진입 대기 카드: 왼쪽 엔진 감시 현황(골든크로스/거래량 급증 충족 여부, 차단 요인, 마지막 평가 시각), 오른쪽 수동 매수(펼치면 조건 편집기). 보유 중엔 수동 매수 영역 자체를 숨긴다.
+4. ③ 오늘: 거래 수·실현손익·차단 수 한 줄 + 펼치면 오늘 일지.
+5. ④ 기록·설정(접힘): 성과(자동/수동), 전체 일지(날짜·페이지), 엔진 규칙 상세, 후보 종목(현행 기능 그대로 — 매수 대상과 연결은 미정), 실계좌 동기화.
+6. 대시보드 탭: 보유 중일 때만 한 줄 타일(`보유 중: 종목 손익 · 모드`) → 매매 탭 이동.
+
+**백엔드(조회 전용)**: `/api/auto-trade/state`에 `mode`, `entry_reason`(최근 entry/manual_entry 로그의 시각·reason·signal_snapshot 파싱), `last_eval`(60초 루프 마지막 평가 결과를 프로세스 메모리에 보관: at, action, golden_recent, spike_recent, current_price, 차단 사유; 서버 재시작 직후·NXT 마감 시간대엔 null), `exit_levels`(현재 포지션 기준 손절가·트레일 전환가·익절가 등 발동가)를 추가.
+**시간대 영향**: last_eval은 is_nxt_closed(20:00~08:00)엔 갱신 안 됨 → 화면에 "마지막 평가 HH:MM" 그대로, 장 전·장후엔 '엔진 평가 시간 아님' 표기. 09:00~09:10·15:20~15:30 진입 제한 시간은 차단 요인으로 표기.
+
+**구현 노트 (2026-11-26)**: 백엔드는 조회 전용 추가만 했다 — `auto_trader.LAST_EVAL`/`build_last_eval`/`record_last_eval`(live_refresh가 run_auto_trade 결과를 넘김, enabled일 때만 갱신), run_auto_trade 결과에 `status`·`golden_recent`·`spike_recent`·`current_price` 추가(분기·판정 불변), `/state`에 `mode`·`entry_reason`·`exit_levels`(exit_rules.trigger_price·엔진 상수 재사용)·`last_eval`·`engine_rules.entry_block_windows`. 프런트는 `tradeView.js`(표시용 순수 함수), `components/TradePanels.jsx`(상태 바·포지션 카드·대기 카드·오늘), `HoldingTile.jsx`(대시보드 보유 타일), `devMock.js`(dev 서버 전용 `?mock=auto|manual|stopped` 화면 확인용). 탭 이름 `매매`(key는 auto-trade 유지). 오늘 실현손익은 오늘 로그의 진입·청산가 짝으로 계산(전일 진입분 청산은 제외 표기). 테스트 `backend/tests/test_auto_trade_state_view.py`(DB 미사용). 한계: last_eval은 프로세스 메모리라 재시작 직후 null, 보유 포지션 화면은 mock으로만 확인.

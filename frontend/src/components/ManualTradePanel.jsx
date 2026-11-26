@@ -224,7 +224,7 @@ function GuideBody({ base, onApply, current, disabled }) {
 }
 
 // 접기/펼치기 — 접힌 상태에서도 현재 조건 요약 한 줄(손절 없으면 주황)을 보여준다.
-function Collapsible({ title, summary, warn, badge, storageKey, children }) {
+export function Collapsible({ title, summary, warn, badge, storageKey, children }) {
   const [open, setOpen] = usePersistedOpen(storageKey)
   const bodyId = useId()
   return (
@@ -453,7 +453,7 @@ function loadSelected() {
   }
 }
 
-function engineRuleRows(state) {
+export function engineRuleRows(state) {
   const R = state?.engine_rules
   if (!R) return []
   const status = state?.status
@@ -491,7 +491,7 @@ function engineRuleRows(state) {
   ]
 }
 
-function fixedRows(state, manual = false) {
+export function fixedRows(state, manual = false) {
   const R = state?.engine_rules
   const win = R ? `${R.eod_forced_exit_start}~${R.eod_forced_exit_end}` : '15:20~15:30'
   return [
@@ -512,7 +512,7 @@ function fixedRows(state, manual = false) {
   ]
 }
 
-function RuleTable({ rows }) {
+export function RuleTable({ rows }) {
   return (
     <ul className="at-rule-list">
       {rows.map((r) => (
@@ -532,7 +532,7 @@ const compactRules = (rules) =>
     ? rules.map((r) => (r.trigger_price != null ? `${r.label} (${priceLabel(r.trigger_price)} ${dirOf(r.kind)})` : r.label)).join(' · ')
     : '조건 없음'
 
-function ManualPosition({ state, onUpdateRules }) {
+export function ManualPosition({ state, onUpdateRules }) {
   const mr = state.manual_exit_rules
   const current = mr.rules.map(({ kind, value, activate_pct: a }) => ({ kind, value, ...(a != null ? { activate_pct: a } : {}) }))
   const sig = JSON.stringify(current)
@@ -635,13 +635,13 @@ function ManualPosition({ state, onUpdateRules }) {
   )
 }
 
-// 수동 매수/매도 패널 — 매수 전엔 청산 조건을 고르고, 보유 중엔 그 포지션이 어떤 조건으로 청산되는지 보여준다.
-export default function ManualTradePanel({ state, onBuy, onSell, onUpdateRules, buyBusy, sellBusy, buyNotice }) {
+// 수동 매수 박스(Phase 5.121) — 대기 중에만 렌더된다(보유 중엔 상위에서 통째로 숨김).
+// 청산 조건 편집기는 접어 두고(기본 접힘), 매수 버튼은 서버 분석 확인창을 거쳐 주문한다.
+export default function ManualBuyBox({ state, onBuy, buyBusy, buyNotice }) {
   const enabled = !!state?.enabled
   const status = state?.status || 'idle'
-  const holding = status === 'holding' || status === 'trailing'
   const canBuy = enabled && status === 'idle'
-  const buyDisabledReason = !enabled ? '킬스위치 꺼짐' : status !== 'idle' ? '이미 보유 중' : ''
+  const buyDisabledReason = !enabled ? '엔진이 꺼져 있습니다(켜야 매수할 수 있습니다)' : '이미 보유 중'
   const target = state?.target
   const targetLabel = target ? `${target.name}(${target.code})` : '대상 종목'
 
@@ -689,78 +689,39 @@ export default function ManualTradePanel({ state, onBuy, onSell, onUpdateRules, 
     onBuy(rules, true)
   }
 
-  const handleSellClick = () => {
-    if (!window.confirm('실제 계좌로 보유 포지션을 매도합니다. 계속할까요?')) return
-    onSell()
-  }
-
-  const engineRows = [...engineRuleRows(state), ...fixedRows(state)]
-
   return (
-    <div className="at-block at-trade">
-      <div className="at-trade-actions">
-        <div className="at-k">수동 매수/매도 — 엔진 포지션을 직접 열고 닫습니다 (1주 고정)</div>
-
-        {!holding && (
-          <>
-            <Collapsible title="청산 조건" summary={summary} warn={stopless || nErr > 0} badge={badge} storageKey="at-cond-open-buy">
-              <RuleEditor
-                rules={rules}
-                onChange={setRules}
-                base={ref}
-                baseNote={
-                  ref
-                    ? `발동가는 최근 1분봉 종가 ${priceLabel(ref)} 기준 예상치입니다. 실제 진입가(지정가 주문가)에 따라 달라집니다.`
-                    : '기준가를 불러오지 못해 발동가는 매수 후 표시됩니다.'
-                }
-                disabled={buyBusy}
-                analysis={analysis}
-                stale={stale}
-                failed={failed}
-              />
-            </Collapsible>
-          </>
-        )}
-
-        <div className="at-row at-row-start">
-          <button type="button" className="btn at-btn-buy" disabled={!canBuy || buyBusy || checking || (!holding && nErr > 0)} onClick={handleBuyClick}>
-            {buyBusy ? '매수 처리 중…' : checking ? '조건 확인 중…' : '수동 매수'}
-          </button>
-          <button type="button" className="btn at-btn-sell" disabled={!holding || sellBusy} onClick={handleSellClick}>
-            {sellBusy ? '매도 처리 중…' : '수동 매도'}
-          </button>
-        </div>
-        {(!canBuy || !holding) && (
-          <div className="at-sub">
-            {!canBuy && <span>매수 불가: {buyDisabledReason}</span>}
-            {!canBuy && !holding && ' · '}
-            {!holding && <span>매도 불가: 보유 중이 아님</span>}
-          </div>
-        )}
-        {!holding && nErr > 0 && (
-          <div className="at-sub at-warn-text">매수 불가: 청산 조건 오류 {nErr}건 — 위 '청산 조건'을 펼쳐 고치세요.</div>
-        )}
-        {checkErr && <div className="at-sub at-warn-text" role="status">{checkErr}</div>}
-        <div aria-live="polite">
-          {buyNotice && <div className="at-sub at-notice">{buyNotice}</div>}
-        </div>
+    <div className="at-manual-buy">
+      <div className="at-k">직접 고른 청산 조건으로 {targetLabel} 1주를 매수합니다.</div>
+      <Collapsible title="청산 조건" summary={summary} warn={stopless || nErr > 0} badge={badge} storageKey="at-cond-open-buy">
+        <RuleEditor
+          rules={rules}
+          onChange={setRules}
+          base={ref}
+          baseNote={
+            ref
+              ? `발동가는 최근 1분봉 종가 ${priceLabel(ref)} 기준 예상치입니다. 실제 진입가(지정가 주문가)에 따라 달라집니다.`
+              : '기준가를 불러오지 못해 발동가는 매수 후 표시됩니다.'
+          }
+          disabled={buyBusy}
+          analysis={analysis}
+          stale={stale}
+          failed={failed}
+        />
+      </Collapsible>
+      <div className="at-row at-row-start">
+        <button
+          type="button"
+          className="btn at-btn-buy"
+          disabled={!canBuy || buyBusy || checking || nErr > 0}
+          onClick={handleBuyClick}
+        >
+          {buyBusy ? '매수 처리 중…' : checking ? '조건 확인 중…' : '수동 매수'}
+        </button>
       </div>
-
-      {holding && state.entry_source === 'manual' && state.manual_exit_rules ? (
-        <ManualPosition state={state} onUpdateRules={onUpdateRules} />
-      ) : (
-        <div className="at-rules">
-          <div className="at-rules-title">
-            {holding
-              ? `자동 진입 — 엔진 고정 규칙으로 청산됩니다${state?.entry_price != null ? ` (진입가 ${priceLabel(state.entry_price)} 기준)` : ''}`
-              : '자동 진입(엔진 신호) 포지션은 아래 고정 규칙으로 청산됩니다'}
-          </div>
-          <RuleTable rows={engineRows} />
-          <div className="at-sub">
-            실제 주문 · 자동 진입 포지션의 규칙은 화면에서 바꿀 수 없습니다. 수동 매수는 직접 고른 청산 조건이 이 규칙 대신 적용됩니다.
-          </div>
-        </div>
-      )}
+      {!canBuy && <div className="at-sub">매수 불가: {buyDisabledReason}</div>}
+      {nErr > 0 && <div className="at-sub at-warn-text">매수 불가: 청산 조건 오류 {nErr}건 — 위 '청산 조건'을 펼쳐 고치세요.</div>}
+      {checkErr && <div className="at-sub at-warn-text" role="status">{checkErr}</div>}
+      <div aria-live="polite">{buyNotice && <div className="at-sub at-notice">{buyNotice}</div>}</div>
     </div>
   )
 }

@@ -438,6 +438,39 @@ async def _get_risk_alert_active(session: AsyncSession) -> bool:
     return bool(risk and risk.get("alerts"))
 
 
+# Phase 5.121 — 가장 최근 run_auto_trade 평가 결과(프로세스 메모리, 조회 전용).
+# 재시작 직후엔 None. 킬스위치 OFF일 땐 갱신하지 않는다(화면은 '정지' 표시).
+LAST_EVAL: dict | None = None
+
+_LAST_EVAL_BLOCK_ACTIONS = (
+    "entry_blocked_time", "entry_blocked_risk", "budget_blocked", "stale_data", "no_bars", "error",
+)
+
+
+def build_last_eval(result: dict, at: dt.datetime) -> dict | None:
+    """run_auto_trade 결과 dict -> 화면용 last_eval. 꺼짐(enabled False)이면 None(갱신 안 함)."""
+    if not result.get("enabled"):
+        return None
+    action = result.get("action")
+    return {
+        "at": at.astimezone(KST).isoformat(),
+        "action": action,
+        "status": result.get("status"),
+        "golden_recent": result.get("golden_recent"),
+        "spike_recent": result.get("spike_recent"),
+        "current_price": result.get("current_price"),
+        "block_reason": action if action in _LAST_EVAL_BLOCK_ACTIONS else None,
+    }
+
+
+def record_last_eval(result: dict, at: dt.datetime | None = None) -> None:
+    """평가 결과를 LAST_EVAL에 보관한다(enabled일 때만)."""
+    global LAST_EVAL
+    built = build_last_eval(result, at or dt.datetime.now(KST))
+    if built is not None:
+        LAST_EVAL = built
+
+
 async def run_auto_trade(
     session: AsyncSession, now_kst: dt.time | None = None, today_str: str | None = None
 ) -> dict:
@@ -478,6 +511,7 @@ async def run_auto_trade(
             return result
 
         result["enabled"] = True
+        result["status"] = state.status  # Phase 5.121 — 조회용 노출(판정과 무관)
         code = state.code or TARGET_CODE
 
         try:
@@ -525,6 +559,10 @@ async def run_auto_trade(
             "golden_cross_recent": golden_recent,
             "volume_spike_recent": spike_recent,
         }
+        # Phase 5.121 — 매매 탭 '엔진 감시 현황' 표시용(조회 전용, 판정·분기에 쓰지 않는다).
+        result["golden_recent"] = bool(golden_recent)
+        result["spike_recent"] = bool(spike_recent)
+        result["current_price"] = current_price
 
         # PLAN.md §5.55-1/3 — 진입 시간 필터(idle 경로)와 리스크 경보 연동(idle
         # 진입 차단 + holding/trailing 손절선 조정) 둘 다 "지금 몇 시인지"/

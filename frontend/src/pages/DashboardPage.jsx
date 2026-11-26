@@ -34,6 +34,7 @@ import {
   fetchValueRankLive,
 } from '../api'
 import Badge from '../components/Badge'
+import HoldingTile from '../components/HoldingTile'
 import GroupTreemap from '../components/GroupTreemap'
 import Modal from '../components/Modal'
 import RiskAlertBanner from '../components/RiskAlertBanner'
@@ -204,7 +205,7 @@ function vixLevelWord(v) {
   return '공포'
 }
 
-export default function DashboardPage() {
+export default function DashboardPage({ onNavigate }) {
   // 지수 3종(코스피/코스닥/선물) — 타일 표시용 + 캔들 모달 기본 데이터를 겸한다.
   const [marketData, setMarketData] = useState({})
   const [marketLoading, setMarketLoading] = useState(true)
@@ -1212,6 +1213,8 @@ export default function DashboardPage() {
 
   return (
     <div className="dashboard-page m-font">
+      {/* Phase 5.121 — 보유 중일 때만 보이는 한 줄 타일(매매 탭으로 이동) */}
+      {!STATIC_DATA && <HoldingTile onNavigate={onNavigate} />}
       <div className="dashboard-header-row">
         {/* 종목 검색 (PLAN.md §6 3.7-2) — 온디맨드 API(/api/stocks/search)라 정적
             스냅샷 대상이 아니다. 정적 배포(STATIC_DATA=1)에서는 검색을 서빙할 수 없으므로
