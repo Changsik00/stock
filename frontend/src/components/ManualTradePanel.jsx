@@ -290,9 +290,17 @@ function RuleEditor({ rules, onChange, base, peak, baseNote, disabled, analysis,
     onChange(upsertRule(rules, rule))
   }
 
+  // 기본 이름(placeholder 겸 비워 둔 채 저장할 때 쓰는 이름): 가이드 추천 조합과 같으면
+  // "조합 이름: 조건 요약", 아니면 "조건 요약". 입력칸 maxLength(60)에 맞춰 자른다.
+  const guideName = RECOMMENDED.find((r) => sameRules(rules, r.rules))?.name || ''
+  const defaultName = rules.length
+    ? (guideName ? `${guideName}: ${describeRules(rules)}` : describeRules(rules)).slice(0, 60)
+    : ''
+  const saveName = presetName.trim() || defaultName
+
   const handleSavePreset = async () => {
     try {
-      await addExitPreset(presetName.trim(), rules)
+      await addExitPreset(saveName, rules)
       setPresetName('')
       setMsg(null)
       await loadPresets()
@@ -426,13 +434,13 @@ function RuleEditor({ rules, onChange, base, peak, baseNote, disabled, analysis,
           maxLength={60}
           disabled={disabled}
           aria-label="조합 프리셋 이름"
-          placeholder="현재 조건을 프리셋으로 저장"
+          placeholder={defaultName || '현재 조건을 프리셋으로 저장'}
           onChange={(e) => setPresetName(e.target.value)}
         />
         <button
           type="button"
           className="btn btn-ghost btn-sm"
-          disabled={disabled || !presetName.trim() || rules.length === 0 || !!analysis?.errors?.length}
+          disabled={disabled || !saveName || rules.length === 0 || !!analysis?.errors?.length}
           onClick={handleSavePreset}
         >
           프리셋 저장
