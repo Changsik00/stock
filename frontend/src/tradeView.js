@@ -116,10 +116,16 @@ export function minutesToForcedExit(engineRules, now = new Date()) {
 
 // 진입 근거 한 줄 — signal 필드에서 파생(원문 문자열은 보여주지 않는다).
 export function entryReasonLine(entryReason, state) {
-  if (!entryReason) return null
-  const hm = entryReason.ts ? kstHm(entryReason.ts) : ''
+  const manual = state?.entry_source === 'manual' || entryReason?.event_type === 'manual_entry'
+  const ts = entryReason?.ts || state?.entry_at
+  const hm = ts ? kstHm(ts) : ''
   const prefix = hm ? `${hm} ` : ''
-  if (entryReason.event_type === 'manual_entry') return `${prefix}수동 매수 (직접 고른 청산 조건)`
+  // 수동 매수는 진입 로그가 없어도 상태(entry_source·entry_at·manual_exit_rules)만으로 설명할 수 있다.
+  if (manual) {
+    const summary = state?.manual_exit_rules?.summary
+    return `${prefix}수동 매수${summary ? ` · 청산 조건: ${summary}` : ''}`
+  }
+  if (!entryReason) return state?.entry_source === 'auto' ? `${prefix}자동 진입 (신호 상세 기록 없음)` : null
   const sig = entryReason.signal
   const parts = []
   if (sig?.golden_cross_recent) parts.push('골든크로스')
