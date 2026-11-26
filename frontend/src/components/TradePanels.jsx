@@ -108,53 +108,10 @@ export function StatusBar({ state, onToggle, busy }) {
   )
 }
 
-// 가격 사다리 — 손절 ─ 진입 ─ 현재 ─ 트레일 전환/익절을 한 줄 막대 위에 눈금으로 표시.
-function PriceLadder({ state, ticks }) {
-  const entry = state.entry_price
-  const cur = state.current_price
-  const pts = [
-    ...ticks.map((t) => ({ ...t, kind: 'level' })),
-    { key: 'entry', label: '진입', price: entry, kind: 'entry' },
-    ...(cur != null ? [{ key: 'cur', label: '현재', price: cur, kind: 'cur' }] : []),
-  ].filter((p) => p.price != null)
-  if (entry == null || pts.length < 2) return null
-  const lo = Math.min(...pts.map((p) => p.price))
-  const hi = Math.max(...pts.map((p) => p.price))
-  const span = hi - lo || 1
-  const pos = (price) => 14 + ((price - lo) / span) * 72 // 좌우 14% 여백(라벨 잘림 방지)
-  const fixed = pts.filter((p) => p.kind !== 'cur')
-  const curPt = pts.find((p) => p.kind === 'cur')
-  return (
-    <div className="at-ladder" aria-label="가격 사다리">
-      {curPt && (
-        <div className="at-lad-cur">
-          <div className="at-lad-curpos" style={{ left: `${pos(curPt.price)}%` }}>
-            <span className="at-lad-lab">현재 {numberText(curPt.price)}</span>
-            <span className="at-lad-caret" aria-hidden="true" />
-          </div>
-        </div>
-      )}
-      <div className="at-lad-bar" aria-hidden="true">
-        {fixed.map((p) => (
-          <span key={p.key} className={`at-lad-tick is-${p.kind === 'entry' ? 'entry' : p.side}`} style={{ left: `${pos(p.price)}%` }} />
-        ))}
-      </div>
-      <div className="at-lad-labels">
-        {fixed.map((p) => (
-          <div key={p.key} className="at-lad-fix" style={{ left: `${pos(p.price)}%` }}>
-            <span className="at-lad-lab">{p.label}</span>
-            <span className="at-lad-price">{numberText(p.price)}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
 const numberText = (v) => new Intl.NumberFormat('ko-KR').format(v)
 
 // 오늘 1분봉 캔들 — 다른 화면(종목 상세·지수 모달)과 같은 CandleChart를 쓰고, 진입가(중립 실선)·
-// 손절가(주황 점선)를 기준선으로 겹친다(Phase 5.125, 차트 일관성).
+// 손절·트레일 청산(주황 점선)·익절·목표가·트레일 전환(목표 점선)을 기준선으로 겹친다(Phase 5.125).
 function MiniChart({ code, state, ticks }) {
   const [bars, setBars] = useState(null)
   const [err, setErr] = useState(false)
@@ -178,17 +135,21 @@ function MiniChart({ code, state, ticks }) {
   }, [code])
 
   const entry = state.entry_price
-  const stop = ticks.find((t) => t.key === 'stop_loss' || (t.key.startsWith('manual_') && t.side === 'down' && !t.key.endsWith('trail_pct')))
-  const stopPrice = stop?.price ?? null
-  const stopLabel = stop?.label ?? '손절'
-  // 매 초 리렌더(보유 시간 표시)마다 기준선을 다시 그리지 않도록 값이 바뀔 때만 새 배열을 만든다.
+  // 기준선: 진입가(중립) + 발동가 전부 — 손실 쪽(손절·트레일 청산)=경고, 이익 쪽(익절·목표가·트레일 전환)=목표.
+  const lineKey = JSON.stringify([entry, ticks.map((t) => [t.key, t.price, t.side, t.label])])
   const markLines = useMemo(
     () =>
       [
         entry != null && { price: Number(entry), label: `진입 ${numberText(entry)}`, tone: 'neutral' },
-        stopPrice != null && { price: Number(stopPrice), label: `${stopLabel} ${numberText(stopPrice)}`, tone: 'warn' },
+        ...ticks.map((t) => ({
+          price: Number(t.price),
+          label: `${t.label} ${numberText(t.price)}`,
+          tone: t.side === 'down' ? 'warn' : 'target',
+        })),
       ].filter(Boolean),
-    [entry, stopPrice, stopLabel],
+    // 매 초 리렌더(보유 시간 표시)마다 기준선을 다시 그리지 않도록 값이 바뀔 때만 새 배열을 만든다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [lineKey],
   )
 
   if (err && !bars) return <div className="at-sub">분봉을 불러오지 못했습니다.</div>
@@ -245,7 +206,6 @@ export function PositionCard({ state, onSell, sellBusy, onUpdateRules }) {
         </button>
       </div>
 
-      <PriceLadder state={state} ticks={ticks} />
       {(dist.down || dist.up) && (
         <div className="at-dist">
           {dist.down && <span>{dist.down.label}까지 {fmtPct(dist.down.pct, 1)}</span>}

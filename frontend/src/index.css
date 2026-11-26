@@ -2570,19 +2570,6 @@ button.fa-row:hover { background: var(--chip-bg); }
 .at-dist { font-size: var(--fs-body); font-weight: 600; font-variant-numeric: tabular-nums; }
 .at-dist-sep { color: var(--text-secondary); }
 
-.at-ladder { position: relative; padding-top: 4px; }
-.at-lad-cur { position: relative; height: 34px; }
-.at-lad-curpos { position: absolute; bottom: 0; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 2px; white-space: nowrap; }
-.at-lad-curpos .at-lad-lab { font-weight: 700; color: var(--text-primary); }
-.at-lad-caret { width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 7px solid var(--text-primary); }
-.at-lad-bar { position: relative; height: 4px; border-radius: 999px; background: var(--grid); margin: 6px 0; }
-.at-lad-tick { position: absolute; top: 50%; width: 3px; height: 16px; border-radius: 2px; transform: translate(-50%, -50%); background: var(--text-secondary); }
-.at-lad-tick.is-entry { background: var(--text-primary); }
-.at-lad-tick.is-down { background: var(--warn-text); }
-.at-lad-labels { position: relative; height: 40px; }
-.at-lad-fix { position: absolute; top: 0; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; white-space: nowrap; }
-.at-lad-lab { font-size: var(--fs-label); color: var(--text-secondary); }
-.at-lad-price { font-size: var(--fs-label); font-weight: 600; color: var(--text-primary); font-variant-numeric: tabular-nums; }
 
 .at-chart-skel { height: 240px; }
 

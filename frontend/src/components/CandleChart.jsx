@@ -387,22 +387,23 @@ export default function CandleChart({
     }
   }, [flowLevels])
 
-  // 보유 포지션 기준선(Phase 5.125, 매매 탭) — [{ price, label, tone: 'neutral'|'warn' }].
-  // 진입가 같은 기준값은 중립(--text-secondary, 실선), 손절가처럼 "닿으면 청산"인 선은
-  // 경고색(--warn-text, 점선). 가격 방향색(--up/--down)은 쓰지 않는다.
+  // 보유 포지션 기준선(Phase 5.125, 매매 탭) — [{ price, label, tone: 'neutral'|'warn'|'target' }].
+  // 진입가=중립(--text-secondary, 실선), 손절·트레일 청산처럼 "닿으면 손실 쪽 청산"=경고(--warn-text,
+  // 점선), 익절·목표가·트레일 전환=목표(--series-value, 점선). 가격 방향색(--up/--down)은 쓰지 않는다.
   useEffect(() => {
     const candleSeries = candleSeriesRef.current
     if (!candleSeries) return undefined
 
-    const vars = readCssVars(['--text-secondary', '--warn-text'])
+    const vars = readCssVars(['--text-secondary', '--warn-text', '--series-value'])
+    const toneColor = { warn: vars['--warn-text'], target: vars['--series-value'] }
     const priceLines = (markLines || [])
       .filter((ml) => ml?.price != null)
       .map((ml) =>
         candleSeries.createPriceLine({
           price: ml.price,
-          color: ml.tone === 'warn' ? vars['--warn-text'] : vars['--text-secondary'],
+          color: toneColor[ml.tone] || vars['--text-secondary'],
           lineWidth: 1,
-          lineStyle: ml.tone === 'warn' ? LineStyle.Dashed : LineStyle.Solid,
+          lineStyle: ml.tone === 'warn' || ml.tone === 'target' ? LineStyle.Dashed : LineStyle.Solid,
           axisLabelVisible: true,
           title: ml.label || '',
         })
