@@ -1,20 +1,41 @@
-import { keepPreviousData, useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQueries, useQuery } from '@tanstack/react-query'
 import {
   STATIC_DATA,
+  fetchAttention,
+  fetchAutoTradeState,
+  fetchBasis,
+  fetchBasisLive,
   fetchBreadth,
   fetchBreadthLive,
+  fetchDerivativeFlow,
+  fetchEtfWeightChanges,
+  fetchExpiryCumulative,
   fetchFlowAnomaly,
+  fetchFlowConsistency,
+  fetchFlowLive,
   fetchFlowPath,
   fetchFlowRank,
+  fetchFreshness,
+  fetchFuturesFlowLive,
+  fetchFxLive,
   fetchGroupTopStocks,
   fetchGroups,
+  fetchGroupsLive,
+  fetchIndexTilesLive,
   fetchMacroSeries,
   fetchMarketIntraday,
   fetchMarketSeries,
+  fetchNqComovement,
   fetchPremarketOutlook,
   fetchRegime,
+  fetchScalpCandidates,
+  fetchScalpHitrate,
+  fetchSectorRotation,
   fetchSentiment,
+  fetchShortSellingMarket,
+  fetchValueRank,
   fetchValueRankAuto,
+  fetchValueRankLive,
   fetchVolRegime,
 } from './api'
 
@@ -152,8 +173,9 @@ async function loadBreadth() {
   }
 }
 
-export function useBreadth() {
-  return useQuery({ queryKey: qk.breadth(), queryFn: loadBreadth })
+// refetchInterval: 시장 탭은 마운트 1회(미지정), 대시보드는 60초 폴링(같은 캐시를 공유).
+export function useBreadth(refetchInterval) {
+  return useQuery({ queryKey: qk.breadth(), queryFn: loadBreadth, refetchInterval })
 }
 
 export function useGroups(type) {
@@ -172,3 +194,118 @@ export function useValueRankQuery(market, days) {
     placeholderData: keepPreviousData,
   })
 }
+
+// ---------------------------------------------------------------------------
+// 대시보드 탭 데이터 훅(Phase 5.132 2단계). 호출 함수·인자·폴링 주기는 기존 DashboardPage useEffect와 동일하다.
+// 주의: queryFn은 항상 화살표로 감싸 호출한다(react-query가 넘기는 context가 api 함수 첫 인자로 새지 않게).
+// ---------------------------------------------------------------------------
+
+// 갱신 실패 시 값을 null로 비우던 기존 `.catch(() => setX(null))` 동작을 그대로 재현한다.
+// (react-query는 갱신 실패에도 직전 data를 유지하므로, "비우는" 쪽 쿼리만 이 헬퍼로 읽는다.)
+export const resetOnError = (q) => (q.isError ? null : (q.data ?? null))
+
+// 갱신 실패 시 직전 값을 유지하던 쪽(`.catch(() => {})`)은 q.data를 그대로 쓴다.
+
+export const dq = {
+  indexTilesLive: () => ['dash', 'index-tiles-live'],
+  flowLive: () => ['dash', 'flow-live'],
+  flowConsistency: () => ['dash', 'flow-consistency'],
+  nqComovement: () => ['dash', 'nq-comovement'],
+  attention: () => ['dash', 'attention'],
+  scalpCandidates: (limit) => ['dash', 'scalp-candidates', limit],
+  scalpHitrate: () => ['dash', 'scalp-hitrate'],
+  groupsLive: (type) => ['dash', 'groups-live', type],
+  basisLive: () => ['dash', 'basis-live'],
+  futuresFlowLive: () => ['dash', 'futures-flow-live'],
+  fxLive: () => ['dash', 'fx-live'],
+  valueRankLive: () => ['dash', 'value-rank-live'],
+  valueRankEod: (market, days) => ['dash', 'value-rank-eod', market, days],
+  shortSelling: (days) => ['dash', 'short-selling', days],
+  sectorRotation: () => ['dash', 'sector-rotation'],
+  basis: (days) => ['dash', 'basis', days],
+  expiryCumulative: (n) => ['dash', 'expiry-cumulative', n],
+  derivativeFlow: (days) => ['dash', 'derivative-flow', days],
+  etfWeightChanges: (limit) => ['dash', 'etf-weight-changes', limit],
+  autoTradeState: () => ['dash', 'auto-trade-state'],
+  freshness: () => ['dash', 'freshness'],
+}
+
+const live60 = { refetchInterval: POLL_60S, enabled: !STATIC_DATA }
+
+// 지수 3종 시리즈 — 시장 탭과 같은 키(qk.marketSeries)라 캐시를 공유한다. 시장별 병렬, 하나가 늦어도 나머지는 먼저 뜬다.
+export function useIndexSeries(markets, days) {
+  return useQueries({
+    queries: markets.map((m) => ({
+      queryKey: qk.marketSeries(m.key, days),
+      queryFn: () => fetchMarketSeries(m.key, days),
+    })),
+  })
+}
+
+export const useIndexTilesLive = () =>
+  useQuery({ queryKey: dq.indexTilesLive(), queryFn: () => fetchIndexTilesLive(), ...live60 })
+export const useFlowLive = () => useQuery({ queryKey: dq.flowLive(), queryFn: () => fetchFlowLive(), ...live60 })
+export const useFlowConsistency = () =>
+  useQuery({ queryKey: dq.flowConsistency(), queryFn: () => fetchFlowConsistency(), ...live60 })
+export const useNqComovement = () =>
+  useQuery({ queryKey: dq.nqComovement(), queryFn: () => fetchNqComovement(), ...live60 })
+export const useAttention = () => useQuery({ queryKey: dq.attention(), queryFn: () => fetchAttention(), ...live60 })
+export const useScalpCandidates = (limit = 20) =>
+  useQuery({ queryKey: dq.scalpCandidates(limit), queryFn: () => fetchScalpCandidates(limit), ...live60 })
+export const useGroupsLive = (type) =>
+  useQuery({
+    queryKey: dq.groupsLive(type),
+    queryFn: () => fetchGroupsLive(type),
+    placeholderData: keepPreviousData,
+    ...live60,
+  })
+export const useBasisLive = () => useQuery({ queryKey: dq.basisLive(), queryFn: () => fetchBasisLive(), ...live60 })
+export const useFuturesFlowLive = () =>
+  useQuery({ queryKey: dq.futuresFlowLive(), queryFn: () => fetchFuturesFlowLive(), ...live60 })
+export const useFxLive = () => useQuery({ queryKey: dq.fxLive(), queryFn: () => fetchFxLive(), ...live60 })
+
+// 거래대금 상위 라이브 — 7분 티어(백엔드 캐시 420초와 맞춤)
+export const useValueRankLive = () =>
+  useQuery({
+    queryKey: dq.valueRankLive(),
+    queryFn: () => fetchValueRankLive(),
+    refetchInterval: POLL_VALUE_RANK,
+    enabled: !STATIC_DATA,
+  })
+
+// 마운트 1회성(폴링 없음) — 하루 1회 배치·확정치 소스
+export const useScalpHitrate = () =>
+  useQuery({ queryKey: dq.scalpHitrate(), queryFn: () => fetchScalpHitrate(), enabled: !STATIC_DATA })
+export const useValueRankEod = (market, days) =>
+  useQuery({ queryKey: dq.valueRankEod(market, days), queryFn: () => fetchValueRank(market, days) })
+export const useShortSellingBoth = (days) =>
+  useQuery({
+    queryKey: dq.shortSelling(days),
+    queryFn: async () => {
+      const [kospi, kosdaq] = await Promise.all([fetchShortSellingMarket('kospi', days), fetchShortSellingMarket('kosdaq', days)])
+      return { kospi: kospi.series || [], kosdaq: kosdaq.series || [] }
+    },
+  })
+export const useSectorRotationBoth = () =>
+  useQuery({
+    queryKey: dq.sectorRotation(),
+    queryFn: async () => {
+      const [kospi, kosdaq] = await Promise.all([fetchSectorRotation('kospi'), fetchSectorRotation('kosdaq')])
+      return { kospi, kosdaq }
+    },
+  })
+export const useBasisSeries = (days) => useQuery({ queryKey: dq.basis(days), queryFn: () => fetchBasis(days) })
+export const useExpiryCumulative = (n) =>
+  useQuery({ queryKey: dq.expiryCumulative(n), queryFn: () => fetchExpiryCumulative(n), enabled: !STATIC_DATA })
+export const useDerivativeFlow = (days) =>
+  useQuery({ queryKey: dq.derivativeFlow(days), queryFn: () => fetchDerivativeFlow(days) })
+export const useEtfWeightChangesTop = (limit) =>
+  useQuery({ queryKey: dq.etfWeightChanges(limit), queryFn: () => fetchEtfWeightChanges({ limit }) })
+
+// 대시보드 상단 보유 타일(30초) — 실거래 보유·손익 표시라 재방문 시 캐시를 먼저 보여주되 15초 지나면 다시 조회한다(staleTime 15초).
+// dev mock 적용은 호출부(select)에서. 조회 실패 시 타일을 숨기던 동작은 resetOnError로.
+export const useAutoTradeState = () =>
+  useQuery({ queryKey: dq.autoTradeState(), queryFn: () => fetchAutoTradeState(), refetchInterval: 30_000, staleTime: 15_000 })
+// 데이터 신선도 배너(5분)
+export const useFreshness = () =>
+  useQuery({ queryKey: dq.freshness(), queryFn: () => fetchFreshness(), refetchInterval: 5 * 60_000, enabled: !STATIC_DATA })

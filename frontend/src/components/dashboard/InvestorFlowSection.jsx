@@ -194,7 +194,7 @@ function Interpretation({ data, loading }) {
           외국인 장중 흐름 해석
         </span>
         <span className={`ifs-interp-summary${anySell ? ' fc-label-sell' : ''}`}>
-          {loading ? <Skel w={140} h={14} /> : hasData ? summary : '데이터 없음'}
+          {loading ? <span className="mt-skel ifs-skel" aria-hidden="true" /> : hasData ? summary : '데이터 없음'}
         </span>
       </button>
       {open && hasData && (
@@ -278,7 +278,7 @@ export default function InvestorFlowSection({ tiles, liveActive, liveTime, consi
         </button>
       </div>
       {guideOpen && <ReadingGuide />}
-      <div className="mt-row">
+      <div className="mt-row mt-row-flow">
         {tiles.map((t) => {
           const hasValue = typeof t.total === 'number'
           const judged = JUDGED.includes(t.name) && t.source === 'live' && hasConsistency

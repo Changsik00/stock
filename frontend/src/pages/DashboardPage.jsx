@@ -1,36 +1,38 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
+import { STATIC_DATA } from '../api'
 import {
-  STATIC_DATA,
-  fetchAttention,
-  fetchBasis,
-  fetchExpiryCumulative,
-  fetchBasisLive,
-  fetchBreadth,
-  fetchBreadthLive,
-  fetchDerivativeFlow,
-  fetchEtfWeightChanges,
-  fetchFlowConsistency,
-  fetchNqComovement,
-  fetchFlowLive,
-  fetchFlowPath,
-  fetchFlowRank,
-  fetchFuturesFlowLive,
-  fetchFxLive,
-  fetchGroups,
-  fetchGroupsLive,
-  fetchIndexTilesLive,
-  fetchMacroSeries,
-  fetchMarketSeries,
-  fetchRegime,
-  fetchScalpCandidates,
-  fetchScalpHitrate,
-  fetchSectorRotation,
-  fetchSentiment,
-  fetchShortSellingMarket,
-  fetchValueRank,
-  fetchValueRankLive,
-} from '../api'
+  errorText,
+  resetOnError,
+  useAttention,
+  useBasisLive,
+  useBasisSeries,
+  useBreadth,
+  useDerivativeFlow,
+  useEtfWeightChangesTop,
+  useExpiryCumulative,
+  useFlowConsistency,
+  useFlowLive,
+  useFlowPath,
+  useFlowRank,
+  useFuturesFlowLive,
+  useFxLive,
+  useGroups,
+  useGroupsLive,
+  useIndexSeries,
+  useIndexTilesLive,
+  useMacroFundSeries,
+  useNqComovement,
+  useRegime,
+  useScalpCandidates,
+  useScalpHitrate,
+  useSectorRotationBoth,
+  useSentiment,
+  useShortSellingBoth,
+  useValueRankEod,
+  useValueRankLive,
+} from '../queries'
 import Badge from '../components/Badge'
+import { SkeletonBlock } from '../components/Skeleton'
 import HoldingTile from '../components/HoldingTile'
 import GroupTreemap from '../components/GroupTreemap'
 import Modal from '../components/Modal'
@@ -153,6 +155,10 @@ const PROGRAM_ARB_IDS = ['prog_arb_kospi', 'prog_arb_kosdaq']
 // "비차익거래(대량 바스켓 매매)가 차익거래보다 펀드 리밸런싱·ETF 설정/환매 등 큰손
 // 움직임을 더 잘 보여주는 지표"라는 조언에 따라 차익 타일과 나란히 노출한다.
 const PROGRAM_NONARB_IDS = ['prog_nonarb_kospi', 'prog_nonarb_kosdaq']
+// 차익 2개 + 비차익 2개를 한 번의 macro/series 호출로 받는다(쿼리 키에 쓰이므로 모듈 상수로 고정)
+const PROGRAM_IDS = [...PROGRAM_ARB_IDS, ...PROGRAM_NONARB_IDS]
+// 환율·WTI·미국 4대 지수·VIX 타일용 시리즈 id
+const MACRO_TILE_IDS = [...MACRO_SERIES.map((s) => s.id), ...US_INDEX_SERIES.map((s) => s.id), VIX_SERIES.id]
 
 // 만기 임박 시그널 배지 기준(D-n 이내, PLAN.md §4.5-5 "만기 D-3 이내").
 const EXPIRY_SOON_D_DAY = 3
@@ -188,7 +194,7 @@ const SECTOR_ROTATION_MARKET_OPTIONS = [
 // 단일 조회 1회뿐이라 비용이 없어 위 1분 티어로 옮겼다. 수급 상위(flow-rank)는
 // 실측 결과 소스가 2영업일 이상 지연돼 있어 애초에 라이브로 편입하지 않았다 —
 // EOD(FLOW_RANK_LOOKBACK_DAYS 기준) 그대로 유지.
-const EXTRA_LIVE_POLL_MS = 420_000
+// (주기 상수는 queries.js POLL_VALUE_RANK = 420_000, useValueRankLive에서 쓴다.)
 
 // VIX 수준 단어(Phase 5.112, 참고용): <15 평온 / 15–25 보통 / 25–30 높음 / ≥30 공포
 function vixLevelWord(v) {
@@ -199,593 +205,111 @@ function vixLevelWord(v) {
 }
 
 export default function DashboardPage({ onNavigate }) {
-  // 지수 3종(코스피/코스닥/선물) — 타일 표시용 + 캔들 모달 기본 데이터를 겸한다.
-  const [marketData, setMarketData] = useState({})
-  const [marketLoading, setMarketLoading] = useState(true)
-  // 지수 3종 타일 1D 실시간(GET /api/markets/index-tiles/live, 60초 서버 캐시,
-  // 2026-07-21) — { kospi: {close, change_rate, date, time, prev_close, source}|null,
-  // kosdaq, futures, market_closed, cached_at }. marketData(3M EOD, 캔들 모달 기본
-  // 데이터)는 그대로 유지하고 타일 표시값만 이걸로 오버레이한다(아래 1분 티어 폴링에
-  // 편입, 별도 setInterval 신설 금지).
-  const [indexTilesLive, setIndexTilesLive] = useState(null)
-
-  const [sentiment, setSentiment] = useState(null)
-  const [breadth, setBreadth] = useState(null)
-
-  // 장중 잠정 수급(PLAN.md §6 3.7-3) — null이면 "라이브 없음"(폴링 전 최초 로딩 중이거나
-  // 실패)이라 아래 투자자별 수급 요약 타일은 항상 기존 확정치(flowInvestorSummary)로
-  // 폴백한다. 정적 배포(STATIC_DATA)에서는 이 state가 항상 null로 남아 기존 동작 그대로다.
-  const [flowLive, setFlowLive] = useState(null)
-  // 장중 외인 매도 일관성(PLAN.md Phase 5.113) — 1분 티어에 합류, 실패 시 마지막 값 유지.
-  const [flowConsistency, setFlowConsistency] = useState(null)
-  const [nqComovement, setNqComovement] = useState(null)
+  // 화면 토글·필터 state(데이터가 아니라 선택값) — 데이터 조회는 아래 useQuery 훅이 맡는다(Phase 5.132 2단계).
+  // 쿼리 키에 이 값이 들어가므로 바꾸면 해당 쿼리만 새로 조회하고, 한 번 본 값은 캐시에서 즉시 나온다.
+  const [groupType, setGroupType] = useState('upjong')
+  // 업종 자금 흐름 관찰(PLAN.md §5.33) — 코스피/코스닥 선택(하루 1회 배치 산출물, 폴링 없음)
+  const [sectorRotationMarket, setSectorRotationMarket] = useState('kospi')
   // 수급 상위 카드 선택(PLAN.md 5.117) — 기본 외국인·순매수
   const [flowRankInvestor, setFlowRankInvestor] = useState('foreign')
   const [flowRankSide, setFlowRankSide] = useState('buy')
-
-  const [fundSeries, setFundSeries] = useState({})
-  // 시장 전체 공매도(코스피/코스닥, PLAN.md §5.32) — KOFIA 대차잔고(fundSeries의
-  // lending_balance)와 별개 소스(KRX 정보데이터시스템)라 별도 state로 둔다. 타일에는
-  // 최신 거래대금 비중(%)만 쓰지만, 전일비 화살표를 위해 며칠치를 함께 받는다.
-  const [shortSellingSeries, setShortSellingSeries] = useState({})
-  // 환율(USD/KRW)·WTI 타일의 최신값/전일비/기준일 계산용 — 모달(MacroModal)은 별도로
-  // 자기 기간(기본 1Y)만큼 다시 불러오므로 이 state와 무관하다.
-  const [macroSeries, setMacroSeries] = useState({})
-
-  // 외인 양손 · 현선물 섹션(PLAN.md §4.5-5) — 베이시스/만기(basisData), 파생ETF
-  // 방향성 게이지(derivativeFlow), 프로그램 차익 순매수(programFlow) 타일용 데이터.
-  // 외인 현물/선물 순매수 자체는 새로 fetch하지 않고 위 marketData(선물 포함)와
-  // 아래 flowInvestorSummary/flowLiveSummary(현물, 코스피+코스닥)를 그대로 재사용한다.
-  const [basisData, setBasisData] = useState(null)
-  // 만기 사이클 누적 수급(Phase 5.100) — 다음 만기 타일 한 줄용. 로컬 전용.
-  const [expiryCum, setExpiryCum] = useState(null)
-  const [derivativeFlow, setDerivativeFlow] = useState(null)
-  const [programFlow, setProgramFlow] = useState({})
-
-  // PLAN.md §4.7 3단 갱신 주기(2026-07-20 장중 실측 편입, §5.5-2로 7분→1분 이동) —
-  // 베이시스·외인 선물수급의 1분 라이브 오버레이. null이면 "라이브 없음"(폴링 전/
-  // 실패/정적 배포)이라 아래 KPI 타일은 항상 기존 EOD 값(basisData/foreignFuturesRow)
-  // 으로 폴백한다 — flowLive와 동일한 "오버레이 + 폴백" 관례. 시그널 판정
-  // (foreignSignals)은 EOD 데이터 기준을 그대로 유지한다(라이브 값은 표시만, 판정
-  // 기준은 안 바꿈).
-  const [basisLive, setBasisLive] = useState(null)
-  const [futuresFlowLive, setFuturesFlowLive] = useState(null)
-  // 환율(USD/KRW) 1분 라이브 오버레이(PLAN.md §5.5-3, 2026-07-21 실측 편입) — naver
-  // front-api의 "오늘" 행이 장중 고시회차 갱신을 그대로 반영함을 실측으로 확인해
-  // basisLive/futuresFlowLive와 같은 "오버레이 + 폴백" 관례로 추가했다. null이면
-  // macroSeries(EOD, usdkrw)로 폴백한다.
-  const [fxLive, setFxLive] = useState(null)
-
-  const [groupType, setGroupType] = useState('upjong')
-  const [groupItems, setGroupItems] = useState([])
-  const [groupLoading, setGroupLoading] = useState(false)
-  const [groupError, setGroupError] = useState(null)
-  // 업종/테마 등락률 1분 라이브 오버레이(PLAN.md §4.7, §5.5-2로 7분→1분 이동) —
-  // { type, rows: [{name, change_rate}], ... }. groupItems(EOD, value/market_sum
-  // 포함)와 이름 기준으로 병합해 트리맵 박스 크기는 유지하면서 색(등락률)만
-  // 갱신한다(아래 groupTreemapItems).
-  const [groupLive, setGroupLive] = useState(null)
-
-  // 업종 자금 흐름 관찰(PLAN.md §5.33) — GET /api/markets/{market}/sector-rotation
-  // 응답을 시장별로 담는다({kospi: {...}, kosdaq: {...}}). group_snapshot(위 트리맵)과
-  // 완전히 다른 소스(ka10051)·다른 업종 코드 체계라 groupItems와 병합하지 않고
-  // 독립 카드로 둔다(quant/sector_rotation.py 모듈 docstring "group_snapshot과는
-  // 별개 분류 체계" 참고). fetchShortSellingMarket과 동일하게 하루 1회 배치
-  // 산출물이라 마운트 시 1회만 불러온다(라이브 폴링 없음).
-  const [sectorRotation, setSectorRotation] = useState({})
-  const [sectorRotationMarket, setSectorRotationMarket] = useState('kospi')
-
-  const [flowRankTop, setFlowRankTop] = useState(null)
-  const [valueRankTop, setValueRankTop] = useState(null)
-  // 거래대금 상위 7분 라이브(PLAN.md §4.7) — 응답 스키마가 valueRankTop(EOD, market='all')과
-  // 동일해({date, rows}) 별도 병합 없이 그대로 대체해 쓴다(아래 렌더 시
-  // `!STATIC_DATA && valueRankLive ? valueRankLive : valueRankTop`).
-  const [valueRankLive, setValueRankLive] = useState(null)
-  const [flowPathTop, setFlowPathTop] = useState(null)
-  // ETF 비중 변화 상위(PLAN.md §5.25, 시장 전체 스크리닝) — code 없이 조회한
-  // GET /api/markets/etf-weight-changes 응답을 그대로 담는다({prev_date, curr_date,
-  // changes}). flowPathTop과 동일하게 하루 1회 배치(etf_holdings) 산출물이라 별도
-  // 라이브 폴링 티어에 넣지 않고 마운트 시 1회만 불러온다.
-  const [etfWeightChangesTop, setEtfWeightChangesTop] = useState(null)
-  // 실시간 관심 종목 TOP20(PLAN.md 사용자 지시, live-only) — API 응답 바디를 그대로
-  // 담는다({ rows, qry_tp, queried_at }). flowLive와 동일하게 정적 배포에서는 항상
-  // null로 남는다.
-  const [attentionTop, setAttentionTop] = useState(null)
-  // 스켈핑 후보(PLAN.md §5.2) — GET /api/markets/scalp-candidates 응답 바디를 그대로
-  // 담는다({ date, market_closed, cached_at, rows }). value-rank/live·attention 두
-  // 라이브 캐시를 조합한 참고용 스크리닝이라 정적 배포에서는 항상 null(다른 로컬
-  // 전용 기능과 동일한 관례).
-  const [scalpCandidates, setScalpCandidates] = useState(null)
-  // 스켈핑 후보 스크리너 적중률 사후 검증(PLAN.md §5.40) — GET
-  // /api/markets/scalp-candidates/hitrate 응답 바디를 그대로 담는다. scalp_pick은
-  // 하루에 몇 건씩만 늘어나는 데이터라(scalpCandidates처럼 60초~7분 단위로 값이
-  // 바뀌지 않음) 아래 1분/7분 폴링 티어에 넣지 않고 마운트 시 1회만 불러온다
-  // (fetchSentiment과 동일한 "마운트 1회" 패턴, api.js 참고).
-  const [scalpHitrate, setScalpHitrate] = useState(null)
-
-  // "지금 유입 우세" 판정(PLAN.md §5.15) — GET /api/markets/regime 응답 바디를
-  // 그대로 담는다({ regime, reason, reliable_signal, market_closed, kospi,
-  // kosdaq, cached_at }). scalpCandidates 등과 동일하게 로컬 전용 기능이라
-  // 정적 배포에서는 항상 null.
-  const [regime, setRegime] = useState(null)
-
-  // 종목 랭킹 요약 3개 카드(거래대금 상위/실시간 관심 TOP5/스켈핑 후보)의 시장
-  // 필터(PLAN.md §5.15-3) — 'all'|'kospi'|'kosdaq', 기본 전체. 수급 상위/ETF
-  // 경유 상위는 시장 구분이 뚜렷하지 않은 소스(수급 상위는 market이 일부만 채워짐,
-  // ETF 경유 상위는 애초에 market 필드가 없음)라 필터 대상에서 뺀다. 이름을
-  // FlowSummaryModal의 지역 marketFilter(합계/코스피/코스닥, §5.10)와 구분하기
-  // 위해 rankingMarketFilter로 부른다 — 서로 다른 컴포넌트 스코프라 충돌은
-  // 없지만 같은 파일 안에서 헷갈리지 않도록.
+  // 종목 랭킹 요약 3개 카드(거래대금 상위/실시간 관심 TOP5/스켈핑 후보)의 시장 필터(PLAN.md §5.15-3)
+  // — 'all'|'kospi'|'kosdaq', 기본 전체. 수급 상위/ETF 경유 상위는 시장 구분이 뚜렷하지 않은 소스라 필터 대상에서 뺐다.
   const [rankingMarketFilter, setRankingMarketFilter] = useState('all')
-
   const [modal, setModal] = useState(null) // { type, title, ...params } | null
 
-  // 지수 3종 — 타일(최신 종가/등락률) + 캔들 모달 기본 기간(90일) 데이터를 한 번에
-  // 담는다. 병렬 요청(Promise.all)이라 시장 하나가 느려도 나머지 타일은 먼저 뜬다.
-  useEffect(() => {
-    let cancelled = false
-    setMarketLoading(true)
-    Promise.all(MARKETS.map((m) => fetchMarketSeries(m.key, DEFAULT_CANDLE_DAYS).catch(() => null))).then(
-      (results) => {
-        if (cancelled) return
-        const next = {}
-        MARKETS.forEach((m, i) => {
-          next[m.key] = results[i] || { prices: [], flows: {} }
-        })
-        setMarketData(next)
-        setMarketLoading(false)
-      }
-    )
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  // ── 지수 3종: 타일 표시용 + 캔들 모달 기본 데이터를 겸한다(시장 탭과 같은 캐시 키). 시장별 병렬이라
+  // 하나가 늦어도 나머지 타일은 먼저 뜨고, 실패한 시장은 빈 시리즈로 둔다(기존 .catch(() => null) 동작).
+  const indexQueries = useIndexSeries(MARKETS, DEFAULT_CANDLE_DAYS)
+  const marketData = {}
+  MARKETS.forEach((m, i) => {
+    const q = indexQueries[i]
+    if (q.data) marketData[m.key] = q.data
+    else if (q.isError) marketData[m.key] = { prices: [], flows: {} }
+  })
+  const marketLoading = indexQueries.some((q) => q.isLoading)
 
-  useEffect(() => {
-    let cancelled = false
-    fetchSentiment()
-      .then((body) => {
-        if (!cancelled) setSentiment(body)
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  // 지수 3종 타일 1D 실시간(index-tiles/live, 60초) — 실패 시 null이면 렌더가 marketData(3M EOD) 마지막 봉으로 폴백한다.
+  const indexTilesQ = useIndexTilesLive()
+  const indexTilesLive = resetOnError(indexTilesQ)
 
-  // 스켈핑 후보 적중률(PLAN.md §5.40) — scalp_pick이 하루에 몇 건씩만 늘어나는
-  // 데이터라(scalpCandidates처럼 60초~7분 단위로 값이 바뀌지 않음) 폴링 없이
-  // 마운트 시 1회만 불러온다(위 fetchSentiment과 동일한 패턴). STATIC_DATA
-  // 정적 배포에서는 로컬 전용 기능이라 호출하지 않는다(scalpCandidates와 동일 이유).
-  useEffect(() => {
-    if (STATIC_DATA) return
-    let cancelled = false
-    fetchScalpHitrate()
-      .then((body) => {
-        if (!cancelled) setScalpHitrate(body)
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  const sentimentQ = useSentiment()
+  const sentiment = sentimentQ.data ?? null
+  // 등락 종목수 — 60초 폴링(live 우선, 실패 시 일별 확정치 폴백은 queryFn 안에서)
+  const breadthQ = useBreadth(BREADTH_LIVE_POLL_MS)
+  const breadth = breadthQ.data ?? null
 
-  // 1분 티어 폴링 통합 — breadth(등락 종목수)·flowLive(장중 잠정 수급)·attentionTop
-  // (실시간 관심 TOP20)·scalpCandidates(스켈핑 후보)는 전부 백엔드 60초 캐시라
-  // 원래 4개의 독립된 setInterval로 따로 돌았다(폴링 시점이 서로 어긋나 있었을 뿐
-  // 실질적 차이는 없었다). 하나의 useEffect/setInterval로 묶어 Promise.all로 한
-  // 번에 실행한다 — 백엔드는 엔드포인트별 TTL 캐시를 그대로 쓰므로 서버 부하는
-  // 그대로고, 프런트 쪽 타이머 개수만 준다. breadth는 fetchBreadthLive() 내부에서
-  // STATIC_DATA를 이미 처리하므로(정적 스냅샷 폴백) 이 효과 전체에는 STATIC_DATA
-  // 가드를 두지 않고, 나머지는 개별적으로 가드한다.
-  //
-  // groupLive(업종/테마 등락률)·basisLive(베이시스)·futuresFlowLive(외인 선물수급)도
-  // 2026-07-21(§5.5-2)부터 이 1분 티어에 합류했다 — 원래 value-rank와 같은 7분
-  // 티어에 있었지만 실측 결과(PLAN.md §5.5 진단②) 이 셋은 그룹 목록/단일 조회
-  // 1회뿐인 가벼운 호출이라 "단순함을 위해" 묶여 있었을 뿐 1분으로 당겨도 백엔드
-  // 비용이 늘지 않는다(비싼 건 코스피+코스닥 전 종목 페이지네이션인 value-rank
-  // 하나뿐 — 아래 7분 티어에 그대로 남긴다). groupLive는 groupType(업종/테마 탭)에
-  // 의존하므로 이 effect의 dependency에도 groupType을 추가했다 — 탭이 바뀌면 나머지
-  // (breadth·flowLive 등)도 함께 재요청되지만 전부 자기 완결적인 서버 TTL 캐시라
-  // 무해하다(기존 7분 티어가 groupType 의존일 때와 동일한 트레이드오프).
-  useEffect(() => {
-    let cancelled = false
-    const toCamel = (row) =>
-      row
-        ? {
-            adv: row.adv,
-            dec: row.dec,
-            flat: row.flat,
-            limitUp: row.limit_up ?? row.limitUp,
-            limitDown: row.limit_down ?? row.limitDown,
-          }
-        : null
+  // 장중 잠정 수급(PLAN.md §6 3.7-3) — null이면 "라이브 없음"이라 타일은 기존 확정치로 폴백한다.
+  const flowLive = resetOnError(useFlowLive())
+  // 장중 외인 매도 일관성(Phase 5.113)·코스피 등락 분해(5.116) — 실패 시 마지막 값 유지
+  const flowConsistencyQ = useFlowConsistency()
+  const flowConsistency = flowConsistencyQ.data ?? null
+  const nqComovementQ = useNqComovement()
+  const nqComovement = nqComovementQ.data ?? null
 
-    async function loadBreadth() {
-      try {
-        const body = await fetchBreadthLive()
-        if (cancelled) return
-        setBreadth({ kospi: toCamel(body.kospi), kosdaq: toCamel(body.kosdaq) })
-        return
-      } catch {
-        // 폴백으로 진행
-      }
-      try {
-        const [kospiBody, kosdaqBody] = await Promise.all([
-          fetchBreadth('kospi', 30).catch(() => null),
-          fetchBreadth('kosdaq', 30).catch(() => null),
-        ])
-        if (cancelled) return
-        const last = (body) => {
-          const series = body?.series
-          return series && series.length > 0 ? series[series.length - 1] : null
-        }
-        setBreadth({ kospi: toCamel(last(kospiBody)), kosdaq: toCamel(last(kosdaqBody)) })
-      } catch {
-        // 배지는 데이터 없음 상태로 자연히 표시된다.
-      }
-    }
 
-    function loadFlowLive() {
-      return fetchFlowLive()
-        .then((body) => {
-          if (!cancelled) setFlowLive(body)
-        })
-        .catch(() => {
-          if (!cancelled) setFlowLive(null)
-        })
-    }
+  const fundQ = useMacroFundSeries(MARKET_FUND_IDS, 10)
+  const fundSeries = fundQ.data?.series || {}
+  // 시장 전체 공매도(PLAN.md §5.32) — 거래대금 비중 최신값 + 전일비용 며칠치
+  const shortQ = useShortSellingBoth(10)
+  const shortSellingSeries = shortQ.data || {}
+  // 환율·WTI·미국 지수·VIX 타일 계산용(모달은 자기 기간을 따로 조회)
+  const macroQ = useMacroFundSeries(MACRO_TILE_IDS, MACRO_TILE_DAYS)
+  const macroSeries = macroQ.data?.series || {}
 
-    function loadFlowConsistency() {
-      return fetchFlowConsistency()
-        .then((body) => {
-          if (!cancelled) setFlowConsistency(body)
-        })
-        .catch(() => {}) // 실패 시 마지막 값 유지
-    }
+  // 외인 양손 · 현선물(PLAN.md §4.5-5) — 베이시스/만기, 만기 사이클 누적(5.100), 파생ETF 방향성, 프로그램 차익/비차익
+  const basisQ = useBasisSeries(FOREIGN_POSITION_TILE_DAYS)
+  const basisData = basisQ.data ?? null
+  const expiryQ = useExpiryCumulative(6)
+  const expiryCum = expiryQ.data ?? null
+  const derivativeQ = useDerivativeFlow(FOREIGN_POSITION_TILE_DAYS)
+  const derivativeFlow = derivativeQ.data ?? null
+  const programQ = useMacroFundSeries(PROGRAM_IDS, FOREIGN_POSITION_TILE_DAYS)
+  const programFlow = programQ.data?.series || {}
+  // 타일 격자가 로딩 중에도 로드 후 높이를 차지하도록(CSS .kpi-grid-sk-*) 마운트 시 한 번만 조회되는 소스들의 로딩 여부
+  const foreignGridLoading = marketLoading || basisQ.isLoading || derivativeQ.isLoading || programQ.isLoading || expiryQ.isLoading
 
-    function loadNqComovement() {
-      return fetchNqComovement()
-        .then((body) => {
-          if (!cancelled) setNqComovement(body)
-        })
-        .catch(() => {}) // 실패 시 마지막 값 유지
-    }
+  // 베이시스·외인 선물수급·환율 1분 라이브 오버레이(§4.7, §5.5-2/3) — 실패 시 null로 두면 EOD 값으로 폴백한다.
+  const basisLive = resetOnError(useBasisLive())
+  const futuresFlowLive = resetOnError(useFuturesFlowLive())
+  const fxLive = resetOnError(useFxLive())
 
-    function loadAttentionTop() {
-      return fetchAttention()
-        .then((body) => {
-          if (!cancelled) setAttentionTop(body)
-        })
-        .catch(() => {
-          if (!cancelled) setAttentionTop(null)
-        })
-    }
+  // 업종/테마: EOD(트리맵 박스 크기) + 1분 라이브 등락률(색). 유형을 바꾸면 이전 유형 데이터를 잠시 들고 있으므로
+  // 그 동안은 로딩으로 취급해 다른 유형의 박스가 새 유형 제목 아래 뜨지 않게 한다(기존 동작과 동일).
+  const groupsQ = useGroups(groupType)
+  const groupItems = groupsQ.data || []
+  const groupLoading = groupsQ.isLoading || groupsQ.isPlaceholderData
+  const groupError = errorText(groupsQ)
+  const groupLive = resetOnError(useGroupsLive(groupType))
 
-    function loadScalpCandidates() {
-      // PLAN.md §5.15-3 시장 필터 — Top5Card는 어차피 rows.slice(0,5)만 렌더하지만,
-      // 필터가 코스피/코스닥 한쪽으로 좁혀지면 상위 5개 중 그 시장 종목이 5개 미만일
-      // 수 있다. limit을 20으로 넉넉히 받아와 필터 후에도 5개를 채울 여유를 둔다
-      // (기존 5 -> 20, 백엔드는 이미 캐시된 value-rank/live·attention 조합을
-      // 스코어링만 다시 하는 거라 비용 증가 없음, 최대 50까지 허용됨).
-      return fetchScalpCandidates(20)
-        .then((body) => {
-          if (!cancelled) setScalpCandidates(body)
-        })
-        .catch(() => {
-          if (!cancelled) setScalpCandidates(null)
-        })
-    }
+  const sectorQ = useSectorRotationBoth()
+  const sectorRotation = sectorQ.data || {}
 
-    // "지금 유입 우세" 판정(PLAN.md §5.15) — 백엔드가 이미 60초 캐시라 이 1분
-    // 티어에 그대로 합류한다(별도 setInterval 신설 금지).
-    function loadRegime() {
-      return fetchRegime()
-        .then((body) => {
-          if (!cancelled) setRegime(body)
-        })
-        .catch(() => {
-          if (!cancelled) setRegime(null)
-        })
-    }
-
-    // 지수 3종 타일 1D 실시간(PLAN.md 작업 지시, 2026-07-21) — 기존 1분 티어에
-    // 편입(별도 setInterval 신설 금지). 실패 시 null로 두면 렌더 쪽이 자동으로
-    // marketData(3M EOD)의 마지막 봉으로 폴백한다(아래 렌더부 indexTileOf 참고).
-    function loadIndexTilesLive() {
-      return fetchIndexTilesLive()
-        .then((body) => {
-          if (!cancelled) setIndexTilesLive(body)
-        })
-        .catch(() => {
-          if (!cancelled) setIndexTilesLive(null)
-        })
-    }
-
-    // §5.5-2로 7분 티어에서 이 1분 티어로 옮겨온 3개(가벼운 소스만 — value-rank는
-    // 7분 티어에 그대로 남음, 근거는 위 주석 참고).
-    function loadGroupLive() {
-      return fetchGroupsLive(groupType)
-        .then((body) => {
-          if (!cancelled) setGroupLive(body)
-        })
-        .catch(() => {
-          if (!cancelled) setGroupLive(null)
-        })
-    }
-
-    function loadBasisLive() {
-      return fetchBasisLive()
-        .then((body) => {
-          if (!cancelled) setBasisLive(body)
-        })
-        .catch(() => {
-          if (!cancelled) setBasisLive(null)
-        })
-    }
-
-    function loadFuturesFlowLive() {
-      return fetchFuturesFlowLive()
-        .then((body) => {
-          if (!cancelled) setFuturesFlowLive(body)
-        })
-        .catch(() => {
-          if (!cancelled) setFuturesFlowLive(null)
-        })
-    }
-
-    // §5.5-3 — 환율도 위 groupLive/basisLive/futuresFlowLive와 같은 1분 티어에
-    // 합류한다(백엔드 fx/live 60초 캐시와 맞춤).
-    function loadFxLive() {
-      return fetchFxLive()
-        .then((body) => {
-          if (!cancelled) setFxLive(body)
-        })
-        .catch(() => {
-          if (!cancelled) setFxLive(null)
-        })
-    }
-
-    function load() {
-      const tasks = [loadBreadth()]
-      if (!STATIC_DATA) {
-        tasks.push(
-          loadFlowLive(),
-          loadFlowConsistency(),
-          loadNqComovement(),
-          loadAttentionTop(),
-          loadScalpCandidates(),
-          loadIndexTilesLive(),
-          loadGroupLive(),
-          loadBasisLive(),
-          loadFuturesFlowLive(),
-          loadFxLive(),
-          loadRegime()
-        )
-      }
-      return Promise.all(tasks)
-    }
-
-    load()
-    const intervalId = setInterval(load, BREADTH_LIVE_POLL_MS)
-    return () => {
-      cancelled = true
-      clearInterval(intervalId)
-    }
-  }, [groupType])
-
-  useEffect(() => {
-    let cancelled = false
-    fetchMacroSeries(MARKET_FUND_IDS, 10)
-      .then((body) => {
-        if (!cancelled) setFundSeries(body.series || {})
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  useEffect(() => {
-    let cancelled = false
-    Promise.all([fetchShortSellingMarket('kospi', 10), fetchShortSellingMarket('kosdaq', 10)])
-      .then(([kospiBody, kosdaqBody]) => {
-        if (!cancelled) {
-          setShortSellingSeries({ kospi: kospiBody.series || [], kosdaq: kosdaqBody.series || [] })
-        }
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  useEffect(() => {
-    let cancelled = false
-    Promise.all([fetchSectorRotation('kospi'), fetchSectorRotation('kosdaq')])
-      .then(([kospiBody, kosdaqBody]) => {
-        if (!cancelled) setSectorRotation({ kospi: kospiBody, kosdaq: kosdaqBody })
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  useEffect(() => {
-    let cancelled = false
-    fetchMacroSeries(
-      [...MACRO_SERIES.map((s) => s.id), ...US_INDEX_SERIES.map((s) => s.id), VIX_SERIES.id],
-      MACRO_TILE_DAYS
-    )
-      .then((body) => {
-        if (!cancelled) setMacroSeries(body.series || {})
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  // 베이시스 + 다음 만기(PLAN.md §4.5-3/-5) — 짧은 창(타일용)이면 충분하지만, 최근
-  // 며칠치가 있어야 "직전 값과 비교" 없이도(베이시스는 전일비 화살표를 두지 않는다)
-  // 최소한 latest가 안정적으로 채워진다.
-  useEffect(() => {
-    let cancelled = false
-    fetchBasis(FOREIGN_POSITION_TILE_DAYS)
-      .then((body) => {
-        if (!cancelled) setBasisData(body)
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  // 만기 사이클 누적 수급(Phase 5.100) — 정적 배포에는 스냅샷이 없어 호출하지 않는다.
-  useEffect(() => {
-    if (STATIC_DATA) return undefined
-    let cancelled = false
-    fetchExpiryCumulative(6)
-      .then((body) => {
-        if (!cancelled) setExpiryCum(body)
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  // 개인 방향성(파생ETF, PLAN.md §4.5-1) 타일 최신값 — 상세는 DerivativeEtfModal이
-  // 별도로(90일) 다시 불러온다.
-  useEffect(() => {
-    let cancelled = false
-    fetchDerivativeFlow(FOREIGN_POSITION_TILE_DAYS)
-      .then((body) => {
-        if (!cancelled) setDerivativeFlow(body)
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  // 프로그램매매 차익/비차익 순매수(PLAN.md §4.5-4, §5.29-1) — 코스피+코스닥 두
-  // 시리즈씩(차익 2개 + 비차익 2개) 신용융자 타일(creditLoanSum)과 동일하게 합산해서
-  // 보여준다. 비차익은 이미 DB에 매일 수집되던 데이터라 새 네트워크 호출을 늘리지
-  // 않고 같은 fetchMacroSeries 호출의 ids 목록에 얹어 한 번에 받아온다.
-  useEffect(() => {
-    let cancelled = false
-    fetchMacroSeries([...PROGRAM_ARB_IDS, ...PROGRAM_NONARB_IDS], FOREIGN_POSITION_TILE_DAYS)
-      .then((body) => {
-        if (!cancelled) setProgramFlow(body.series || {})
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  useEffect(() => {
-    let cancelled = false
-    setGroupLoading(true)
-    setGroupError(null)
-    fetchGroups(groupType)
-      .then((items) => {
-        if (!cancelled) setGroupItems(items || [])
-      })
-      .catch((e) => {
-        if (!cancelled) setGroupError(e.message)
-      })
-      .finally(() => {
-        if (!cancelled) setGroupLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [groupType])
-
-  useEffect(() => {
-    let cancelled = false
-    setFlowRankTop(null)
-    fetchFlowRank(flowRankInvestor, flowRankSide, FLOW_RANK_LOOKBACK_DAYS)
-      .then((body) => {
-        if (!cancelled) setFlowRankTop((body.dates && body.dates[0]) || null)
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [flowRankInvestor, flowRankSide])
-
-  useEffect(() => {
-    let cancelled = false
-    fetchValueRank('all', FLOW_RANK_LOOKBACK_DAYS)
-      .then((body) => {
-        if (!cancelled) setValueRankTop(body)
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  useEffect(() => {
-    let cancelled = false
-    fetchFlowPath(FLOW_RANK_LOOKBACK_DAYS, 5, 'in')
-      .then((body) => {
-        if (!cancelled) setFlowPathTop(body)
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  useEffect(() => {
-    let cancelled = false
-    fetchEtfWeightChanges({ limit: 5 })
-      .then((body) => {
-        if (!cancelled) setEtfWeightChangesTop(body)
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  // 7분 티어(PLAN.md §4.7, 2026-07-20 장중 실측 편입) — value-rank(거래대금 상위)만
-  // 남았다. 2026-07-21(§5.5-2)에 groupLive/basisLive/futuresFlowLive를 위 1분 티어로
-  // 옮겼다 — 실측 결과(§4.7-1) 4개 소스 모두 값이 장중에 갱신되는 건 맞지만, 그중
-  // 코스피+코스닥 전 종목(~4,300종목) 페이지네이션이 필요한 value-rank만 진짜
-  // 비싸고(사이클당 ~44요청·13초+) groups/basis/futures-flow는 목록·단일 조회 1회뿐이라
-  // "단순함을 위해" 같은 티어에 묶여 있었을 뿐이었다(진단 근거는 PLAN.md §5.5
-  // 진단②). 실패 시 조용히 null로 두고 카드/타일이 EOD 폴백을 자연히 보여주게 둔다.
-  useEffect(() => {
-    if (STATIC_DATA) return undefined
-    let cancelled = false
-
-    function loadValueRankLive() {
-      return fetchValueRankLive()
-        .then((body) => {
-          if (!cancelled) setValueRankLive(body)
-        })
-        .catch(() => {
-          if (!cancelled) setValueRankLive(null)
-        })
-    }
-
-    function load() {
-      return loadValueRankLive()
-    }
-
-    load()
-    const intervalId = setInterval(load, EXTRA_LIVE_POLL_MS)
-    return () => {
-      cancelled = true
-      clearInterval(intervalId)
-    }
-  }, [])
+  // 수급 상위(EOD) — 토글 직후 이전 선택의 행이 새 라벨 아래 보이지 않도록 placeholder 동안은 비운다(기존: 토글 때 null 초기화).
+  const flowRankQ = useFlowRank(flowRankInvestor, flowRankSide, FLOW_RANK_LOOKBACK_DAYS)
+  const flowRankTop = flowRankQ.isPlaceholderData ? null : flowRankQ.data?.dates?.[0] || null
+  const flowRankLoading = flowRankQ.isLoading || flowRankQ.isPlaceholderData
+  const valueRankQ = useValueRankEod('all', FLOW_RANK_LOOKBACK_DAYS)
+  const valueRankTop = valueRankQ.data ?? null
+  // 거래대금 상위 7분 라이브(§4.7) — 응답 스키마가 valueRankTop과 같아 그대로 대체해 쓴다
+  const valueRankLiveQ = useValueRankLive()
+  const valueRankLive = resetOnError(valueRankLiveQ)
+  const flowPathQ = useFlowPath(FLOW_RANK_LOOKBACK_DAYS, 5, 'in')
+  const flowPathTop = flowPathQ.data ?? null
+  // ETF 비중 변화 상위(§5.25, 하루 1회 배치)
+  const etfWeightQ = useEtfWeightChangesTop(5)
+  const etfWeightChangesTop = etfWeightQ.data ?? null
+  // 실시간 관심 TOP20(live-only)·스켈핑 후보(§5.2)·적중률(§5.40, 폴링 없음) — 실패 시 null
+  const attentionQ = useAttention()
+  const attentionTop = resetOnError(attentionQ)
+  const scalpQ = useScalpCandidates(20)
+  const scalpCandidates = resetOnError(scalpQ)
+  const scalpHitrate = useScalpHitrate().data ?? null
+  const marketGridLoading = fundQ.isLoading || macroQ.isLoading || sentimentQ.isLoading || breadthQ.isLoading || shortQ.isLoading
+  // 장 상태(정규장/NXT/마감)는 index-tiles/live·attention 응답으로 판정한다 — 둘 다 도착하기 전엔 배너를 정하지 않고 자리만 잡는다.
+  const statusLoading = indexTilesQ.isLoading || attentionQ.isLoading
+  // "지금 유입 우세" 판정(§5.15) — 시장 탭과 같은 캐시. 여기서는 수급 집중도 기준치(activity_baseline)에만 쓴다.
+  const regime = resetOnError(useRegime())
 
   const closeModal = () => setModal(null)
 
@@ -1233,6 +757,8 @@ export default function DashboardPage({ onNavigate }) {
   // 마감 후에도 EOD 스냅샷이 라이브보다 낡았으면(배치 지연/실패) 라이브를 쓴다(Phase 5.119).
   const effectiveValueRank =
     !STATIC_DATA && shouldUseValueRankLive(valueRankLive, valueRankTop?.date) ? valueRankLive : valueRankTop
+  // 거래대금 상위 데이터가 아직 하나도 없고(EOD·라이브 모두 조회 중) 기다리는 동안 — 히트맵·카드가 자리를 잡는다.
+  const heatmapLoading = !effectiveValueRank && (valueRankQ.isLoading || valueRankLiveQ.isLoading)
 
   return (
     <div className="dashboard-page m-font">
@@ -1278,13 +804,18 @@ export default function DashboardPage({ onNavigate }) {
       {/* 장 상태 배너(PLAN.md §5.9) — 정규장 중엔 렌더하지 않는다(가장 흔한 상태라
           배너로 화면을 어지럽히지 않는다). 정적 배포(STATIC_DATA)는 라이브 폴링이
           없어 판정 근거가 없으므로 아예 숨긴다(다른 라이브 전용 UI와 동일한 관례). */}
-      {!STATIC_DATA && marketStatus === 'nxt-only' && (
+      {!STATIC_DATA && statusLoading && (
+        <div className="banner sk-banner" aria-hidden="true">
+          장 마감 — 모든 지표가 최근 확정치입니다.
+        </div>
+      )}
+      {!STATIC_DATA && !statusLoading && marketStatus === 'nxt-only' && (
         <div className="banner">
           NXT 확장세션 — 실시간 관심 TOP5 등 개별 종목만 갱신 중이며, 지수·수급·업종·테마
           등은 정규장(09:00~15:30) 확정치입니다.
         </div>
       )}
-      {!STATIC_DATA && marketStatus === 'closed' && (
+      {!STATIC_DATA && !statusLoading && marketStatus === 'closed' && (
         <div className="banner">장 마감 — 모든 지표가 최근 확정치입니다.</div>
       )}
 
@@ -1298,7 +829,7 @@ export default function DashboardPage({ onNavigate }) {
 
       {/* 1. 지수 3종 */}
       <div className="section-title mt-title">지수</div>
-      <div className="mt-row">
+      <div className="mt-row mt-row-index">
         {MARKETS.map((m) => {
           const latest = indexTileOf(m.key)
           const liveTime =
@@ -1357,7 +888,7 @@ export default function DashboardPage({ onNavigate }) {
       />
 
       {/* 2.3 코스피–나스닥 선물 동조도(PLAN.md Phase 5.116) — 참고용, 정적 배포에서는 숨김 */}
-      {!STATIC_DATA && <NqComovementCard data={nqComovement} loading={nqComovement === null && marketLoading} />}
+      {!STATIC_DATA && <NqComovementCard data={nqComovement} loading={nqComovement === null && nqComovementQ.isLoading} />}
 
       {/* 2.5 외인 양손 · 현선물 (PLAN.md §4.5-5) — 중립적 상태 계기판, "함정" 단정 표현
           금지(§4.5 배경). 시그널 배지는 있을 때만 렌더되고, 클릭하면 전부 같은 상세
@@ -1378,7 +909,7 @@ export default function DashboardPage({ onNavigate }) {
           ))}
         </div>
       )}
-      <div className="kpi-grid">
+      <div className={`kpi-grid${foreignGridLoading ? ' kpi-grid-sk-fx' : ''}`}>
         <KpiTile
           label="외인 현물"
           value={
@@ -1608,7 +1139,7 @@ export default function DashboardPage({ onNavigate }) {
 
       {/* 3. 시황 · 자금 */}
       <div className="section-title">시황 · 자금</div>
-      <div className="kpi-grid">
+      <div className={`kpi-grid${marketGridLoading ? ' kpi-grid-sk-mkt' : ''}`}>
         <KpiTile
           label="매수세 게이지"
           value={scoreLabel(sentiment?.score)}
@@ -1840,7 +1371,7 @@ export default function DashboardPage({ onNavigate }) {
           {groupLiveActive ? (groupLiveOpen ? '박스 크기 = 일별 거래대금 · 색(등락률) 1분 갱신 · 장중' : '박스 크기 = 일별 거래대금 · 색(등락률) 오늘 종가') : '일별 스냅샷 · 색 = 등락률'}
         </span>
       </div>
-      {groupLoading && <div className="state">불러오는 중…</div>}
+      {groupLoading && <SkeletonBlock variant="dtreemap" label="업종·테마 불러오는 중" />}
       {groupError && <div className="state error">{groupError}</div>}
       {!groupLoading && !groupError && (
         <GroupTreemap
@@ -1875,19 +1406,27 @@ export default function DashboardPage({ onNavigate }) {
       >
         <div>
           <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>코스피 상위 종목</div>
-          <StockHeatmap
-            items={(filterRowsByMarket(effectiveValueRank?.rows, 'kospi') || []).filter((r) => !r.is_etf).slice(0, 20)}
-            minCellWidth={80}
-            onCellClick={STATIC_DATA ? undefined : (code, name) => openStockModal(code, name)}
-          />
+          {heatmapLoading ? (
+            <SkeletonBlock variant="dheat" label="상위 종목 불러오는 중" />
+          ) : (
+            <StockHeatmap
+              items={(filterRowsByMarket(effectiveValueRank?.rows, 'kospi') || []).filter((r) => !r.is_etf).slice(0, 20)}
+              minCellWidth={80}
+              onCellClick={STATIC_DATA ? undefined : (code, name) => openStockModal(code, name)}
+            />
+          )}
         </div>
         <div>
           <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>코스닥 상위 종목</div>
-          <StockHeatmap
-            items={(filterRowsByMarket(effectiveValueRank?.rows, 'kosdaq') || []).filter((r) => !r.is_etf).slice(0, 20)}
-            minCellWidth={80}
-            onCellClick={STATIC_DATA ? undefined : (code, name) => openStockModal(code, name)}
-          />
+          {heatmapLoading ? (
+            <SkeletonBlock variant="dheat" label="상위 종목 불러오는 중" />
+          ) : (
+            <StockHeatmap
+              items={(filterRowsByMarket(effectiveValueRank?.rows, 'kosdaq') || []).filter((r) => !r.is_etf).slice(0, 20)}
+              minCellWidth={80}
+              onCellClick={STATIC_DATA ? undefined : (code, name) => openStockModal(code, name)}
+            />
+          )}
         </div>
       </div>
 
@@ -1912,7 +1451,7 @@ export default function DashboardPage({ onNavigate }) {
         ))}
         <span className="toggle-hint">일 1회 배치 · 외국인+기관계 합산 · 업종 자신의 평소(최대 20거래일) 대비 배율</span>
       </div>
-      <SectorRotationCard data={sectorRotation[sectorRotationMarket]} />
+      <SectorRotationCard data={sectorRotation[sectorRotationMarket]} loading={sectorQ.isLoading} />
 
       {/* 5. TOP5 요약 3열 — "…기준" 라벨은 대표 기준일(baseDate)과 같으면 생략, 다르면
           MM-DD만 붙인다(staleHintLabel, 대시보드 상단 표시와 동일 규칙). 정확한 날짜는
@@ -1972,6 +1511,7 @@ export default function DashboardPage({ onNavigate }) {
             </>
           }
           hoverDate={flowRankTop?.date ? formatDate(flowRankTop.date) : undefined}
+          loading={flowRankLoading}
           rows={flowRankTop?.rows}
           onMore={() => setModal({ type: 'flowRank', title: '수급 상위 — 전체' })}
           renderRow={(row) => (
@@ -2005,6 +1545,7 @@ export default function DashboardPage({ onNavigate }) {
                 : undefined
           }
           hoverDate={effectiveValueRank?.date ? formatDate(effectiveValueRank.date) : undefined}
+          loading={heatmapLoading}
           rows={filterRowsByMarket(effectiveValueRank?.rows, rankingMarketFilter)}
           onMore={() => setModal({ type: 'valueRank', title: '거래대금 상위 — 전체' })}
           renderRow={(row) => (
@@ -2045,6 +1586,7 @@ export default function DashboardPage({ onNavigate }) {
             </span>
           }
           hoverDate={flowPathTop?.date ? formatDate(flowPathTop.date) : undefined}
+          loading={flowPathQ.isLoading}
           rows={flowPathTop?.rows}
           onMore={() => setModal({ type: 'flowPath', title: 'ETF 경유 수급 상위 — 전체' })}
           renderRow={(row, i) => (
@@ -2073,6 +1615,7 @@ export default function DashboardPage({ onNavigate }) {
             </span>
           }
           hoverDate={etfWeightChangesTop?.curr_date ? formatDate(etfWeightChangesTop.curr_date) : undefined}
+          loading={etfWeightQ.isLoading}
           rows={etfWeightChangesTop?.changes}
           onMore={() => setModal({ type: 'etfWeightChanges', title: 'ETF 비중 변화 상위 — 전체' })}
           renderRow={(row, i) => (
@@ -2102,6 +1645,7 @@ export default function DashboardPage({ onNavigate }) {
         <Top5Card
           title="실시간 관심 TOP5"
           hint="조회수 기준 · 60초 갱신"
+          loading={attentionQ.isLoading}
           rows={filterRowsByMarket(attentionTop?.rows, rankingMarketFilter)}
           onMore={() => setModal({ type: 'attention', title: '실시간 관심 종목 — 전체' })}
           renderRow={(row) => (
@@ -2135,6 +1679,7 @@ export default function DashboardPage({ onNavigate }) {
           title="스켈핑 후보"
           hint="참고용 스크리닝 — 매매 신호 아님 · 7분 갱신(관심 TOP 배지만 1분)"
           footnote={scalpHitrateFootnote(scalpHitrate)}
+          loading={scalpQ.isLoading}
           rows={filterRowsByMarket(scalpCandidates?.rows, rankingMarketFilter)}
           onMore={() => setModal({ type: 'scalp', title: '스켈핑 후보 — 전체' })}
           renderRow={(row, i) => (

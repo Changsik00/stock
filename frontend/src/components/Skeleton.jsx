@@ -3,14 +3,15 @@
 // 색·움직임은 공용 .mt-skel(펄스, prefers-reduced-motion에서 정지)을 그대로 쓴다.
 
 // 단일 블록. variant = 'chart' | 'flow' | 'breadth' | 'gauge' | 'treemap' | 'fund' | 'regime'
+//   대시보드용(2단계): 'dtreemap'(업종·테마 트리맵) | 'dheat'(상위 종목 히트맵) | 'dsector'(업종 자금 흐름 카드)
 export function SkeletonBlock({ variant = 'chart', label = '불러오는 중' }) {
   return <div className={`mt-skel sk-block sk-${variant}`} role="status" aria-busy="true" aria-label={label} />
 }
 
-// 표 로딩 — 상위 10행 높이(헤더 + 10행)를 차지한다.
-export function SkeletonRows({ rows = 10, label = '불러오는 중' }) {
+// 표 로딩 — 상위 10행 높이(헤더 + 10행)를 차지한다. variant로 표마다 실제 높이에 맞춘다(예: 'flowpath').
+export function SkeletonRows({ rows = 10, label = '불러오는 중', variant }) {
   return (
-    <div className="flow-rank-card sk-rows" role="status" aria-busy="true" aria-label={label}>
+    <div className={`flow-rank-card sk-rows${variant ? ` sk-rows-${variant}` : ''}`} role="status" aria-busy="true" aria-label={label}>
       {Array.from({ length: rows }, (_, i) => (
         <span key={i} className="mt-skel sk-row" aria-hidden="true" />
       ))}

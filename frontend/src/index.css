@@ -2109,10 +2109,35 @@ header h1 {
 .sk-regime { height: 464px; }
 .sk-rows { display: flex; flex-direction: column; gap: var(--sp-2); height: 404px; padding: var(--sp-3); box-sizing: border-box; overflow: hidden; }
 .sk-row { flex: 0 0 auto; height: 32px; width: 100%; }
+/* ETF 경유 수급 표(5.132 2단계): 기여 ETF 배지 줄바꿈 때문에 10행 높이가 크다(실측 390px 2402 / 1280px 878) — 행을 균등 분할해 채운다 */
+.sk-rows-flowpath { height: 2402px; }
+.sk-rows-flowpath .sk-row { flex: 1 1 0; height: auto; }
+/* 대시보드 스켈레톤(5.132 2단계) — 로드 후 높이 실측(390 / 1280px) */
+.sk-dtreemap { height: 244px; }
+.sk-dheat { height: 296px; }
+.sk-dsector { height: 213px; }
+.sk-banner { visibility: hidden; } /* 장 상태 배너 자리 — 정규장이면 접히고, 마감/NXT면 그대로 배너가 채운다 */
+.sk-top5 { padding: 3px 0 0; }
+.sk-top5-row { height: 15px; margin-bottom: 10px; }
+.ifs-skel { width: 220px; height: 14px; } /* 390px에서는 제목 아래 줄로 내려가(두 줄 머리) 실제 요약 문구와 같은 높이 */
+/* 지수·수급 타일 행: 로딩 타일이 로드 후 높이를 차지한다(MetricTile aria-busy) */
+.mt-row-index > .mt[aria-busy='true'] { min-height: 112px; }
+.mt-row-flow > .mt[aria-busy='true'] { min-height: 241px; }
+/* KPI 타일 격자: 로딩 중에도 로드 후 격자 높이에 맞춘다(행 높이 평균, 2열/5열) */
+.kpi-grid-sk-fx .kpi-tile { min-height: 100px; }
+.kpi-grid-sk-mkt .kpi-tile { min-height: 100px; }
 .pm-card[aria-busy='true'] { min-height: 495px; }
 .vr-card[aria-busy='true'] { min-height: 382px; }
 .vr-card.fa-skel { min-height: 392px; }
 @media (min-width: 640px) {
+  .sk-rows-flowpath { height: 878px; }
+  .sk-dheat { height: 236px; }
+  .sk-dsector { height: 186px; }
+  .ifs-skel { width: 140px; }
+  .mt-row-index > .mt[aria-busy='true'] { min-height: 93px; }
+  .mt-row-flow > .mt[aria-busy='true'] { min-height: 222px; }
+  .kpi-grid-sk-fx .kpi-tile { min-height: 120px; }
+  .kpi-grid-sk-mkt .kpi-tile { min-height: 107px; }
   .sk-flow { height: 490px; }
   .sk-gauge { height: 284px; }
   .sk-regime { height: 265px; }

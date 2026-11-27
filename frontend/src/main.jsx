@@ -12,7 +12,8 @@ const queryClient = new QueryClient({
     queries: {
       staleTime: 60_000,
       gcTime: 30 * 60_000,
-      refetchOnWindowFocus: false,
+      // 백그라운드 탭에선 refetchInterval이 멈추므로, 돌아왔을 때 staleTime(60초)이 지난 쿼리만 즉시 다시 받는다.
+      refetchOnWindowFocus: true,
       retry: 1,
     },
   },

@@ -1,4 +1,5 @@
 import { formatDate } from '../../format'
+import { SkeletonBlock } from '../Skeleton'
 
 export const numFmt = new Intl.NumberFormat('ko-KR')
 
@@ -454,9 +455,14 @@ export function Top5RowTile({ clickable, onClick, children }) {
 // quant/sector_rotation.py가 "로테이션 있다/없다"를 판정하지 않는 것과 동일하게
 // 이 컴포넌트도 "배율"/"유입·유출 합계" 숫자만 그대로 노출할 뿐 매매 판단이나
 // 판정 문구를 붙이지 않는다(예: "매수"/"매도"/"로테이션 있음" 금지, house rule).
-export function SectorRotationCard({ data }) {
+export function SectorRotationCard({ data, loading = false }) {
   if (!data) {
-    return <div className="state">불러오는 중…</div>
+    // 로딩 중엔 로드 후 카드 높이(.sk-dsector)를 미리 잡는다(Phase 5.132). 조회 실패 등 로딩이 아닌 경우는 기존 문구 그대로.
+    return loading ? (
+      <SkeletonBlock variant="dsector" label="업종 자금 흐름 불러오는 중" />
+    ) : (
+      <div className="state">불러오는 중…</div>
+    )
   }
   if (!data.date) {
     // 표본 부족(sector_flow 이력이 짧음) — 에러가 아니라 정직한 "아직 안 됨" 상태.
@@ -521,6 +527,7 @@ export function Top5Card({
   renderRow,
   emptyText = '표시할 데이터가 없습니다.',
   hoverDate,
+  loading = false,
 }) {
   return (
     <div className="top5-card" title={hoverDate}>
@@ -531,7 +538,15 @@ export function Top5Card({
         </button>
       </div>
       {hint && <div className="toggle-hint" style={{ marginBottom: 6 }}>{hint}</div>}
-      {(!rows || rows.length === 0) && <div className="state" style={{ padding: '16px 0' }}>{emptyText}</div>}
+      {/* 로딩 중(Phase 5.132): 5행 높이를 미리 잡아 데이터 도착 때 아래 카드가 밀리지 않게 한다 */}
+      {loading && (!rows || rows.length === 0) && (
+        <div className="sk-top5" role="status" aria-busy="true" aria-label={`${title} 불러오는 중`}>
+          {Array.from({ length: 5 }, (_, i) => (
+            <span key={i} className="mt-skel sk-top5-row" aria-hidden="true" />
+          ))}
+        </div>
+      )}
+      {!loading && (!rows || rows.length === 0) && <div className="state" style={{ padding: '16px 0' }}>{emptyText}</div>}
       {rows && rows.length > 0 && <div>{rows.slice(0, 5).map(renderRow)}</div>}
       {/* PLAN.md §5.40 — 스켈핑 후보 적중률 사후 검증 문구. hint(상단, 스크리닝
           자체의 성격 설명)와 분리해 하단에 둔다 — 관찰 통계는 스크리닝 설명과

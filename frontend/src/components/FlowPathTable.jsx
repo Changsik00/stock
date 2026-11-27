@@ -95,7 +95,7 @@ export default function FlowPathTable({ loading, error, date, rows, direction = 
         )}
       </div>
 
-      {loading && <SkeletonRows label="순위 불러오는 중" />}
+      {loading && <SkeletonRows variant="flowpath" label="순위 불러오는 중" />}
       {error && <div className="state error">{error}</div>}
       {!loading && !error && (!rows || rows.length === 0) && (
         <div className="state">표시할 데이터가 없습니다.</div>

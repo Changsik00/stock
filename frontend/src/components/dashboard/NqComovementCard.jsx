@@ -74,12 +74,23 @@ export default function NqComovementCard({ data, loading }) {
       <div className="section-title mt-title vr-title">
         <span>
           코스피 등락 분해 ({NQ} 기준)
+          {/* 로딩 중엔 제목 옆 메타 자리를 보이지 않게 잡아 둔다(390px에서 제목이 두 줄로 바뀌는 높이 변화 방지) */}
+          {loading && (
+            <span className="narr-meta" style={{ visibility: 'hidden' }} aria-hidden="true">
+              {' 장 마감 · 00-00 기준'}
+            </span>
+          )}
           {hasData && (
             <span className="narr-meta">
               {data.market_closed ? ` 장 마감 · ${mmdd(data.date)} 기준` : ` 장중 · ${data.as_of ?? '-'} 기준`}
             </span>
           )}
         </span>
+        {loading && (
+          <button type="button" className="btn btn-link btn-sm" style={{ visibility: 'hidden' }} tabIndex={-1} aria-hidden="true">
+            설명
+          </button>
+        )}
         {hasData && (
           <button type="button" className="btn btn-link btn-sm" aria-expanded={hintOpen} onClick={() => setHintOpen((v) => !v)}>
             {hintOpen ? '설명 닫기' : '설명'}
@@ -88,7 +99,7 @@ export default function NqComovementCard({ data, loading }) {
       </div>
       {loading ? (
         <div className="vr-card">
-          <Skel w={160} h={26} />
+          <Skel w={160} h={19} />
         </div>
       ) : !hasData ? (
         <div className="vr-card vr-state">데이터 없음</div>

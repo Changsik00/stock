@@ -1,31 +1,15 @@
-import { useEffect, useState } from 'react'
-import { STATIC_DATA, fetchFreshness } from '../api'
+import { useState } from 'react'
+import { STATIC_DATA } from '../api'
+import { useFreshness } from '../queries'
 
 // 데이터 신선도 경고(PLAN.md Phase 5.120 C2) — /api/health/freshness가 문제(stale/early)를
 // 알린 때만 주황 한 줄을 보여준다. 문제가 없거나 조회 실패/정적 배포면 아무것도 렌더하지 않는다.
+// 5분 폴링은 useFreshness(react-query)가 맡는다. 갱신 실패 시 직전 값 유지(기존 동작).
 const STATUS_LABEL = { stale: '지연', early: '확정 전 수집' }
-const POLL_MS = 5 * 60 * 1000
 
 export default function FreshnessBanner() {
-  const [problems, setProblems] = useState([])
   const [open, setOpen] = useState(false)
-
-  useEffect(() => {
-    if (STATIC_DATA) return undefined
-    let cancelled = false
-    const load = () =>
-      fetchFreshness()
-        .then((body) => {
-          if (!cancelled) setProblems((body?.items || []).filter((i) => i.status !== 'ok'))
-        })
-        .catch(() => {})
-    load()
-    const id = setInterval(load, POLL_MS)
-    return () => {
-      cancelled = true
-      clearInterval(id)
-    }
-  }, [])
+  const problems = (useFreshness().data?.items || []).filter((i) => i.status !== 'ok')
 
   if (STATIC_DATA || problems.length === 0) return null
 
