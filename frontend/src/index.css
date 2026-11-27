@@ -2674,3 +2674,14 @@ button.fa-row:hover { background: var(--chip-bg); }
 .fc-verdict { font-size: var(--fs-hero); line-height: 1.2; font-weight: 700; color: var(--text-primary); }
 .fc-verdict.fc-label-sell { color: var(--warn-text); }
 .ifs-peak { font-size: 13px; font-variant-numeric: tabular-nums; color: var(--text-primary); }
+
+/* 시장 탭 상단 공통 카드 묶음(Phase 5.128~5.129) — 간격을 --sp 토큰으로 통일(Phase 5.130).
+   제목 위 24/아래 12, 첫 제목만 위 16. 묶음 끝에 24를 둬 아래 코스피/코스닥/선물 탭이 마지막 카드에
+   붙지 않게 한다(이전: 0px). 구형 .section-title:first-of-type(20px)·.regime-card(10px 둥글기·16px 아래 여백)를 이 범위에서만 덮는다. */
+.market-overview { margin-bottom: var(--sp-5); }
+.market-overview .mt-title { margin: var(--sp-5) 0 var(--sp-3); }
+.market-overview > .mt-title:first-child { margin-top: var(--sp-4); }
+.market-overview .regime-card { margin-bottom: 0; border-radius: var(--r-card); padding: var(--sp-3) var(--sp-4); }
+
+/* 순위 표 더 보기(Phase 5.131) — 표 카드 하단 가운데가 아닌 좌측 정렬, 위 구분선으로 표와 묶는다 */
+.show-more-row { display: flex; padding: var(--sp-2) var(--sp-3); border-top: 1px solid var(--border); }

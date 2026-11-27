@@ -1,4 +1,5 @@
 import Badge from './Badge'
+import { ShowMoreButton, useShowMore } from './ShowMore'
 import { formatDate } from '../format'
 
 // 거래대금 상위 종목 테이블 — "돈이 모이는 곳" (PLAN.md §4.6 3.6-1).
@@ -63,7 +64,8 @@ function basisLabel(date, live, cachedAt) {
 }
 
 // live/cachedAt — 선택 prop(미지정 시 기존처럼 "날짜 기준"만 표시).
-export default function ValueRankTable({ rows, loading, error, date, live, cachedAt, onRowClick }) {
+export default function ValueRankTable({ rows, loading, error, date, live, cachedAt, onRowClick, resetKey }) {
+  const more = useShowMore(rows, 10, resetKey)
   return (
     <div>
       <div className="toggle-row">
@@ -94,7 +96,7 @@ export default function ValueRankTable({ rows, loading, error, date, live, cache
                     중복 적재된 경우(예: ETF 중복 수집) 여전히 겹칠 수 있다. rank는 이
                     리스트 안에서 항상 유일하므로 rank+market+code로 유일성을 보장한다
                     (FlowRankTable과 동일한 duplicate key 수정). */}
-                {rows.map((row) => (
+                {more.shown.map((row) => (
                   <tr
                     key={`${row.rank}-${row.market}-${row.code}`}
                     className={onRowClick ? 'flow-rank-row-clickable' : undefined}
@@ -118,6 +120,7 @@ export default function ValueRankTable({ rows, loading, error, date, live, cache
               </tbody>
             </table>
           </div>
+          <ShowMoreButton hidden={more.hidden} expanded={more.expanded} onToggle={more.toggle} />
         </div>
       )}
     </div>

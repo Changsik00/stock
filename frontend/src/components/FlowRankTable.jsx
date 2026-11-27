@@ -1,4 +1,5 @@
 import Badge from './Badge'
+import { ShowMoreButton, useShowMore } from './ShowMore'
 import { formatDate } from '../format'
 
 // 투자자별(외인/기관) 순매수/순매도 상위 종목 테이블 (PLAN.md §4.5/§6 3.5-2b, 시장 탭
@@ -67,6 +68,7 @@ export default function FlowRankTable({
   onRowClick,
 }) {
   const latest = dates && dates.length > 0 ? dates[0] : null
+  const more = useShowMore(latest?.rows, 10, `${investor}-${side}`)
   const amountColorClass = side === 'sell' ? 'down' : 'up'
   const amountHeaderLabel = side === 'sell' ? '순매도 금액' : '순매수 금액'
   // 2026-09-16분부터 수량 소스가 없다(PLAN.md §5.108) — 값이 하나도 없으면 열을 숨긴다.
@@ -122,7 +124,7 @@ export default function FlowRankTable({
                     통합 랭킹 안에 두 번(예: 다른 소스로 중복 적재된 ETF) 나타날 수 있어
                     row.code만으로는 React key가 겹쳐 "duplicate key" 경고가 났다.
                     rank는 이 리스트 안에서 항상 유일하므로 rank+code로 유일성을 보장한다. */}
-                {latest.rows.map((row) => (
+                {more.shown.map((row) => (
                   <tr
                     key={`${row.rank}-${row.code}`}
                     className={onRowClick ? 'flow-rank-row-clickable' : undefined}
@@ -144,6 +146,7 @@ export default function FlowRankTable({
               </tbody>
             </table>
           </div>
+          <ShowMoreButton hidden={more.hidden} expanded={more.expanded} onToggle={more.toggle} />
         </div>
       )}
     </div>

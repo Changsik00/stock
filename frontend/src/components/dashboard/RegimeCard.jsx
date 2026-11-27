@@ -7,7 +7,7 @@ export default function RegimeCard({ regime, onKosdaq }) {
   if (!regime) return null
   return (
     <>
-      <div className="section-title">지금 유입 우세</div>
+      <div className="section-title mt-title">지금 유입 우세</div>
       <div className={`regime-card regime-card-${regime.regime === '코스닥우세' ? 'kosdaq' : 'neutral'}`}>
         <div className="regime-card-top">
           <span className="regime-verdict">{regime.regime}</span>

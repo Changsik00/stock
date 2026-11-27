@@ -43,6 +43,13 @@ const GROUP_TYPE_OPTIONS = [
   { key: 'theme', label: '테마' },
 ]
 
+// 종목 순위 섹션 탭(Phase 5.131)
+const RANK_TABS = [
+  { key: 'value', label: '거래대금 상위' },
+  { key: 'flow', label: '수급 상위' },
+  { key: 'path', label: 'ETF 경유 수급' },
+]
+
 const VALUE_RANK_MARKET_OPTIONS = [
   { key: 'all', label: '전체' },
   { key: 'kospi', label: '코스피' },
@@ -132,6 +139,7 @@ export default function MarketPage() {
   const [groupError, setGroupError] = useState(null)
   const [groupLoading, setGroupLoading] = useState(false)
   const [valueRankMarket, setValueRankMarket] = useState('all')
+  const [rankTab, setRankTab] = useState('value')
   // 거래대금 상위 — 장중엔 라이브, 그 외엔 일별 스냅샷(PLAN.md Phase 5.110). 시장
   // 필터(all/kospi/kosdaq) 변경과 7분 주기 갱신은 훅이 처리한다.
   const valueRank = useValueRankAuto(valueRankMarket)
@@ -586,56 +594,77 @@ export default function MarketPage() {
         />
       )}
 
-      <div className="section-title">거래대금 상위</div>
-      <div className="toggle-row">
-        {VALUE_RANK_MARKET_OPTIONS.map((opt) => (
-          <button
-            key={opt.key}
-            type="button"
-            className={`toggle-chip ${valueRankMarket === opt.key ? 'active' : ''}`}
-            onClick={() => setValueRankMarket(opt.key)}
-          >
-            {opt.label}
-          </button>
-        ))}
-      </div>
-      <ValueRankTable
-        rows={valueRank.rows}
-        loading={valueRank.loading}
-        error={valueRank.error}
-        date={valueRank.date}
-        live={valueRank.live}
-        cachedAt={valueRank.cachedAt}
-        onRowClick={handleRowClick}
-      />
-
-      <div className="section-title">수급 상위</div>
-      <FlowRankTable
-        investor={flowRankInvestor}
-        onInvestorChange={setFlowRankInvestor}
-        side={flowRankSide}
-        onSideChange={setFlowRankSide}
-        loading={flowRankLoading}
-        error={flowRankError}
-        dates={flowRankDates}
-        onRowClick={handleRowClick}
-      />
-
-      <div className="section-title">ETF 경유 수급 상위</div>
-      <FlowPathTable
-        loading={flowPathLoading}
-        error={flowPathError}
-        date={flowPathDate}
-        rows={flowPathRows}
-        direction={flowPathDirection}
-        onDirectionChange={setFlowPathDirection}
-        onRowClick={handleRowClick}
-      />
-
       <div className="section-title">시장 자금·대차</div>
       {fundLoading && <div className="state">불러오는 중…</div>}
       {fundError && <div className="state error">{fundError}</div>}
       {!fundLoading && !fundError && <MarketFundChart seriesMap={fundSeries} />}
+
+      {/* 종목 순위(Phase 5.131) — 거래대금·수급·ETF 경유 수급 상위를 페이지 맨 아래 한 섹션으로 모으고
+          세로로 잇지 않고 탭으로 하나씩 본다. 각 표는 상위 10개 + 더 보기(ShowMore). */}
+      <div className="section-title">종목 순위</div>
+      <div className="tabs rank-tabs" role="tablist">
+        {RANK_TABS.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            role="tab"
+            aria-selected={rankTab === t.key}
+            className={`tab ${rankTab === t.key ? 'active' : ''}`}
+            onClick={() => setRankTab(t.key)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+      {rankTab === 'value' && (
+        <>
+          <div className="toggle-row">
+            {VALUE_RANK_MARKET_OPTIONS.map((opt) => (
+              <button
+                key={opt.key}
+                type="button"
+                className={`toggle-chip ${valueRankMarket === opt.key ? 'active' : ''}`}
+                onClick={() => setValueRankMarket(opt.key)}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <ValueRankTable
+            rows={valueRank.rows}
+            loading={valueRank.loading}
+            error={valueRank.error}
+            date={valueRank.date}
+            live={valueRank.live}
+            cachedAt={valueRank.cachedAt}
+            onRowClick={handleRowClick}
+            resetKey={valueRankMarket}
+          />
+        </>
+      )}
+      {rankTab === 'flow' && (
+        <FlowRankTable
+          investor={flowRankInvestor}
+          onInvestorChange={setFlowRankInvestor}
+          side={flowRankSide}
+          onSideChange={setFlowRankSide}
+          loading={flowRankLoading}
+          error={flowRankError}
+          dates={flowRankDates}
+          onRowClick={handleRowClick}
+        />
+      )}
+      {rankTab === 'path' && (
+        <FlowPathTable
+          loading={flowPathLoading}
+          error={flowPathError}
+          date={flowPathDate}
+          rows={flowPathRows}
+          direction={flowPathDirection}
+          onDirectionChange={setFlowPathDirection}
+          onRowClick={handleRowClick}
+        />
+      )}
 
       <Modal
         open={Boolean(stockModal)}

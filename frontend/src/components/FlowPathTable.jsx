@@ -1,3 +1,4 @@
+import { ShowMoreButton, useShowMore } from './ShowMore'
 import { formatDate } from '../format'
 
 // ETF 경유 수급 상위 테이블 (PLAN.md §4.5, 시장 탭 "ETF 경유 수급 상위").
@@ -66,6 +67,7 @@ function mmdd(date) {
 // 자체 onClick이 없어 행 클릭과 겹치지 않는다 — 배지 쪽은 건드리지 않는다.
 export default function FlowPathTable({ loading, error, date, rows, direction = 'in', onDirectionChange, onRowClick }) {
   const isOut = direction === 'out'
+  const more = useShowMore(rows, 10, direction)
   const columnHeaderLabel = isOut ? 'ETF 경유 유출' : 'ETF 경유 유입'
   const hintText = isOut
     ? '(ETF 순유출 × 구성비중으로 추정한 경유 유출, top10 구성 기준)'
@@ -115,7 +117,7 @@ export default function FlowPathTable({ loading, error, date, rows, direction = 
                 {/* key는 row.code가 아니라 i(순위 인덱스)+code — row.code만으로는 같은
                     종목이 중복 적재되면 React key가 겹친다(FlowRankTable/ValueRankTable과
                     동일한 duplicate key 수정). i는 이 리스트 안에서 항상 유일하다. */}
-                {rows.map((row, i) => (
+                {more.shown.map((row, i) => (
                   <tr
                     key={`${i}-${row.code}`}
                     className={onRowClick ? 'flow-rank-row-clickable' : undefined}
@@ -165,6 +167,7 @@ export default function FlowPathTable({ loading, error, date, rows, direction = 
               </tbody>
             </table>
           </div>
+          <ShowMoreButton hidden={more.hidden} expanded={more.expanded} onToggle={more.toggle} />
         </div>
       )}
     </div>
