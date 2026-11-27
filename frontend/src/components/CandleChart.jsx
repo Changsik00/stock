@@ -354,6 +354,9 @@ export default function CandleChart({
       )
 
     return () => {
+      // 언마운트 때는 차트 생성 effect의 정리(chart.remove())가 선언 순서상 먼저 돈다. 이미 제거된 차트에
+      // removePriceLine을 부르면 다시 그리기가 예약돼 다음 프레임에 'Object is disposed'가 난다 → 건너뛴다.
+      if (candleSeriesRef.current !== candleSeries) return
       for (const line of priceLines) candleSeries.removePriceLine(line)
     }
   }, [levels])
@@ -383,6 +386,7 @@ export default function CandleChart({
       })
 
     return () => {
+      if (candleSeriesRef.current !== candleSeries) return // 차트가 이미 제거됨(위 levels effect 주석 참고)
       for (const line of priceLines) candleSeries.removePriceLine(line)
     }
   }, [flowLevels])
@@ -427,6 +431,7 @@ export default function CandleChart({
     }
 
     return () => {
+      if (candleSeriesRef.current !== candleSeries) return // 차트가 이미 제거됨(위 levels effect 주석 참고)
       for (const line of priceLines) candleSeries.removePriceLine(line)
       if (prices.length) candleSeries.applyOptions({ autoscaleInfoProvider: undefined })
     }
