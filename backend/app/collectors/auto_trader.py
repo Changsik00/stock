@@ -105,6 +105,22 @@ idle로 갱신해버려, 실제로는 그대로 보유 중이던 포지션(1주,
 `get_account_holdings_qty`(kt00018, 신규)로 **실제 보유수량을 직접**
 확인한다 — 자세한 설계는 그 함수 docstring 참고.
 
+## 동시호가 구간 매도(PLAN.md §5.134, 2026-11-27 — 사용자 승인 실거래 규칙 변경)
+
+KRX 동시호가(장 시작 08:30~09:00, 장 마감 15:20~15:30)에는 주문이 접수만 되고
+09:00/15:30에 단일가로 한 번에 체결된다. 그런데 위 "미체결 확인"은 주문 후 수 초 안에
+실보유 0을 못 보면 취소하고 다음 폴링(60초/30초)이 다시 주문·취소를 반복해, 마지막 취소가
+체결 시점 직전이라 **체결 시점에 주문이 남지 않았다**(실측: sell_unconfirmed 206건 중
+158건이 15:20~15:30, 43건이 09:00 이전; 8/19 이후 EOD 강제청산이 사실상 한 번도 체결 안 됨).
+
+이 구간에서 매도가 결정되면(`_place_auction_sell`) 매수1호가 -2%(호가단위 내림, `auction_sell_price`)
+지정가로 주문하고 **확인·취소 없이 주문을 유지**한다. 주문번호·수량·원래 이벤트·사유를
+`AutoTradeState.pending_sell_*`에 저장하고 `sell_pending_auction`을 기록한다. 대기 중에는
+`run_auto_trade`/`watch_stop_loss` 모두 새 매도를 내지 않고(조용히 반환), 구간이 끝난 뒤 첫
+폴링에서 `_settle_pending_sell`이 실보유로 정산한다: 0주=원래 청산 이벤트로 기록·idle /
+일부=잔량 갱신·잔여 취소(`sell_unconfirmed`) / 그대로=취소·`sell_unconfirmed`·포지션 유지 /
+조회 불가=대기 유지(추측하지 않음). 정규장·15:10~15:20 구간은 기존 즉시 확인·취소 그대로다.
+
 ## 안전 규칙 추가(PLAN.md §5.55, 2026-08-06 — 2026-08-05 실제 손실 사고 이후)
 
 2026-08-05 오버나잇 갭하락으로 의도한 -1.5%가 아니라 -4.87%에 손절된 실제
@@ -123,7 +139,7 @@ idle로 갱신해버려, 실제로는 그대로 보유 중이던 포지션(1주,
   손절/트레일청산으로 이어지지 않은 뒤(`_check_forced_exits`) 리스크 경보
   (`_warm_index_tiles_live` 재사용) + regime(`_warm_regime` 재사용, 코스닥
   외국인 `confirmed_streak`)를 조회해 `evaluate_eod_forced_exit`에 넘긴다.
-  regime/리스크 조회가 상대적으로 무겁고 15:20~15:30 사이에만 의미가 있어
+  regime/리스크 조회가 상대적으로 무겁고 15:10~15:30 사이에만 의미가 있어
   30초 `watch_stop_loss`가 아니라 60초 `run_auto_trade`에서만 평가한다.
   **regime 조회 자체가 실패하면 안전 측(청산)으로 폴백**한다 — "확인 못 함"을
   "조건 충족"으로 착각하지 않기 위해서다(이 파일의 다른 실패 처리와 다른
@@ -169,6 +185,7 @@ from ..quant.auto_trade_rules import (
     STOP_LOSS_PCT_RISK_ALERT,
     TARGET_CODE,
     TARGET_QTY,
+    auction_sell_price,
     check_entry_budget,
     classify_buy_fill,
     classify_sell_fill,
@@ -179,6 +196,8 @@ from ..quant.auto_trade_rules import (
     evaluate_foreign_flow_reversal_exit,
     evaluate_stop_loss,
     foreign_flow_sign,
+    is_auction_settle_wait,
+    is_auction_window,
     is_entry_blocked_by_time,
 )
 from ..quant.exit_rules import decide_manual_exit
@@ -501,6 +520,178 @@ async def _cancel_unfilled_order_silently(
         logger.warning("auto-trade: 미체결 주문 취소 시도 실패(무시하고 계속): %s", e)
 
 
+def _clear_pending_sell(state: AutoTradeState) -> None:
+    """동시호가 대기 매도 필드를 전부 비운다(정산이 끝난 뒤 호출)."""
+    state.pending_sell_order_no = None
+    state.pending_sell_qty = None
+    state.pending_sell_event = None
+    state.pending_sell_reason = None
+    state.pending_sell_price = None
+    state.pending_sell_at = None
+
+
+def _reset_to_idle(state: AutoTradeState) -> None:
+    """청산 완료 시 포지션 필드를 전부 초기화한다(기존 청산 경로와 동일한 필드 집합)."""
+    state.status = "idle"
+    state.entry_price = None
+    state.entry_qty = None
+    state.entry_at = None
+    state.entry_order_no = None
+    state.peak_price = None
+    state.entry_foreign_flow_sign = None
+    state.entry_source = None
+    state.manual_exit_rules = None
+
+
+async def _place_auction_sell(
+    session: AsyncSession,
+    state: AutoTradeState,
+    code: str,
+    ref_price: float | None,
+    event_type: str,
+    reason: str,
+    signal_snapshot: dict,
+    result: dict,
+    bid: float | None = None,
+) -> dict:
+    """Phase 5.134 — 동시호가 구간 매도: 매수1호가 -2%(호가단위 내림) 지정가로 주문하고
+    체결 확인·취소 없이 주문을 유지한다(`pending_sell_*` 저장 + `sell_pending_auction` 기록).
+    `bid`가 없으면 여기서 조회하고, 동시호가 중 호가가 비어 있으면 `ref_price`(판정 현재가)를
+    기준가로 쓴다. 주문 자체가 실패하면 기존 실패 처리(error 로그, sell_failed)와 동일하다."""
+    try:
+        async with KiwoomClient() as client:
+            if bid is None:
+                bid = await _best_fill_price(client, code, "sell")
+            if bid is None and ref_price:
+                bid = ref_price
+            if bid is None:
+                raise RuntimeError("매수호가를 확인할 수 없어 주문가를 정할 수 없음")
+            order_price = auction_sell_price(bid)
+            held_qty = int(state.entry_qty or TARGET_QTY)
+            order_response = await client.place_sell_order(code, held_qty, order_price)
+            order_no = str(order_response.get("ord_no")) if order_response.get("ord_no") else None
+    except Exception as e:  # noqa: BLE001 - 주문 실패는 재시도 루프에 빠지지 않고 로그만
+        logger.warning("auto-trade: 동시호가 매도 주문 실패(%s): %s", event_type, e)
+        await _log(
+            session,
+            event_type="error",
+            code=code,
+            price=ref_price,
+            reason=f"매도 주문 시도 실패({event_type}): {reason} / 오류: {e}",
+            signal_snapshot=signal_snapshot,
+        )
+        result["action"] = "sell_failed"
+        result["error"] = str(e)[:300]
+        return result
+
+    state.pending_sell_order_no = order_no
+    state.pending_sell_qty = held_qty
+    state.pending_sell_event = event_type
+    state.pending_sell_reason = reason
+    state.pending_sell_price = order_price
+    state.pending_sell_at = dt.datetime.now(dt.timezone.utc)
+    await session.commit()
+
+    await _log(
+        session,
+        event_type="sell_pending_auction",
+        code=code,
+        price=order_price,
+        reason=reason + f" -> 동시호가 구간이라 매도 주문 유지(주문번호 {order_no}, 지정가 {order_price}원, "
+        f"{held_qty}주, 매수1호가 {bid} 대비 -2%) — 단일가 체결 후 확인",
+        signal_snapshot={**signal_snapshot, "qty": held_qty, "pending_event": event_type},
+        order_response=order_response,
+    )
+    result["action"] = "sell_pending"
+    return result
+
+
+async def _settle_pending_sell(
+    session: AsyncSession, state: AutoTradeState, now_kst: dt.time, result: dict
+) -> bool:
+    """Phase 5.134 — 동시호가 대기 매도를 정산한다(`_position_lock` 보유 중 호출). 대기가 없으면
+    False. 대기가 있으면 True(호출부는 이번 폴링에서 다른 매매 판단을 하지 않고 반환한다).
+    - 아직 동시호가 구간 안: 조용히 대기 유지(새 주문·취소·로그 없음)
+    - 구간 종료 후(또는 전날 대기분): 실보유로 정산 — 0주=원래 이벤트로 기록·idle / 일부=잔량 갱신·
+      잔여 취소 / 그대로=취소·sell_unconfirmed·포지션 유지 / 조회 불가=대기 유지(추측하지 않음)"""
+    if state.pending_sell_at is None:
+        return False
+    result["action"] = "sell_pending"
+    code = state.code or TARGET_CODE
+    placed_date = state.pending_sell_at.astimezone(KST).date()
+    if is_auction_settle_wait(now_kst) and placed_date >= dt.datetime.now(KST).date():
+        return True  # 단일가 체결 전이거나 체결 직후 잔고 반영 유예(1분) 중 — 아무것도 하지 않는다
+
+    order_no = state.pending_sell_order_no
+    qty = int(state.pending_sell_qty or state.entry_qty or TARGET_QTY)
+    order_price = float(state.pending_sell_price) if state.pending_sell_price is not None else None
+    event_type = state.pending_sell_event or "exit_manual"
+    base_reason = state.pending_sell_reason or ""
+    snapshot = {"pending_order_no": order_no, "qty": qty, "settled_at_kst": str(now_kst)}
+    try:
+        async with KiwoomClient() as client:
+            actual = await _read_holdings_qty_with_retry(client, code, 0)
+            if actual is None:
+                logger.warning("auto-trade: 동시호가 대기 매도 정산 보류 — 실보유 조회 불가(다음 폴링 재시도)")
+                return True
+            if state.status not in ("holding", "trailing"):
+                # 사용자가 이미 상태를 정정한 경우 — 남은 주문만 정리하고 대기 해제
+                await _cancel_unfilled_order_silently(client, code, order_no, qty)
+                _clear_pending_sell(state)
+                await session.commit()
+                return True
+            fill_kind, remaining_qty = await _settle_sell_fill(client, code, order_no, qty, actual == 0)
+    except Exception as e:  # noqa: BLE001 - 정산 실패는 대기 유지(다음 폴링 재시도)
+        logger.warning("auto-trade: 동시호가 대기 매도 정산 실패(다음 폴링 재시도): %s", e)
+        return True
+
+    if fill_kind == "full":
+        _reset_to_idle(state)
+        _clear_pending_sell(state)
+        await session.commit()
+        await _log(
+            session,
+            event_type=event_type,
+            code=code,
+            price=order_price,
+            reason=base_reason + f" -> 동시호가 매도 체결 확인(주문번호 {order_no}, 지정가 {order_price}원, {qty}주, "
+            "실보유 0 — 실제 체결가는 단일가)",
+            signal_snapshot=snapshot,
+        )
+        result["action"] = event_type
+        return True
+
+    if fill_kind == "partial":
+        state.entry_qty = remaining_qty
+        _clear_pending_sell(state)
+        await session.commit()
+        await _log(
+            session,
+            event_type="sell_unconfirmed",
+            code=code,
+            price=order_price,
+            reason=base_reason + f" -> 동시호가 매도 {qty}주 중 {qty - remaining_qty}주만 체결 — 부분 체결, "
+            f"잔량 {remaining_qty}주 유지(미체결분 취소)",
+            signal_snapshot={**snapshot, "qty": qty - remaining_qty, "remaining_qty": remaining_qty},
+        )
+        result["action"] = "sell_partial"
+        return True
+
+    _clear_pending_sell(state)
+    await session.commit()
+    await _log(
+        session,
+        event_type="sell_unconfirmed",
+        code=code,
+        price=order_price,
+        reason=base_reason + f" -> 동시호가 매도 주문(주문번호 {order_no}, 지정가 {order_price}원)이 단일가 "
+        "체결 후에도 체결되지 않음(취소 시도) — 포지션 상태 유지, 다음 폴링에서 재시도",
+        signal_snapshot=snapshot,
+    )
+    result["action"] = "sell_unconfirmed"
+    return True
+
+
 async def _get_risk_alert_active(session: AsyncSession) -> bool:
     """PLAN.md §5.55-3 — `index-tiles/live`의 `risk.alerts`가 하나라도 있으면
     True. `_warm_index_tiles_live`는 이 파일이 이미 새 TR 호출 없이 재사용하는
@@ -586,6 +777,14 @@ async def run_auto_trade(
     # 시도하는 걸 막을 수 있다(모듈 상단 `_position_lock` 주석 참고).
     async with _position_lock:
         state = await _get_state(session)
+        # Phase 5.134 — 동시호가에 낸 대기 매도가 있으면 킬스위치와 무관하게(이미 나간 실주문의
+        # 정산이므로) 정산/대기만 하고 이번 폴링의 다른 매매 판단은 하지 않는다.
+        if state is not None and state.pending_sell_at is not None:
+            result["enabled"] = bool(state.enabled)
+            result["status"] = state.status
+            settle_now = now_kst if now_kst is not None else dt.datetime.now(KST).time()
+            await _settle_pending_sell(session, state, settle_now, result)
+            return result
         if state is None or not state.enabled:
             # 킬스위치 꺼짐(또는 시드 행이 없는 비정상 상태) — 신호 평가조차 하지
             # 않고 즉시 반환. 로그도 남기지 않는다(노이즈 방지, 모듈 docstring 참고).
@@ -704,7 +903,7 @@ async def _handle_idle(
     if is_entry_blocked_by_time(now_kst):
         reason = (
             f"{decision['reason']} — 그러나 진입 제한 시간대(now={now_kst.isoformat()}, "
-            "09:00~09:10 또는 15:20~15:30 KST)라 진입 보류"
+            "09:00~09:10 또는 15:10~15:30 KST)라 진입 보류"
         )
         await _log(
             session, event_type="entry_blocked_time", code=code, price=current_price,
@@ -851,12 +1050,25 @@ async def _execute_sell(
     reason: str,
     signal_snapshot: dict,
     result: dict,
+    now_kst: dt.time | None = None,
 ) -> dict:
     """공통 매도 실행 — 손절/트레일청산/EOD강제청산(§5.55-2)/수급반전조기청산
     (§5.55-4)이 전부 이 로직(호가 조회 -> 매도 주문 -> 상태 초기화 -> 로그)을
     공유한다. **이 함수를 호출한다는 것 자체가 이미 "매도하기로 결정됨"을
     뜻한다** — 여기서는 더 이상 조건을 판단하지 않고 기계적으로 실행만 한다
-    (모듈 상단 "매도는 항상 최우선/무조건 허용" 원칙)."""
+    (모듈 상단 "매도는 항상 최우선/무조건 허용" 원칙).
+
+    Phase 5.134 — 이미 동시호가 대기 매도가 있으면 새 주문 없이 반환하고, 지금이 동시호가
+    구간이면 주문만 내고 유지한다(`_place_auction_sell`, 모듈 상단 "동시호가 구간 매도" 절).
+    `now_kst`는 테스트 주입용(없으면 실제 시계)."""
+    if state.pending_sell_at is not None:
+        result["action"] = "sell_pending"
+        return result
+    effective_now = now_kst if now_kst is not None else dt.datetime.now(KST).time()
+    if is_auction_window(effective_now):
+        return await _place_auction_sell(
+            session, state, code, current_price, event_type, reason, signal_snapshot, result
+        )
     try:
         async with KiwoomClient() as client:
             order_price = await _best_fill_price(client, code, "sell")
@@ -965,7 +1177,7 @@ async def _check_forced_exits(
     바로 나간다).
 
     확인 순서: 수급 방향 반전(§5.55-4, 시간 무관 — DB 조회뿐이라 매 폴링
-    확인해도 가볍다) -> EOD 강제청산(§5.55-2, 15:20~15:30 KST에서만 확인 —
+    확인해도 가볍다) -> EOD 강제청산(§5.55-2, 15:10~15:30 KST에서만 확인 —
     regime 조회가 상대적으로 무겁고 이 시간대 밖에서는 애초에 의미가 없다).
     """
     entry_price = float(state.entry_price)
@@ -985,10 +1197,10 @@ async def _check_forced_exits(
         result["action"] = "exit_flow_reversal"
         return await _execute_sell(
             session, state, code, current_price, "exit_flow_reversal", flow_decision["reason"],
-            signal_snapshot, result,
+            signal_snapshot, result, now_kst,
         )
 
-    # §5.55-2 — 장마감 전 조건부 오버나잇 청산. 15:20~15:30 KST 밖이면 리스크
+    # §5.55-2 — 장마감 전 조건부 오버나잇 청산. 15:10~15:30 KST 밖이면 리스크
     # 경보/regime 조회 없이 즉시 반환(`evaluate_eod_forced_exit`도 시간 자체를
     # 다시 확인하지만, 여기서 먼저 걸러야 이 시간대 밖에서 불필요한 regime
     # 조회를 하지 않는다).
@@ -1015,7 +1227,7 @@ async def _check_forced_exits(
         result["action"] = "exit_eod_forced"
         return await _execute_sell(
             session, state, code, current_price, "exit_eod_forced", eod_decision["reason"],
-            signal_snapshot, result,
+            signal_snapshot, result, now_kst,
         )
     return result
 
@@ -1062,6 +1274,7 @@ async def _handle_manual_position(
         return await _execute_sell(
             session, state, code, current_price, "exit_manual_rule",
             "수동 매수 사용자 조건 청산 — " + decision["reason"], signal_snapshot, result,
+            now_kst,
         )
     if decision["action"] == "peak_update":
         state.peak_price = decision["new_peak_price"]
@@ -1078,6 +1291,7 @@ async def _watch_manual_position(
     entry_price: float,
     rules: list[dict],
     result: dict,
+    now_kst: dt.time | None = None,
 ) -> dict:
     """Phase 5.118 — 수동 진입 포지션의 30초 실시간 호가 감시(`watch_stop_loss`가 호출, 락 보유 중).
     실시간 매수1호가로 사용자 조건을 판정하고 닿으면 `_execute_sell`로 매도한다. 강제청산·외인반전은
@@ -1109,6 +1323,7 @@ async def _watch_manual_position(
         return await _execute_sell(
             session, state, code, live_price, "exit_manual_rule",
             "[실시간 호가 감시(30초)] 수동 매수 사용자 조건 청산 — " + decision["reason"], snapshot, result,
+            now_kst,
         )
     if decision["action"] == "peak_update":
         state.peak_price = decision["new_peak_price"]
@@ -1183,11 +1398,11 @@ async def _handle_position(
     # 아예 호출하지 않는다).
     event_type = "exit_stop_loss" if decision["action"] == "stop_loss" else "exit_trail"
     return await _execute_sell(
-        session, state, code, current_price, event_type, decision["reason"], signal_snapshot, result
+        session, state, code, current_price, event_type, decision["reason"], signal_snapshot, result, now_kst
     )
 
 
-async def watch_stop_loss(session: AsyncSession) -> dict:
+async def watch_stop_loss(session: AsyncSession, now_kst: dt.time | None = None) -> dict:
     """포지션 보유 중(holding/trailing) 손절만 감시하는 고빈도 보조 잡
     (PLAN.md §5.54-6, 2026-08-05 사용자 질의 — "매수하고 나서 모니터링 간격은
     어떻게 되니?"). `run_auto_trade`(60초, `collectors/live_refresh.py`의
@@ -1233,9 +1448,16 @@ async def watch_stop_loss(session: AsyncSession) -> dict:
 
     async with _position_lock:
         state = await _get_state(session)
+        # Phase 5.134 — 동시호가 대기 매도 정산/대기(`run_auto_trade`와 동일, 새 매도 금지).
+        if state is not None and state.pending_sell_at is not None:
+            result["enabled"] = bool(state.enabled)
+            settle_now = now_kst if now_kst is not None else dt.datetime.now(KST).time()
+            await _settle_pending_sell(session, state, settle_now, result)
+            return result
         if state is None or not state.enabled:
             return result
         result["enabled"] = True
+        effective_now_kst = now_kst if now_kst is not None else dt.datetime.now(KST).time()
 
         if state.status not in ("holding", "trailing"):
             # 이 잡은 포지션 관리 전용 — 진입(idle) 스캔은 하지 않는다
@@ -1255,7 +1477,9 @@ async def watch_stop_loss(session: AsyncSession) -> dict:
         # Phase 5.118 — 수동 진입 포지션은 고정 손절/리스크 경보 손절 대신 사용자 조건으로 감시.
         manual_rules = _manual_rules_of(state)
         if manual_rules is not None:
-            return await _watch_manual_position(session, state, code, entry_price, manual_rules, result)
+            return await _watch_manual_position(
+                session, state, code, entry_price, manual_rules, result, effective_now_kst
+            )
 
         # PLAN.md §5.55-3 — 리스크 경보 활성 중이면 손절선을 타이트하게(위
         # 모듈 docstring 참고). 조회 실패는 `_get_risk_alert_active` 내부에서
@@ -1287,6 +1511,19 @@ async def watch_stop_loss(session: AsyncSession) -> dict:
             "risk_alert_active": risk_alert_active,
             "stop_loss_threshold": stop_loss_threshold,
         }
+
+        if is_auction_window(effective_now_kst):
+            # Phase 5.134 — 동시호가(장 시작 08:30~09:00 등): 주문을 유지하고 구간 종료 후 정산.
+            auction_reason = (
+                f"[실시간 호가 손절 감시(30초)] 손절 조건 충족: 실시간가 {live_price} vs "
+                f"진입가 {entry_price} ({pct:+.2f}%) <= {stop_loss_threshold}%"
+                + (" (리스크 경보 활성 -> 임시 손절선 적용)" if risk_alert_active else "")
+            )
+            result["action"] = "exit_stop_loss"
+            return await _place_auction_sell(
+                session, state, code, live_price, "exit_stop_loss", auction_reason, signal_snapshot, result,
+                bid=live_price,
+            )
 
         try:
             async with KiwoomClient() as client:

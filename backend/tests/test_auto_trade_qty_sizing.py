@@ -195,6 +195,8 @@ def make_state(**kw):
         enabled=True, status="idle", code="0167A0", entry_price=None, entry_qty=None, entry_at=None,
         entry_order_no=None, peak_price=None, entry_foreign_flow_sign=None, entry_source=None,
         manual_exit_rules=None, updated_at=None,
+        pending_sell_order_no=None, pending_sell_qty=None, pending_sell_event=None,
+        pending_sell_reason=None, pending_sell_price=None, pending_sell_at=None,  # Phase 5.134
     )
     base.update(kw)
     return SimpleNamespace(**base)

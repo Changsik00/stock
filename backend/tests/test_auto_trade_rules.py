@@ -221,7 +221,7 @@ def test_entry_time_block_false_outside_windows():
     assert rules.is_entry_blocked_by_time(dt.time(9, 11)) is False
     assert rules.is_entry_blocked_by_time(dt.time(8, 59)) is False
     assert rules.is_entry_blocked_by_time(dt.time(10, 0)) is False
-    assert rules.is_entry_blocked_by_time(dt.time(15, 19)) is False
+    assert rules.is_entry_blocked_by_time(dt.time(15, 9)) is False
     assert rules.is_entry_blocked_by_time(dt.time(15, 31)) is False
 
 
@@ -405,3 +405,69 @@ def test_foreign_flow_reversal_exit_no_trigger_when_data_missing():
     assert rules.evaluate_foreign_flow_reversal_exit(None, "negative")["should_exit"] is False
     assert rules.evaluate_foreign_flow_reversal_exit("positive", None)["should_exit"] is False
     assert rules.evaluate_foreign_flow_reversal_exit(None, None)["should_exit"] is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.134 — 강제청산 판단 15:10 / 동시호가 구간 / 동시호가 주문가
+# ---------------------------------------------------------------------------
+
+
+def test_eod_forced_exit_starts_at_1510():
+    """15:12 + 오버나잇 조건 미충족(평가손익<=0) -> 강제청산 판정(5.134: 15:20 -> 15:10)."""
+    decision = rules.evaluate_eod_forced_exit(
+        now_kst=dt.time(15, 12),
+        status="holding",
+        unrealized_pnl_positive=False,
+        kosdaq_foreign_streak_ok=True,
+        risk_alert_active=False,
+    )
+    assert decision["should_exit"] is True
+    assert "15:10" in decision["reason"]
+
+
+def test_eod_forced_exit_not_before_1510():
+    decision = rules.evaluate_eod_forced_exit(
+        now_kst=dt.time(15, 9),
+        status="holding",
+        unrealized_pnl_positive=False,
+        kosdaq_foreign_streak_ok=False,
+        risk_alert_active=True,
+    )
+    assert decision["should_exit"] is False
+
+
+def test_entry_blocked_from_1510():
+    assert rules.is_entry_blocked_by_time(dt.time(15, 12)) is True
+    assert rules.is_entry_blocked_by_time(dt.time(15, 10)) is True
+    assert rules.is_entry_blocked_by_time(dt.time(15, 9)) is False
+
+
+def test_is_auction_window_boundaries():
+    for t, expected in [
+        (dt.time(8, 29), False),
+        (dt.time(8, 30), True),
+        (dt.time(8, 59, 59), True),
+        (dt.time(9, 0), False),
+        (dt.time(15, 19, 59), False),
+        (dt.time(15, 20), True),
+        (dt.time(15, 29, 59), True),
+        (dt.time(15, 30), False),
+        (dt.time(10, 0), False),
+    ]:
+        assert rules.is_auction_window(t) is expected, t
+
+
+def test_auction_sell_price_is_98pct_floored_to_tick():
+    # 16050 * 0.98 = 15729 -> ETF 호가단위 5원 내림 = 15725
+    assert rules.auction_sell_price(16050) == 15725
+    assert rules.auction_sell_price(11435) == 11205  # 11206.3 -> 11205
+    assert rules.auction_sell_price(11500) == 11270  # 11270 정확히 5원 배수
+
+
+def test_krx_tick_size_etf_and_stock():
+    assert rules.krx_tick_size(15000, etf=True) == 5
+    assert rules.krx_tick_size(1500, etf=True) == 5
+    assert rules.krx_tick_size(15000, etf=False) == 10
+    assert rules.krx_tick_size(1999, etf=False) == 1
+    assert rules.krx_tick_size(70000, etf=False) == 100
+    assert rules.krx_tick_size(600000, etf=False) == 1000

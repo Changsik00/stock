@@ -808,6 +808,15 @@ class AutoTradeState(Base):
     # idle로 돌아갈 때 다른 entry_* 필드와 함께 None으로 리셋된다.
     entry_source: Mapped[str | None] = mapped_column(String(10))
     manual_exit_rules: Mapped[str | None] = mapped_column(Text)
+    # Phase 5.134 — 동시호가(08:30~09:00, 15:20~15:30) 중 낸 매도 주문(체결 대기). 동시호가는
+    # 09:00/15:30 단일가 체결이라 주문 직후 확인·취소를 하지 않고 이 필드에 보관했다가 구간이
+    # 끝난 뒤 첫 폴링에서 실보유로 정산한다. 정산이 끝나면 전부 None으로 비운다.
+    pending_sell_order_no: Mapped[str | None] = mapped_column(String(30))
+    pending_sell_qty: Mapped[int | None] = mapped_column(SmallInteger)
+    pending_sell_event: Mapped[str | None] = mapped_column(String(20))  # 정산 시 기록할 원래 이벤트(exit_*)
+    pending_sell_reason: Mapped[str | None] = mapped_column(Text)
+    pending_sell_price: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    pending_sell_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )

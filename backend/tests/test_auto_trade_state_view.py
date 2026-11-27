@@ -87,7 +87,7 @@ def test_exit_levels_empty_without_entry():
 
 def test_engine_constants_expose_entry_block_windows():
     c = router._engine_rule_constants()
-    assert c["entry_block_windows"] == [["09:00", "09:10"], ["15:20", "15:30"]]
+    assert c["entry_block_windows"] == [["09:00", "09:10"], ["15:10", "15:30"]]  # Phase 5.134: 15:20 -> 15:10
 
 
 # ---------------- last_eval ----------------
@@ -119,7 +119,7 @@ def test_record_last_eval_keeps_previous_when_disabled(monkeypatch):
 async def test_run_auto_trade_idle_result_carries_signal_flags(monkeypatch):
     """진입 조건 미충족(idle) 경로가 golden_recent/spike_recent/current_price를 돌려준다.
     DB는 쓰지 않는다(상태 행은 메모리, 주문 클라이언트는 호출 시 실패)."""
-    state = SimpleNamespace(enabled=True, status="idle", code=auto_trader.TARGET_CODE)
+    state = SimpleNamespace(enabled=True, status="idle", code=auto_trader.TARGET_CODE, pending_sell_at=None)
     today = dt.datetime.now(KST).strftime("%Y%m%d")
     bars = [
         {"date": today, "time": f"09{m:02d}00", "open": 16000, "high": 16000, "low": 16000, "close": 16000, "volume": 1000}

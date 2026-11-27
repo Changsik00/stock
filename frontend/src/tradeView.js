@@ -107,7 +107,7 @@ export function heldMinutes(entryAt, now = new Date()) {
   return (now.getTime() - t) / 60000
 }
 
-// 장마감 강제청산 시작(예: '15:20')까지 남은 분. 이미 지났으면 음수.
+// 장마감 강제청산 시작(예: '15:10')까지 남은 분. 이미 지났으면 음수.
 export function minutesToForcedExit(engineRules, now = new Date()) {
   const start = engineRules?.eod_forced_exit_start
   if (!start) return null
@@ -209,6 +209,7 @@ export const EVENT_LABEL = {
   manual_rules_update: '조건 수정',
   buy_unconfirmed: '매수 체결 미확인',
   sell_unconfirmed: '매도 체결 미확인/부분',
+  sell_pending_auction: '동시호가 매도 대기',
 }
 
 const HUMAN_REASON = {
@@ -223,6 +224,7 @@ const HUMAN_REASON = {
   trail_activate: '진입가 대비 전환 수익률에 도달해 트레일링으로 전환했습니다.',
   manual_rules_update: '보유 중 청산 조건을 수정했습니다.',
   buy_unconfirmed: '매수 주문을 냈지만 체결을 확인하지 못해 취소를 시도했습니다.',
+  sell_pending_auction: '동시호가 매도 주문 대기 — 단일가 체결 후 확인합니다.',
   sell_unconfirmed: '매도 주문이 체결되지 않았거나 일부만 체결돼 미체결분 취소를 시도했습니다(자세한 내용은 사유 참고).',
 }
 

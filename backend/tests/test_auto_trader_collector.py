@@ -187,6 +187,12 @@ async def _snapshot_and_restore_state():
                 "entry_order_no": row.entry_order_no,
                 "peak_price": row.peak_price,
                 "entry_foreign_flow_sign": row.entry_foreign_flow_sign,
+                "pending_sell_order_no": getattr(row, "pending_sell_order_no", None),
+                "pending_sell_qty": getattr(row, "pending_sell_qty", None),
+                "pending_sell_event": getattr(row, "pending_sell_event", None),
+                "pending_sell_reason": getattr(row, "pending_sell_reason", None),
+                "pending_sell_price": getattr(row, "pending_sell_price", None),
+                "pending_sell_at": getattr(row, "pending_sell_at", None),
             }
             if row is not None
             else None
@@ -241,6 +247,12 @@ async def _set_state(**kwargs) -> None:
             entry_order_no=None,
             peak_price=None,
             entry_foreign_flow_sign=None,
+            pending_sell_order_no=None,
+            pending_sell_qty=None,
+            pending_sell_event=None,
+            pending_sell_reason=None,
+            pending_sell_price=None,
+            pending_sell_at=None,
         )
         defaults.update(kwargs)
         for k, v in defaults.items():
@@ -1084,7 +1096,7 @@ async def test_stop_loss_not_affected_by_entry_time_block_close_window(monkeypat
     fake_cls = _patch_kiwoom_client(monkeypatch)
 
     async with async_session_factory() as session:
-        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(15, 25))
+        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(15, 15))  # 5.134: 동시호가(15:20~) 밖의 EOD 구간 — 즉시 체결 확인 경로
 
     assert result["action"] == "stop_loss"
     fake = fake_cls.instances[-1]
@@ -1169,7 +1181,7 @@ async def test_eod_forced_exit_reproduces_actual_incident(monkeypatch):
     fake_cls = _patch_kiwoom_client(monkeypatch)
 
     async with async_session_factory() as session:
-        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(15, 22))
+        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(15, 15))
 
     # 핵심 단언 — 가격이 플러스라도, 스트릭이 매도가 아니라도, status가
     # "trailing"이 아니라는 이유만으로 강제 청산돼야 한다.
@@ -1202,7 +1214,7 @@ async def test_eod_forced_exit_when_risk_alert_active_overrides_good_conditions(
     fake_cls = _patch_kiwoom_client(monkeypatch)
 
     async with async_session_factory() as session:
-        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(15, 25))
+        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(15, 15))
 
     assert result["action"] == "exit_eod_forced"
     assert fake_cls.instances != []
@@ -1223,7 +1235,7 @@ async def test_eod_forced_exit_when_kosdaq_foreign_selling_streak(monkeypatch):
     fake_cls = _patch_kiwoom_client(monkeypatch)
 
     async with async_session_factory() as session:
-        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(15, 25))
+        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(15, 15))
 
     assert result["action"] == "exit_eod_forced"
     assert fake_cls.instances != []
@@ -1287,7 +1299,7 @@ async def test_eod_forced_exit_stop_loss_still_takes_priority(monkeypatch):
     fake_cls = _patch_kiwoom_client(monkeypatch)
 
     async with async_session_factory() as session:
-        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(15, 25))
+        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(15, 15))
 
     assert result["action"] == "stop_loss"
     logs = await _log_rows()
@@ -1309,7 +1321,7 @@ async def test_eod_forced_exit_regime_fetch_failure_falls_back_to_exit(monkeypat
     fake_cls = _patch_kiwoom_client(monkeypatch)
 
     async with async_session_factory() as session:
-        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(15, 25))
+        result = await auto_trader.run_auto_trade(session, now_kst=dt.time(15, 15))
 
     assert result["action"] == "exit_eod_forced"
     assert fake_cls.instances != []
@@ -1439,3 +1451,216 @@ async def test_log_dedup_allows_repeat_after_window_elapses():
 
     logs = await _log_rows()
     assert len(logs) == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.134 — 동시호가 구간(08:30~09:00, 15:20~15:30) 매도: 주문 유지 + 장 후 정산
+#
+# 동시호가는 단일가로 한 번에 체결되므로 주문 직후 체결 확인·취소를 하면 안 된다.
+# 외부(키움)와 시계(now_kst 주입)만 가짜로 바꾸고, 엔진·DB 상태·로그는 실제 값으로 검증한다.
+# ---------------------------------------------------------------------------
+
+
+class _AuctionBook:
+    """폴링마다 새로 만들어지는 가짜 키움 클라이언트들이 공유하는 계좌/주문 장부."""
+
+    def __init__(self, holdings: int = 2):
+        self.holdings = holdings
+        self.sells: list[tuple] = []
+        self.cancels: list[tuple] = []
+
+
+def _patch_auction_kiwoom(monkeypatch, book: _AuctionBook):
+    class _Shared(_FakeKiwoomClient):
+        async def place_sell_order(self, code, qty, price):
+            book.sells.append((code, qty, price))
+            return {"ord_no": "0077001", "return_code": 0}
+
+        async def get_account_holdings_qty(self, code):
+            return book.holdings
+
+        async def cancel_order(self, code, orig_order_no, qty):
+            book.cancels.append((code, orig_order_no, qty))
+            return {"return_code": 0}
+
+    monkeypatch.setattr(auto_trader, "KiwoomClient", _Shared)
+    monkeypatch.setattr(auto_trader, "_CONFIRM_HOLDINGS_RETRY_DELAYS_SEC", ())
+
+
+async def _poll_run(t: dt.time) -> dict:
+    async with async_session_factory() as session:
+        return await auto_trader.run_auto_trade(session, now_kst=t)
+
+
+async def _poll_watch(t: dt.time) -> dict:
+    async with async_session_factory() as session:
+        return await auto_trader.watch_stop_loss(session, now_kst=t)
+
+
+async def _setup_eod_holding(monkeypatch, book, qty=2):
+    # 평가손익<=0 -> 15:10 이후 강제청산 조건(trailing 아님). 손절(-1.5%)에는 걸리지 않는 가격.
+    await _set_state(enabled=True, status="holding", entry_price=16100.0, entry_qty=qty)
+    _patch_signals(monkeypatch, ma_state="none", is_spike=False, bars_close=16050.0)
+    _patch_auction_kiwoom(monkeypatch, book)
+
+
+async def test_auction_eod_sell_rests_until_close_then_settles_full(monkeypatch):
+    book = _AuctionBook(holdings=2)
+    await _setup_eod_holding(monkeypatch, book)
+
+    r = await _poll_run(dt.time(15, 22))
+    assert r["action"] == "sell_pending"
+    # 매수1호가 16050 x 0.98 = 15729 -> 5원 호가단위 내림 15725
+    assert book.sells == [("0167A0", 2, 15725)]
+    assert book.cancels == []
+    st = await _get_state()
+    assert st.status == "holding" and st.entry_qty == 2
+    assert st.pending_sell_order_no == "0077001"
+    assert st.pending_sell_qty == 2
+    assert st.pending_sell_event == "exit_eod_forced"
+    assert st.pending_sell_at is not None
+    logs = await _log_rows()
+    assert [l.event_type for l in logs] == ["sell_pending_auction"]
+    assert "0077001" in logs[0].reason and "15725" in logs[0].reason
+
+    # 동시호가 중 추가 폴링(60초/30초 잡) — 재주문·취소·로그 없음
+    await _poll_run(dt.time(15, 25))
+    await _poll_watch(dt.time(15, 26))
+    assert len(book.sells) == 1
+    assert book.cancels == []
+    assert len(await _log_rows()) == 1
+
+    # 15:30 단일가 체결 -> 실보유 0, 15:31 첫 폴링에서 정산
+    book.holdings = 0
+    r = await _poll_run(dt.time(15, 31))
+    st = await _get_state()
+    assert st.status == "idle" and st.entry_price is None and st.entry_qty is None
+    assert st.pending_sell_order_no is None and st.pending_sell_qty is None
+    assert st.pending_sell_event is None and st.pending_sell_at is None
+    logs = await _log_rows()
+    assert [l.event_type for l in logs] == ["sell_pending_auction", "exit_eod_forced"]
+    assert book.cancels == []
+    assert len(book.sells) == 1
+
+
+async def test_auction_eod_sell_not_filled_logs_unconfirmed_keeps_position(monkeypatch):
+    book = _AuctionBook(holdings=2)
+    await _setup_eod_holding(monkeypatch, book)
+    await _poll_run(dt.time(15, 22))
+
+    r = await _poll_run(dt.time(15, 31))  # 보유 그대로 2주
+    assert r["action"] == "sell_unconfirmed"
+    st = await _get_state()
+    assert st.status == "holding" and st.entry_qty == 2
+    assert st.pending_sell_order_no is None and st.pending_sell_at is None
+    assert book.cancels and book.cancels[0][1] == "0077001"
+    logs = await _log_rows()
+    assert logs[-1].event_type == "sell_unconfirmed"
+    assert "동시호가" in logs[-1].reason
+
+
+async def test_auction_eod_sell_partial_fill_updates_qty_and_cancels_remainder(monkeypatch):
+    book = _AuctionBook(holdings=2)
+    await _setup_eod_holding(monkeypatch, book)
+    await _poll_run(dt.time(15, 22))
+
+    book.holdings = 1
+    r = await _poll_run(dt.time(15, 31))
+    assert r["action"] == "sell_partial"
+    st = await _get_state()
+    assert st.status == "holding" and st.entry_qty == 1
+    assert st.pending_sell_order_no is None
+    assert book.cancels == [("0167A0", "0077001", 1)]
+    assert (await _log_rows())[-1].event_type == "sell_unconfirmed"
+
+
+async def test_auction_pending_kept_when_holdings_unreadable(monkeypatch):
+    book = _AuctionBook(holdings=2)
+    await _setup_eod_holding(monkeypatch, book)
+    await _poll_run(dt.time(15, 22))
+
+    class _Broken(_FakeKiwoomClient):
+        async def get_account_holdings_qty(self, code):
+            raise RuntimeError("조회 실패")
+
+    monkeypatch.setattr(auto_trader, "KiwoomClient", _Broken)
+    r = await _poll_run(dt.time(15, 31))
+    assert r["action"] == "sell_pending"
+    st = await _get_state()
+    assert st.pending_sell_order_no == "0077001"
+    assert book.cancels == []
+    assert len(book.sells) == 1
+
+
+async def test_opening_auction_stop_loss_via_watch_rests_then_settles(monkeypatch):
+    book = _AuctionBook(holdings=2)
+    # 매수1호가 16050 vs 진입가 20000 -> 손절. 08:50은 장 시작 동시호가.
+    await _set_state(enabled=True, status="holding", entry_price=20000.0, entry_qty=2)
+    _patch_auction_kiwoom(monkeypatch, book)
+
+    r = await _poll_watch(dt.time(8, 50))
+    assert r["action"] == "sell_pending"
+    assert book.sells == [("0167A0", 2, 15725)]
+    assert book.cancels == []
+    st = await _get_state()
+    assert st.pending_sell_event == "exit_stop_loss"
+
+    await _poll_watch(dt.time(8, 50, 30))  # 30초 뒤 재폴링 — 재주문 없음
+    assert len(book.sells) == 1 and book.cancels == []
+
+    book.holdings = 0
+    await _poll_watch(dt.time(9, 1))
+    st = await _get_state()
+    assert st.status == "idle" and st.pending_sell_order_no is None
+    logs = await _log_rows()
+    assert [l.event_type for l in logs] == ["sell_pending_auction", "exit_stop_loss"]
+
+
+async def test_auction_settle_waits_grace_minute_after_close(monkeypatch):
+    """Phase 5.134 후속 — 15:30 단일가 체결이 잔고(kt00018)에 반영되기 전(15:30:10)에 정산하면
+    실제로 팔렸는데 '미체결'로 오판해 취소·포지션 유지(상태-현실 불일치, 9/4 사고 유형)가 된다.
+    체결 후 1분(15:31)까지는 정산하지 않고 대기를 유지해야 한다."""
+    book = _AuctionBook(holdings=2)
+    await _setup_eod_holding(monkeypatch, book)
+    await _poll_run(dt.time(15, 22))
+
+    # 15:30:10 — 체결됐지만 잔고에 아직 반영 전(실보유 2로 보임)
+    r = await _poll_run(dt.time(15, 30, 10))
+    assert r["action"] == "sell_pending"
+    st = await _get_state()
+    assert st.pending_sell_order_no == "0077001" and st.status == "holding"
+    assert book.cancels == []
+    assert [l.event_type for l in await _log_rows()] == ["sell_pending_auction"]
+
+    # 15:31 — 반영 완료(실보유 0) -> 전량 체결로 정산
+    book.holdings = 0
+    await _poll_run(dt.time(15, 31))
+    st = await _get_state()
+    assert st.status == "idle" and st.pending_sell_order_no is None
+    assert [l.event_type for l in await _log_rows()] == ["sell_pending_auction", "exit_eod_forced"]
+
+
+async def test_opening_auction_settle_waits_until_0901(monkeypatch):
+    book = _AuctionBook(holdings=2)
+    await _set_state(enabled=True, status="holding", entry_price=20000.0, entry_qty=2)
+    _patch_auction_kiwoom(monkeypatch, book)
+    await _poll_watch(dt.time(8, 50))
+    r = await _poll_watch(dt.time(9, 0, 30))  # 09:00 단일가 직후 — 아직 정산하지 않음
+    assert r["action"] == "sell_pending"
+    assert book.cancels == []
+    st = await _get_state()
+    assert st.pending_sell_order_no is not None and st.status == "holding"
+
+
+async def test_regular_hours_sell_still_confirms_and_cancels_immediately(monkeypatch):
+    """정규장(10:00)에서는 기존 동작 그대로 — 즉시 체결 확인, 미체결이면 즉시 취소."""
+    book = _AuctionBook(holdings=2)  # 체결 안 됨
+    await _set_state(enabled=True, status="holding", entry_price=20000.0, entry_qty=2)
+    _patch_auction_kiwoom(monkeypatch, book)
+
+    r = await _poll_watch(dt.time(10, 0))
+    assert r["action"] == "sell_unconfirmed"
+    assert book.sells == [("0167A0", 2, 16050)]  # 할인 없이 매수1호가
+    assert book.cancels and book.cancels[0][1] == "0077001"
+    st = await _get_state()
+    assert st.pending_sell_order_no is None and st.status == "holding"

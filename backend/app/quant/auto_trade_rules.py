@@ -53,10 +53,10 @@
 foreign-position)를 그대로 매핑한 것뿐이다:
 
 - **§5.55-1 진입 시간 필터**: 개장 후 10분(09:00~09:10)·마감 전 10분
-  (15:20~15:30) KST엔 **신규 진입만** 금지(`is_entry_blocked_by_time`). 손절/
+  (15:10~15:30, Phase 5.134에서 15:20->15:10) KST엔 **신규 진입만** 금지(`is_entry_blocked_by_time`). 손절/
   트레일청산/강제청산은 이 함수를 절대 거치지 않으므로 항상 그대로 작동한다.
 - **§5.55-2 장마감 전 조건부 오버나잇 청산**(이번 사고를 직접 막았을 최우선
-  규칙): 15:20 KST 이후 보유 중이면 `evaluate_eod_forced_exit`이 리스크 경보/
+  규칙): 15:10 KST 이후 보유 중이면 `evaluate_eod_forced_exit`이 리스크 경보/
   평가손익/trailing 여부/코스닥 외국인 매도 스트릭 4개를 확인해 하나라도
   실패하면 무조건 청산 판정을 반환한다.
 - **§5.55-3 리스크 경보 연동**: 활성 중엔 신규 진입 금지(호출부 책임) + 보유
@@ -95,13 +95,13 @@ STOP_LOSS_PCT_RISK_ALERT = -0.8
 # §5.55-1: 개장 직후/마감 직전 변동성이 큰 구간 — 신규 진입만 금지(청산은 예외 없음).
 ENTRY_BLOCK_OPEN_START = dt.time(9, 0)
 ENTRY_BLOCK_OPEN_END = dt.time(9, 10)
-ENTRY_BLOCK_CLOSE_START = dt.time(15, 20)
+ENTRY_BLOCK_CLOSE_START = dt.time(15, 10)  # Phase 5.134: 15:20 -> 15:10(강제청산 시작과 동일)
 ENTRY_BLOCK_CLOSE_END = dt.time(15, 30)
 
 # §5.55-2: 장마감 전 조건부 오버나잇 청산 판정 시간대 — ENTRY_BLOCK_CLOSE_*와
-# 같은 15:20~15:30 구간이지만 의미가 다르므로(진입 금지 vs 강제청산 판정) 별도
+# 같은 15:10~15:30 구간이지만 의미가 다르므로(진입 금지 vs 강제청산 판정) 별도
 # 이름의 상수로 둔다.
-EOD_FORCED_EXIT_START = dt.time(15, 20)
+EOD_FORCED_EXIT_START = dt.time(15, 10)  # Phase 5.134: 15:20 -> 15:10(동시호가 전 정규장에서 체결되도록)
 EOD_FORCED_EXIT_END = dt.time(15, 30)
 
 Status = Literal["idle", "holding", "trailing"]
@@ -346,7 +346,7 @@ def check_entry_budget(
 
 
 def is_entry_blocked_by_time(now_kst: dt.time) -> bool:
-    """§5.55-1: 개장 후 10분(09:00~09:10) 또는 마감 전 10분(15:20~15:30, KST)
+    """§5.55-1: 개장 후 10분(09:00~09:10) 또는 마감 전 20분(15:10~15:30, KST; Phase 5.134)
     이면 True — 이 시간대엔 **신규 진입만** 금지한다. 손절/트레일청산/강제청산은
     이 함수를 절대 거치지 않는다(호출부가 진입 판정 경로에서만 이 함수를
     부른다) — 항상 허용이라는 절대 원칙은 이 함수 존재 자체와 무관하게 유지된다.
@@ -364,7 +364,7 @@ def evaluate_eod_forced_exit(
     risk_alert_active: bool,
 ) -> dict[str, Any]:
     """§5.55-2(최우선 규칙 — 2026-08-05 실제 손실 사고를 직접 막았을 규칙):
-    15:20~15:30 KST에 보유 중(holding/trailing)이면 오버나잇 허용 여부를
+    15:10~15:30 KST에 보유 중(holding/trailing)이면 오버나잇 허용 여부를
     판정한다.
 
     판정 순서:
@@ -375,7 +375,7 @@ def evaluate_eod_forced_exit(
        실패하면 무조건 청산:
        a. `unrealized_pnl_positive`(현재가가 진입가보다 높음).
        b. `status == "trailing"`(장중 한 번이라도 +1% 이상 올라 트레일 모드에
-          진입한 이력 — 그냥 "holding"인 채로 15:20을 맞으면 그 자체가 "이
+          진입한 이력 — 그냥 "holding"인 채로 15:10을 맞으면 그 자체가 "이
           진입이 안 먹혔다"는 신호이므로 오버나잇 자격이 없다).
        c. `kosdaq_foreign_streak_ok`(코스닥 외국인 `confirmed_streak >= 0` —
           연속 매도 중이 아님, 호출부가 `/api/markets/regime`에서 계산해
@@ -389,7 +389,7 @@ def evaluate_eod_forced_exit(
     if not (EOD_FORCED_EXIT_START <= now_kst <= EOD_FORCED_EXIT_END):
         return {
             "should_exit": False,
-            "reason": f"15:20~15:30 KST 시간대 아님(now={now_kst}) — 오버나잇 강제청산 판정 대상 아님",
+            "reason": f"15:10~15:30 KST 시간대 아님(now={now_kst}) — 오버나잇 강제청산 판정 대상 아님",
         }
     if status not in ("holding", "trailing"):
         return {
@@ -400,7 +400,7 @@ def evaluate_eod_forced_exit(
     if risk_alert_active:
         return {
             "should_exit": True,
-            "reason": "15:20 이후 첫 폴링: 리스크 경보 활성 중 -> 오버나잇 무조건 청산",
+            "reason": "15:10 이후 첫 폴링: 리스크 경보 활성 중 -> 오버나잇 무조건 청산",
         }
 
     failed_conditions: list[str] = []
@@ -415,14 +415,14 @@ def evaluate_eod_forced_exit(
         return {
             "should_exit": True,
             "reason": (
-                "15:20 이후 오버나잇 조건 미충족(" + ", ".join(failed_conditions) + ") -> 강제 청산"
+                "15:10 이후 오버나잇 조건 미충족(" + ", ".join(failed_conditions) + ") -> 강제 청산"
             ),
         }
 
     return {
         "should_exit": False,
         "reason": (
-            "15:20 이후 오버나잇 조건 3개(평가손익>0, status=trailing, 코스닥 외국인 "
+            "15:10 이후 오버나잇 조건 3개(평가손익>0, status=trailing, 코스닥 외국인 "
             "confirmed_streak>=0) 모두 충족, 리스크 경보도 없음 -> 오버나잇 보유 허용"
         ),
     }
@@ -468,3 +468,57 @@ def evaluate_foreign_flow_reversal_exit(entry_sign: str | None, current_sign: st
         "should_exit": False,
         "reason": f"외인 현물 수급 방향 유지(entry={entry_sign}, current={current_sign}) -> 조기청산 없음",
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.134 — KRX 동시호가 구간(장 시작 08:30~09:00, 장 마감 15:20~15:30)
+# ---------------------------------------------------------------------------
+# 동시호가에는 주문이 접수만 되고 09:00/15:30에 단일가로 한 번에 체결된다 — 주문 직후
+# 체결 확인·취소를 하면 체결 시점에 주문이 남지 않는다(auto_trader 모듈 docstring 참고).
+AUCTION_OPEN_START = dt.time(8, 30)
+AUCTION_OPEN_END = dt.time(9, 0)  # 배타
+AUCTION_CLOSE_START = dt.time(15, 20)
+AUCTION_CLOSE_END = dt.time(15, 30)  # 배타
+
+# 동시호가 매도 지정가 = 매수1호가 x (1 - 2%) — 단일가 체결이라 실제 체결가는 단일가.
+AUCTION_SELL_DISCOUNT_PCT = 2
+
+
+def is_auction_window(now_kst: dt.time) -> bool:
+    """KRX 동시호가 구간이면 True — 08:30<=t<09:00 또는 15:20<=t<15:30(끝은 배타)."""
+    return (AUCTION_OPEN_START <= now_kst < AUCTION_OPEN_END) or (
+        AUCTION_CLOSE_START <= now_kst < AUCTION_CLOSE_END
+    )
+
+
+# 단일가 체결(09:00/15:30) 직후 잔고(kt00018) 반영까지의 유예 — 이 시각 전엔 대기 매도를 정산하지 않는다.
+# 반영 전에 정산하면 실제로 팔렸는데 '미체결'로 오판해 취소·포지션 유지(상태-현실 불일치)가 된다.
+AUCTION_OPEN_SETTLE_AT = dt.time(9, 1)
+AUCTION_CLOSE_SETTLE_AT = dt.time(15, 31)
+
+
+def is_auction_settle_wait(now_kst: dt.time) -> bool:
+    """동시호가 대기 매도를 아직 정산하면 안 되는 구간이면 True — 동시호가 구간 + 체결 후 1분 유예
+    (08:30<=t<09:01 또는 15:20<=t<15:31)."""
+    return (AUCTION_OPEN_START <= now_kst < AUCTION_OPEN_SETTLE_AT) or (
+        AUCTION_CLOSE_START <= now_kst < AUCTION_CLOSE_SETTLE_AT
+    )
+
+
+def krx_tick_size(price: float, etf: bool = True) -> int:
+    """KRX 호가 단위(원). ETF/ETN은 가격과 무관하게 5원, 주식은 2023년 개편 가격대별 단위.
+    이 엔진은 ETF(0167A0)만 거래하므로 기본값은 ETF."""
+    if etf:
+        return 5
+    for upper, tick in ((2_000, 1), (5_000, 5), (20_000, 10), (50_000, 50), (200_000, 100), (500_000, 500)):
+        if price < upper:
+            return tick
+    return 1_000
+
+
+def auction_sell_price(best_bid: float, etf: bool = True) -> int:
+    """동시호가 매도 주문가 — 매수1호가의 98%를 호가 단위로 **내림**한 정수 가격(정수 연산으로
+    부동소수 오차 없음). 체결 우선(낮은 가격)이 목적이라 항상 내림한다."""
+    discounted = int(best_bid) * (100 - AUCTION_SELL_DISCOUNT_PCT) // 100
+    tick = krx_tick_size(discounted, etf)
+    return discounted // tick * tick

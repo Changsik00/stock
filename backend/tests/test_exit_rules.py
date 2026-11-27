@@ -275,7 +275,7 @@ def test_scenarios_match_decide_manual_exit():
     peak = 10000 * 1.015
     d = decide_manual_exit(rules, 10000, peak, bend["exit_price"])
     assert d["action"] == "exit" and d["rule"]["kind"] == "trail_pct"
-    assert not eod["exited"] and "15:20" in eod["result"]
+    assert not eod["exited"] and "15:10" in eod["result"]
     # 청산 직전 가격(한 호가 위)에서는 청산되지 않는다 — 동일 로직 재사용 확인
     assert decide_manual_exit(rules, 10000, peak, bend["exit_price"] + 5)["action"] != "exit"
 
@@ -302,7 +302,7 @@ def test_scenario_regression_reported_case():
 def test_eod_scenario_text_has_no_overnight_exception_for_manual():
     r = _an([R("take_profit_pct", 2), R("stop_loss_pct", 1)])
     eod = r["scenarios"][3]["result"]
-    assert "15:20~15:30" in eod and "오버나잇 예외 없음" in eod and "맞추면 보유" not in eod
+    assert "15:10~15:30" in eod and "오버나잇 예외 없음" in eod and "맞추면 보유" not in eod
 
 
 def test_scenarios_skipped_when_structural_error_or_no_reference():
@@ -342,7 +342,7 @@ def make_state(**kw):
         enabled=True, status="holding", code="0167A0", entry_price=10000, entry_qty=1,
         entry_at=dt.datetime.now(dt.timezone.utc), entry_order_no="1", peak_price=None,
         entry_foreign_flow_sign="positive", entry_source=None, manual_exit_rules=None,
-        updated_at=None,
+        updated_at=None, pending_sell_at=None,  # Phase 5.134
     )
     base.update(kw)
     return SimpleNamespace(**base)
@@ -360,7 +360,7 @@ def sells(monkeypatch):
     """`_execute_sell`을 기록용으로 대체 — 실제 주문 경로는 호출되지 않는다."""
     calls: list[dict] = []
 
-    async def fake_sell(session, state, code, price, event_type, reason, snapshot, result):
+    async def fake_sell(session, state, code, price, event_type, reason, snapshot, result, now_kst=None):
         calls.append({"event": event_type, "reason": reason, "price": price})
         return result
 

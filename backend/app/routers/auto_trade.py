@@ -327,6 +327,16 @@ def _serialize_state(
         "entry_qty": row.entry_qty,
         "entry_at": row.entry_at.isoformat() if row.entry_at else None,
         "entry_order_no": row.entry_order_no,
+        # Phase 5.134 — 동시호가에 낸 매도 주문(체결 대기). 없으면 None.
+        "pending_sell": {
+            "order_no": row.pending_sell_order_no,
+            "qty": row.pending_sell_qty,
+            "event": row.pending_sell_event,
+            "price": float(row.pending_sell_price) if row.pending_sell_price is not None else None,
+            "at": row.pending_sell_at.isoformat(),
+        }
+        if getattr(row, "pending_sell_at", None) is not None
+        else None,
         "peak_price": float(row.peak_price) if row.peak_price is not None else None,
         # PLAN.md §5.55-4(2026-08-06) — 진입 시점 외인 현물 누적 순매수 부호
         # ("positive"|"negative"|None). 이후 반전되면 조기 청산되는 근거값이라

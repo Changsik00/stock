@@ -166,7 +166,7 @@ def _scenarios(rules: list[dict], start: float, base: float, peak: float | None)
         (f"곧장 상승 ({_p(up_top)}까지)", [start, over(up_top)], False),
         (f"{_p(mid)}까지 올랐다가 꺾임", [start, at(mid), under(after_peak)], False),
         (f"오르지 않고 하락 ({_p(down_bot)}까지)", [start, under(down_bot)], False),
-        (f"{_p(lowest_up * 0.5)}까지 오른 뒤 15:20 도달", [start, at(lowest_up * 0.5)], True),
+        (f"{_p(lowest_up * 0.5)}까지 오른 뒤 15:10 도달", [start, at(lowest_up * 0.5)], True),
     ]
     out = []
     for title, way, eod in defs:
@@ -177,7 +177,7 @@ def _scenarios(rules: list[dict], start: float, base: float, peak: float | None)
             text = f"{describe_rule(res['rule'])} 조건으로 약 {_px(res['price'])}({_p(pct)})에 청산"
         elif eod:
             text = (
-                f"조건에 닿지 않고 15:20 도달 — 약 {_px(res['price'])}({_p(pct)})에서 15:20~15:30 장마감 강제청산"
+                f"조건에 닿지 않고 15:10 도달 — 약 {_px(res['price'])}({_p(pct)})에서 15:10~15:30 장마감 강제청산"
                 "(수동 포지션은 오버나잇 예외 없음)"
             )
         else:
@@ -268,7 +268,7 @@ def analyze_rules(
                 )
             else:
                 warnings.append(
-                    "손절 조건이 없습니다. 손실 제한은 15:20 강제청산·외인 수급 반전뿐이며, 그 전까지는 얼마나 "
+                    "손절 조건이 없습니다. 손실 제한은 15:10 강제청산·외인 수급 반전뿐이며, 그 전까지는 얼마나 "
                     "떨어져도 팔리지 않습니다."
                 )
         if has_immediate_trail:
