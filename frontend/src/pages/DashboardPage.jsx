@@ -11,7 +11,6 @@ import {
   fetchEtfWeightChanges,
   fetchFlowConsistency,
   fetchNqComovement,
-  fetchFlowAnomaly,
   fetchFlowLive,
   fetchFlowPath,
   fetchFlowRank,
@@ -39,7 +38,6 @@ import RiskAlertBanner from '../components/RiskAlertBanner'
 import FreshnessBanner from '../components/FreshnessBanner'
 import InvestorFlowSection from '../components/dashboard/InvestorFlowSection'
 import NqComovementCard from '../components/dashboard/NqComovementCard'
-import FlowAnomalyCard from '../components/dashboard/FlowAnomalyCard'
 import MetricTile, { heroEok } from '../components/dashboard/MetricTile'
 import StockDetailModal from '../components/StockDetailModal'
 import StockHeatmap from '../components/StockHeatmap'
@@ -221,7 +219,6 @@ export default function DashboardPage({ onNavigate }) {
   // 장중 외인 매도 일관성(PLAN.md Phase 5.113) — 1분 티어에 합류, 실패 시 마지막 값 유지.
   const [flowConsistency, setFlowConsistency] = useState(null)
   const [nqComovement, setNqComovement] = useState(null)
-  const [flowAnomaly, setFlowAnomaly] = useState(null)
   // 수급 상위 카드 선택(PLAN.md 5.117) — 기본 외국인·순매수
   const [flowRankInvestor, setFlowRankInvestor] = useState('foreign')
   const [flowRankSide, setFlowRankSide] = useState('buy')
@@ -455,14 +452,6 @@ export default function DashboardPage({ onNavigate }) {
         .catch(() => {}) // 실패 시 마지막 값 유지
     }
 
-    function loadFlowAnomaly() {
-      return fetchFlowAnomaly()
-        .then((body) => {
-          if (!cancelled) setFlowAnomaly(body)
-        })
-        .catch(() => {}) // 실패 시 마지막 값 유지
-    }
-
     function loadAttentionTop() {
       return fetchAttention()
         .then((body) => {
@@ -564,7 +553,6 @@ export default function DashboardPage({ onNavigate }) {
           loadFlowLive(),
           loadFlowConsistency(),
           loadNqComovement(),
-          loadFlowAnomaly(),
           loadAttentionTop(),
           loadScalpCandidates(),
           loadIndexTilesLive(),
@@ -2195,13 +2183,6 @@ export default function DashboardPage({ onNavigate }) {
         />
       </div>
 
-      {!STATIC_DATA && (
-        <FlowAnomalyCard
-          data={flowAnomaly}
-          loading={flowAnomaly === null && marketLoading}
-          onRowClick={(row) => openStockModal(row.code, row.name, { market: row.market })}
-        />
-      )}
 
       <Modal open={Boolean(modal)} onClose={closeModal} title={modal?.title}>
         {modal?.type === 'candle' && <CandleModal market={modal.market} />}
