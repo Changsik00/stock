@@ -2098,6 +2098,29 @@ header h1 {
 @keyframes mt-pulse { 50% { opacity: 0.55; } }
 @media (prefers-reduced-motion: reduce) { .mt-skel { animation: none; } }
 
+/* 시장 탭 로딩 스켈레톤 높이(Phase 5.132) — 실제 로드 후 높이(Playwright 실측 390/1280px)에 맞춰 레이아웃 이동을 막는다. */
+.sk-block { width: 100%; border-radius: var(--r-card); }
+.sk-chart { height: 410px; }
+.sk-flow { height: 844px; margin-bottom: var(--sp-4); }
+.sk-breadth { height: 47px; }
+.sk-gauge { height: 315px; }
+.sk-treemap { height: 466px; }
+.sk-fund { height: 782px; margin-top: var(--sp-4); }
+.sk-regime { height: 464px; }
+.sk-rows { display: flex; flex-direction: column; gap: var(--sp-2); height: 404px; padding: var(--sp-3); box-sizing: border-box; overflow: hidden; }
+.sk-row { flex: 0 0 auto; height: 32px; width: 100%; }
+.pm-card[aria-busy='true'] { min-height: 495px; }
+.vr-card[aria-busy='true'] { min-height: 382px; }
+.vr-card.fa-skel { min-height: 392px; }
+@media (min-width: 640px) {
+  .sk-flow { height: 490px; }
+  .sk-gauge { height: 284px; }
+  .sk-regime { height: 265px; }
+  .pm-card[aria-busy='true'] { min-height: 401px; }
+  .vr-card[aria-busy='true'] { min-height: 197px; }
+  .vr-card.fa-skel { min-height: 338px; }
+}
+
 /* --- 오늘 변동성 레짐: 라벨 배지 + 핵심 숫자 하나 + 보조 한 줄, 상세는 접기 --- */
 .vr-title { justify-content: space-between; }
 .vr-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-card); padding: var(--sp-4); }

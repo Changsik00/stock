@@ -1,10 +1,20 @@
+import { SkeletonBlock } from '../Skeleton'
 import { signedEokLabel } from './shared'
 
 // 지금 유입 우세(PLAN.md §5.15) — Phase 5.128에서 대시보드 인라인 블록을 컴포넌트로 빼 시장 탭으로 옮겼다.
 // 문구는 관찰+확률 서술만(명령형·추천형 금지), 신뢰도 낮은 조합은 숨기지 않고 "참고용 · 신호 약함"으로 표시.
 // onKosdaq: '코스닥우세'일 때 '코스닥 보기' 버튼 동작(시장 탭에선 코스닥 탭 전환). 없으면 버튼을 숨긴다.
-export default function RegimeCard({ regime, onKosdaq }) {
-  if (!regime) return null
+// loading: 첫 로드 중에는 제목 + 카드 높이만큼의 스켈레톤을 그려 아래 내용이 밀리지 않게 한다(Phase 5.132).
+export default function RegimeCard({ regime, loading, onKosdaq }) {
+  if (!regime) {
+    if (!loading) return null
+    return (
+      <>
+        <div className="section-title mt-title">지금 유입 우세</div>
+        <SkeletonBlock variant="regime" label="지금 유입 우세 불러오는 중" />
+      </>
+    )
+  }
   return (
     <>
       <div className="section-title mt-title">지금 유입 우세</div>

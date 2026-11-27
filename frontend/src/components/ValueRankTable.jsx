@@ -1,6 +1,7 @@
 import Badge from './Badge'
 import { ShowMoreButton, useShowMore } from './ShowMore'
 import { formatDate } from '../format'
+import { SkeletonRows } from './Skeleton'
 
 // 거래대금 상위 종목 테이블 — "돈이 모이는 곳" (PLAN.md §4.6 3.6-1).
 //
@@ -72,7 +73,7 @@ export default function ValueRankTable({ rows, loading, error, date, live, cache
         {date && <span className="toggle-hint">{basisLabel(date, live, cachedAt)}</span>}
       </div>
 
-      {loading && <div className="state">불러오는 중…</div>}
+      {loading && <SkeletonRows label="순위 불러오는 중" />}
       {error && <div className="state error">{error}</div>}
       {!loading && !error && (!rows || rows.length === 0) && (
         <div className="state">표시할 데이터가 없습니다.</div>

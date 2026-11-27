@@ -1,5 +1,6 @@
 import { ShowMoreButton, useShowMore } from './ShowMore'
 import { formatDate } from '../format'
+import { SkeletonRows } from './Skeleton'
 
 // ETF 경유 수급 상위 테이블 (PLAN.md §4.5, 시장 탭 "ETF 경유 수급 상위").
 //
@@ -94,7 +95,7 @@ export default function FlowPathTable({ loading, error, date, rows, direction = 
         )}
       </div>
 
-      {loading && <div className="state">불러오는 중…</div>}
+      {loading && <SkeletonRows label="순위 불러오는 중" />}
       {error && <div className="state error">{error}</div>}
       {!loading && !error && (!rows || rows.length === 0) && (
         <div className="state">표시할 데이터가 없습니다.</div>

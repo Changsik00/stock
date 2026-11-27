@@ -54,7 +54,7 @@ export default function FlowAnomalyCard({ data, loading, onRowClick }) {
         )}
       </div>
       {loading ? (
-        <div className="vr-card">
+        <div className="vr-card fa-skel" aria-busy="true">
           <Skel w={160} h={26} />
         </div>
       ) : !hasData ? (

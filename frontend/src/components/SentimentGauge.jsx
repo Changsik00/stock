@@ -1,4 +1,5 @@
 import { formatDate } from '../format'
+import { SkeletonBlock } from './Skeleton'
 
 // 시장 종합 매수세/매도세 게이지 (PLAN.md §4.6 3.6-4, §5.43).
 //
@@ -377,7 +378,7 @@ export default function SentimentGauge({ loading, error, score, approx: _approx,
         }
       `}</style>
 
-      {loading && <div className="state">불러오는 중…</div>}
+      {loading && <SkeletonBlock variant="gauge" label="매수세/매도세 게이지 불러오는 중" />}
       {error && <div className="state error">{error}</div>}
 
       {!loading && !error && (

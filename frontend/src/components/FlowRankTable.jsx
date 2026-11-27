@@ -1,6 +1,7 @@
 import Badge from './Badge'
 import { ShowMoreButton, useShowMore } from './ShowMore'
 import { formatDate } from '../format'
+import { SkeletonRows } from './Skeleton'
 
 // 투자자별(외인/기관) 순매수/순매도 상위 종목 테이블 (PLAN.md §4.5/§6 3.5-2b, 시장 탭
 // "수급 상위").
@@ -100,7 +101,7 @@ export default function FlowRankTable({
         {latest && <span className="toggle-hint">{formatDate(latest.date)} 기준 (코스피+코스닥 통합)</span>}
       </div>
 
-      {loading && <div className="state">불러오는 중…</div>}
+      {loading && <SkeletonRows label="순위 불러오는 중" />}
       {error && <div className="state error">{error}</div>}
       {!loading && !error && (!latest || latest.rows.length === 0) && (
         <div className="state">표시할 데이터가 없습니다.</div>

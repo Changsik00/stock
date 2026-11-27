@@ -1,17 +1,5 @@
 import { useEffect, useState } from 'react'
-import {
-  STATIC_DATA,
-  fetchBreadth,
-  fetchBreadthLive,
-  fetchFlowPath,
-  fetchFlowRank,
-  fetchGroupTopStocks,
-  fetchGroups,
-  fetchMacroSeries,
-  fetchMarketIntraday,
-  fetchMarketSeries,
-  fetchSentiment,
-} from '../api'
+import { STATIC_DATA } from '../api'
 import BreadthBadge from '../components/BreadthBadge'
 import CandleChart from '../components/CandleChart'
 import FlowChart from '../components/FlowChart'
@@ -22,11 +10,24 @@ import MarketFundChart from '../components/MarketFundChart'
 import MarketOverviewCards from '../components/MarketOverviewCards'
 import Modal from '../components/Modal'
 import PeriodPicker from '../components/PeriodPicker'
+import { SkeletonBlock, SkeletonRows } from '../components/Skeleton'
 import SentimentGauge from '../components/SentimentGauge'
 import StockDetailModal from '../components/StockDetailModal'
 import StockHeatmap from '../components/StockHeatmap'
 import ValueRankTable from '../components/ValueRankTable'
 import useValueRankAuto from '../useValueRankAuto'
+import {
+  errorText,
+  useBreadth,
+  useFlowPath,
+  useFlowRank,
+  useGroupTopStocks,
+  useGroups,
+  useMacroFundSeries,
+  useMarketIntraday,
+  useMarketSeries,
+  useSentiment,
+} from '../queries'
 import { INTRADAY_OPTIONS, MARKET_FUND_IDS, MARKETS } from '../constants'
 import { formatDate } from '../format'
 
@@ -62,28 +63,11 @@ const VALUE_RANK_MARKET_OPTIONS = [
 // 자기완결 컴포넌트 — /api/groups/top-stocks 기존 캐시를 그대로 쓴다(새 엔드포인트
 // 없음). 렌더는 StockHeatmap(균일 크기 격자, 색=등락률)을 쓴다.
 function GroupTopStocksHeatmap({ groupType, name, onSelectStock }) {
-  const [data, setData] = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
-
-  useEffect(() => {
-    let cancelled = false
-    setLoading(true)
-    setError(null)
-    fetchGroupTopStocks(groupType, name, 10)
-      .then((body) => {
-        if (!cancelled) setData(body)
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e.message)
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [groupType, name])
+  // react-query(Phase 5.132) — 같은 그룹을 다시 열면 캐시를 바로 보여준다.
+  const q = useGroupTopStocks(groupType, name, 10)
+  const data = q.data
+  const loading = q.isPending
+  const error = errorText(q)
 
   const rows = data?.rows || []
 
@@ -108,36 +92,10 @@ function GroupTopStocksHeatmap({ groupType, name, onSelectStock }) {
 export default function MarketPage() {
   const [market, setMarket] = useState('kospi')
   const [days, setDays] = useState(90)
-  const [prices, setPrices] = useState(null)
-  const [flows, setFlows] = useState({})
-  const [error, setError] = useState(null)
-  const [loading, setLoading] = useState(false)
-  const [fundSeries, setFundSeries] = useState({})
-  const [fundError, setFundError] = useState(null)
-  const [fundLoading, setFundLoading] = useState(false)
   const [flowRankInvestor, setFlowRankInvestor] = useState('foreign')
   const [flowRankSide, setFlowRankSide] = useState('buy')
-  const [flowRankDates, setFlowRankDates] = useState([])
-  const [flowRankError, setFlowRankError] = useState(null)
-  const [flowRankLoading, setFlowRankLoading] = useState(false)
-  const [flowPathDate, setFlowPathDate] = useState(null)
-  const [flowPathRows, setFlowPathRows] = useState([])
-  const [flowPathError, setFlowPathError] = useState(null)
-  const [flowPathLoading, setFlowPathLoading] = useState(false)
   const [flowPathDirection, setFlowPathDirection] = useState('in')
-  // 시장 종합 매수세/매도세 게이지(PLAN.md §4.6 3.6-4) — GET /api/markets/sentiment
-  // 응답을 그대로 담는다({ score, approx, components }).
-  const [sentiment, setSentiment] = useState(null)
-  const [sentimentError, setSentimentError] = useState(null)
-  const [sentimentLoading, setSentimentLoading] = useState(false)
-  // 등락 종목수(breadth) 배지 — 시장 탭과 무관하게 코스피/코스닥을 함께 보여준다.
-  // breadth = { kospi, kosdaq, live: bool, date: string|null } (camelCase 변환 완료 상태)
-  const [breadth, setBreadth] = useState(null)
-  const [breadthError, setBreadthError] = useState(null)
   const [groupType, setGroupType] = useState('upjong')
-  const [groupItems, setGroupItems] = useState([])
-  const [groupError, setGroupError] = useState(null)
-  const [groupLoading, setGroupLoading] = useState(false)
   const [valueRankMarket, setValueRankMarket] = useState('all')
   const [rankTab, setRankTab] = useState('value')
   // 거래대금 상위 — 장중엔 라이브, 그 외엔 일별 스냅샷(PLAN.md Phase 5.110). 시장
@@ -164,10 +122,6 @@ export default function MarketPage() {
   // effect). 정적 배포(STATIC_DATA)는 실시간 온디맨드 소스가 없어 'daily'로 시작한다
   // (아래 토글 UI 자체도 STATIC_DATA일 때 숨긴다).
   const [intradayMode, setIntradayMode] = useState(STATIC_DATA || market === 'futures' ? 'daily' : 1)
-  const [intradayBars, setIntradayBars] = useState([])
-  const [intradayDate, setIntradayDate] = useState(null)
-  const [intradayError, setIntradayError] = useState(null)
-  const [intradayLoading, setIntradayLoading] = useState(false)
 
   // 선물 탭에는 분봉 옵션이 없다 — 탭을 선물로 바꾸는 순간 분봉 모드였다면 일봉으로
   // 되돌린다(백엔드가 501을 주는 조합을 아예 요청하지 않도록).
@@ -175,223 +129,57 @@ export default function MarketPage() {
     if (market === 'futures' && intradayMode !== 'daily') setIntradayMode('daily')
   }, [market, intradayMode])
 
-  useEffect(() => {
-    if (STATIC_DATA || intradayMode === 'daily' || market === 'futures') return undefined
-    let cancelled = false
-    setIntradayLoading(true)
-    setIntradayError(null)
-    fetchMarketIntraday(market, intradayMode)
-      .then((body) => {
-        if (!cancelled) {
-          setIntradayBars(body.bars || [])
-          setIntradayDate(body.date)
-        }
-      })
-      .catch((e) => {
-        if (!cancelled) setIntradayError(e.message)
-      })
-      .finally(() => {
-        if (!cancelled) setIntradayLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [market, intradayMode])
+  // 데이터 조회는 모두 queries.js의 react-query 훅(Phase 5.132) — 탭을 오가도 캐시를 먼저 보여주고 신선도가 지나면
+  // 뒤에서 갱신한다. 필터가 바뀌면 직전 값을 유지(keepPreviousData)해 표·차트가 비지 않는다.
+  // 분봉: 일봉 모드·선물 탭·정적 배포에서는 요청하지 않는다(훅의 enabled).
+  const intradayQ = useMarketIntraday(market, intradayMode)
+  const intradayBars = intradayQ.data?.bars || []
+  const intradayDate = intradayQ.data?.date ?? null
+  const intradayError = errorText(intradayQ)
+  const intradayLoading = intradayQ.isLoading
 
-  useEffect(() => {
-    let cancelled = false
-    setLoading(true)
-    setError(null)
-    fetchMarketSeries(market, days)
-      .then((body) => {
-        if (!cancelled) {
-          setPrices(body.prices)
-          setFlows(body.flows || {})
-        }
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e.message)
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [market, days])
+  const seriesQ = useMarketSeries(market, days)
+  const prices = seriesQ.data?.prices ?? null
+  const flows = seriesQ.data?.flows || {}
+  const error = errorText(seriesQ)
+  const loading = seriesQ.isPending
 
-  // 투자자예탁금·신용융자·대차잔고는 시장 전체 지표라 코스피/코스닥/선물 탭과 무관하게
-  // 기간(days)에만 연동한다 (PLAN.md §3.5).
-  useEffect(() => {
-    let cancelled = false
-    setFundLoading(true)
-    setFundError(null)
-    fetchMacroSeries(MARKET_FUND_IDS, days)
-      .then((body) => {
-        if (!cancelled) setFundSeries(body.series || {})
-      })
-      .catch((e) => {
-        if (!cancelled) setFundError(e.message)
-      })
-      .finally(() => {
-        if (!cancelled) setFundLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [days])
+  // 투자자예탁금·신용융자·대차잔고는 시장 전체 지표라 코스피/코스닥/선물 탭과 무관하게 기간(days)에만 연동한다 (PLAN.md §3.5).
+  const fundQ = useMacroFundSeries(MARKET_FUND_IDS, days)
+  const fundSeries = fundQ.data?.series || {}
+  const fundError = errorText(fundQ)
+  const fundLoading = fundQ.isPending
 
-  // 수급 상위(flow_rank)는 시장 탭(코스피/코스닥/선물)과 무관하게 외인/기관 토글,
-  // 순매수/순매도 토글에만 반응한다 — 백엔드가 이미 코스피+코스닥을 통합한 랭킹을
-  // 주기 때문 (PLAN.md §4.5/§6 3.5-2b).
-  useEffect(() => {
-    let cancelled = false
-    setFlowRankLoading(true)
-    setFlowRankError(null)
-    fetchFlowRank(flowRankInvestor, flowRankSide, FLOW_RANK_LOOKBACK_DAYS)
-      .then((body) => {
-        if (!cancelled) setFlowRankDates(body.dates || [])
-      })
-      .catch((e) => {
-        if (!cancelled) setFlowRankError(e.message)
-      })
-      .finally(() => {
-        if (!cancelled) setFlowRankLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [flowRankInvestor, flowRankSide])
+  // 수급 상위(flow_rank)는 시장 탭과 무관하게 외인/기관·순매수/순매도 토글에만 반응한다 (PLAN.md §4.5/§6 3.5-2b).
+  const flowRankQ = useFlowRank(flowRankInvestor, flowRankSide, FLOW_RANK_LOOKBACK_DAYS)
+  const flowRankDates = flowRankQ.data?.dates || []
+  const flowRankError = errorText(flowRankQ)
+  const flowRankLoading = flowRankQ.isPending
 
-  // ETF 경유 수급 상위(flow_path)는 시장 탭과 무관하게 유입/유출 토글에만 반응한다 —
-  // 백엔드가 이미 최신 날짜 하나만 골라 상위 목록을 반환한다 (PLAN.md §4.5, 유출
-  // 토글은 §4.6 3.6-4).
-  useEffect(() => {
-    let cancelled = false
-    setFlowPathLoading(true)
-    setFlowPathError(null)
-    fetchFlowPath(FLOW_RANK_LOOKBACK_DAYS, 30, flowPathDirection)
-      .then((body) => {
-        if (!cancelled) {
-          setFlowPathDate(body.date)
-          setFlowPathRows(body.rows || [])
-        }
-      })
-      .catch((e) => {
-        if (!cancelled) setFlowPathError(e.message)
-      })
-      .finally(() => {
-        if (!cancelled) setFlowPathLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [flowPathDirection])
+  // ETF 경유 수급 상위(flow_path)는 유입/유출 토글에만 반응한다 — 백엔드가 최신 날짜 하나만 골라 반환 (PLAN.md §4.5, §4.6 3.6-4).
+  const flowPathQ = useFlowPath(FLOW_RANK_LOOKBACK_DAYS, 30, flowPathDirection)
+  const flowPathDate = flowPathQ.data?.date ?? null
+  const flowPathRows = flowPathQ.data?.rows || []
+  const flowPathError = errorText(flowPathQ)
+  const flowPathLoading = flowPathQ.isPending
 
-  // 시장 종합 매수세/매도세 게이지 — 페이지 마운트 시 한 번만 불러온다(시장 탭과
-  // 무관, flow-path와 동일 패턴) (PLAN.md §4.6 3.6-4).
-  useEffect(() => {
-    let cancelled = false
-    setSentimentLoading(true)
-    setSentimentError(null)
-    fetchSentiment()
-      .then((body) => {
-        if (!cancelled) setSentiment(body)
-      })
-      .catch((e) => {
-        if (!cancelled) setSentimentError(e.message)
-      })
-      .finally(() => {
-        if (!cancelled) setSentimentLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  // 시장 종합 매수세/매도세 게이지 — GET /api/markets/sentiment 응답({ score, approx, components }) (PLAN.md §4.6 3.6-4).
+  const sentimentQ = useSentiment()
+  const sentiment = sentimentQ.data ?? null
+  const sentimentError = errorText(sentimentQ)
+  const sentimentLoading = sentimentQ.isPending
 
-  // 등락 종목수 배지 — 장중엔 live(60초 서버 캐시) 우선, 실패 시 일별 최신 확정치로
-  // 폴백한다 (PLAN.md §3.5/§4.6 3.6-2). 백엔드 응답은 snake_case(limit_up/limit_down)
-  // 이므로 BreadthBadge가 기대하는 camelCase로 여기서 변환한다.
-  useEffect(() => {
-    let cancelled = false
-    const toCamel = (row) =>
-      row
-        ? {
-            adv: row.adv,
-            dec: row.dec,
-            flat: row.flat,
-            limitUp: row.limit_up ?? row.limitUp,
-            limitDown: row.limit_down ?? row.limitDown,
-          }
-        : null
-
-    async function load() {
-      try {
-        const body = await fetchBreadthLive()
-        if (cancelled) return
-        setBreadth({
-          kospi: toCamel(body.kospi),
-          kosdaq: toCamel(body.kosdaq),
-          live: body.live !== false,
-          // 정적 모드 폴백 행에는 date가 있다(일별 스냅샷) — live 응답에는 없음.
-          date: body.kospi?.date || body.kosdaq?.date || null,
-        })
-        return
-      } catch {
-        // live 실패(장 마감 후 소스 장애 등) — 일별 최신 확정치로 폴백.
-      }
-      try {
-        const [kospiBody, kosdaqBody] = await Promise.all([
-          fetchBreadth('kospi', 30).catch(() => null),
-          fetchBreadth('kosdaq', 30).catch(() => null),
-        ])
-        if (cancelled) return
-        const last = (body) => {
-          const series = body?.series
-          return series && series.length > 0 ? series[series.length - 1] : null
-        }
-        const kospiRow = last(kospiBody)
-        const kosdaqRow = last(kosdaqBody)
-        if (!kospiRow && !kosdaqRow) {
-          setBreadthError('등락 종목수 데이터를 불러오지 못했습니다.')
-          return
-        }
-        setBreadth({
-          kospi: toCamel(kospiRow),
-          kosdaq: toCamel(kosdaqRow),
-          live: false,
-          date: kospiRow?.date || kosdaqRow?.date || null,
-        })
-      } catch (e) {
-        if (!cancelled) setBreadthError(e.message)
-      }
-    }
-
-    load()
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  // 등락 종목수 배지 — 장중엔 live(60초 서버 캐시) 우선, 실패 시 일별 최신 확정치로 폴백한다(queries.js loadBreadth).
+  // breadth = { kospi, kosdaq, live, date } (camelCase 변환 완료)
+  const breadthQ = useBreadth()
+  const breadth = breadthQ.data ?? null
+  const breadthError = errorText(breadthQ)
 
   // 업종/테마 트리맵 — 토글(groupType)에만 반응한다 (PLAN.md §4.6 3.6-3).
-  useEffect(() => {
-    let cancelled = false
-    setGroupLoading(true)
-    setGroupError(null)
-    fetchGroups(groupType)
-      .then((items) => {
-        if (!cancelled) setGroupItems(items || [])
-      })
-      .catch((e) => {
-        if (!cancelled) setGroupError(e.message)
-      })
-      .finally(() => {
-        if (!cancelled) setGroupLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [groupType])
+  const groupsQ = useGroups(groupType)
+  const groupItems = groupsQ.data || []
+  const groupError = errorText(groupsQ)
+  const groupLoading = groupsQ.isPending
 
   const latest = prices?.length ? prices[prices.length - 1] : null
   const hasFlows = Object.keys(flows || {}).length > 0
@@ -487,6 +275,11 @@ export default function MarketPage() {
           섹션 자체를 숨긴다(선물엔 등락 종목수 개념이 없음). BreadthBadge의 market prop이
           그 필터링을 맡는다 — 대시보드 모달처럼 market을 안 넘기면 기존과 동일하게
           코스피+코스닥 두 줄이 모두 나온다. */}
+      {flowCapableMarket && breadthQ.isPending && (
+        <div className="breadth-panel">
+          <SkeletonBlock variant="breadth" label="등락 종목수 불러오는 중" />
+        </div>
+      )}
       {flowCapableMarket && (breadth || breadthError) && (
         <div className="breadth-panel">
           {breadth && (
@@ -508,7 +301,7 @@ export default function MarketPage() {
 
       {intradayMode === 'daily' && (
         <>
-          {loading && <div className="state">불러오는 중…</div>}
+          {loading && <SkeletonBlock variant="chart" label="차트 불러오는 중" />}
           {error && <div className="state error">{error}</div>}
           {!loading && !error && prices && prices.length === 0 && (
             <div className="state">해당 기간에 표시할 데이터가 없습니다.</div>
@@ -519,7 +312,7 @@ export default function MarketPage() {
 
       {intradayMode !== 'daily' && (
         <>
-          {intradayLoading && <div className="state">불러오는 중…</div>}
+          {intradayLoading && <SkeletonBlock variant="chart" label="차트 불러오는 중" />}
           {intradayError && <div className="state error">{intradayError}</div>}
           {!intradayLoading && !intradayError && intradayBars.length === 0 && (
             <div className="state">오늘 분봉 데이터가 없습니다(장 시작 전이거나 휴장일 수 있음).</div>
@@ -535,6 +328,12 @@ export default function MarketPage() {
         </>
       )}
 
+      {loading && flowCapableMarket && (
+        <>
+          <div className="section-title">투자자별 수급</div>
+          <SkeletonBlock variant="flow" label="투자자별 수급 불러오는 중" />
+        </>
+      )}
       {!loading && flowCapableMarket && (
         <>
           <div className="section-title">투자자별 수급</div>
@@ -584,7 +383,7 @@ export default function MarketPage() {
         ))}
         <span className="toggle-hint">일별 스냅샷 · 색 = 등락률</span>
       </div>
-      {groupLoading && <div className="state">불러오는 중…</div>}
+      {groupLoading && <SkeletonBlock variant="treemap" label="업종·테마 불러오는 중" />}
       {groupError && <div className="state error">{groupError}</div>}
       {!groupLoading && !groupError && (
         <GroupTreemap
@@ -595,7 +394,7 @@ export default function MarketPage() {
       )}
 
       <div className="section-title">시장 자금·대차</div>
-      {fundLoading && <div className="state">불러오는 중…</div>}
+      {fundLoading && <SkeletonBlock variant="fund" label="시장 자금·대차 불러오는 중" />}
       {fundError && <div className="state error">{fundError}</div>}
       {!fundLoading && !fundError && <MarketFundChart seriesMap={fundSeries} />}
 
